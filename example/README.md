@@ -1,6 +1,6 @@
 # C++ Schema Registry Client Examples
 
-This directory contains C++ examples that demonstrate how to use the cpp-schema-registry-client library.
+This directory contains C++ examples that demonstrate how to use the libschemaregistry library.
 
 ## Examples
 
@@ -64,7 +64,7 @@ A Kafka producer that encrypts and serializes Avro messages using field-level en
 - C++17 compatible compiler (C++20 is required for data quality rules on Windows)
 - CMake 3.22+
 - librdkafka development libraries
-- cpp-schema-registry-client library
+- libschemaregistry library
 - Tink crypto library (for encryption examples)
 
 ### Build Instructions

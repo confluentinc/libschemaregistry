@@ -5,7 +5,7 @@ A C++ client library for interacting with the
 
 ## The library
 
-`cpp-schema-registry-client` provides a Schema Registry client, along with serdes (serializers/deserializers) for
+`libschemaregistry` provides a Schema Registry client, along with serdes (serializers/deserializers) for
 Avro, Protobuf, and JSON Schema.
 
 ### Features
@@ -50,4 +50,4 @@ This project installs a CMake package called `schemaregistry`. The installed tar
 
 ## Examples
 
-You can find examples in the [example](https://github.com/rayokota/cpp-schema-registry-client/blob/master/example/README.md) folder.
+You can find examples in the [example](https://github.com/confluentinc/libschemaregistry/blob/master/example/README.md) folder.
