@@ -12,18 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Comment out problematic includes that don't exist
-// #include "buf/validate/internal/extra_func.h"
-
 #include <string>
 #include <string_view>
 
 #include "absl/strings/match.h"
 #include "absl/strings/str_split.h"
-// Comment out buf/validate includes that don't exist
-// #include "buf/validate/internal/lib/ipv4.h"
-// #include "buf/validate/internal/lib/ipv6.h"
-// #include "buf/validate/internal/lib/uri.h"
 #include "eval/public/cel_function_adapter.h"
 #include "eval/public/cel_value.h"
 #include "eval/public/containers/container_backed_map_impl.h"
