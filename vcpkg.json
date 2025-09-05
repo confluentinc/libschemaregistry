@@ -1,0 +1,30 @@
+{
+  "name": "schemaregistry",
+  "version": "0.1.0",
+  "dependencies": [
+    "abseil",
+    "avro-cpp",
+    {
+      "name": "aws-sdk-cpp",
+      "default-features": false,
+      "features": [
+        "kms",
+        "identity-management"
+      ]
+    },
+    "azure-identity-cpp",
+    "azure-security-keyvault-keys-cpp",
+    {
+      "name": "google-cloud-cpp",
+      "features": [
+        "kms"
+      ]
+    },
+    "jsoncons",
+    "libvault",
+    "nlohmann-json",
+    "openssl",
+    "protobuf",
+    "cpr"
+  ]
+}
