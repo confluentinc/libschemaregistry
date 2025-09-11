@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+
+include(${CMAKE_CURRENT_LIST_DIR}/schemaregistryTargets.cmake)
+
+# Optionally locate common dependencies; they are only required if your
+# build consumes public headers that reference these libraries.
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  find_package(nlohmann_json QUIET)
+endif()
+
+if(NOT TARGET cpr::cpr)
+  find_package(cpr QUIET)
+endif()
+
+if(NOT TARGET protobuf::libprotobuf)
+  find_package(protobuf QUIET)
+endif()
+
+check_required_components("schemaregistry")
+
+
