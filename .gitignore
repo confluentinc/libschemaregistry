@@ -1,0 +1,25 @@
+# CMake generated build files
+build
+CMakeCache.txt
+CMakeUserPresets.json
+CTestTestfile.cmake
+CPackConfig.cmake
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CMakeFiles
+CMakeScripts
+Makefile
+Testing
+_deps
+.cmake
+
+# vcpkg build artifacts
+vcpkg_installed
+
+# Executables and libraries
+schemaregistry-test
+
+# IDE specific files (e.g., CLion, VS Code)
+.idea
+.vscode
