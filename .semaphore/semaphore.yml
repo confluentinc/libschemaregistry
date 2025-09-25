@@ -10,6 +10,7 @@ queue:
 
 blocks:
   - name: "Build and Test - Linux GCC"
+    dependencies: []
     task:
       env_vars:
         - name: VCPKG_TARGET_TRIPLET
@@ -66,6 +67,7 @@ blocks:
           - cache store cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
 
   - name: "Build and Test - macOS Clang"
+    dependencies: []
     task:
       agent:
         machine:
@@ -128,6 +130,7 @@ blocks:
           - cache store cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
 
   - name: "Build and Test - Windows MSVC"
+    dependencies: []
     task:
       agent:
         machine:
