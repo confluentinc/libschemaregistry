@@ -66,11 +66,10 @@ blocks:
           - cache store cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
 
   - name: "Build and Test - macOS Clang"
+    agent:
+      machine:
+        type: s1-prod-macos-13-5-arm64
     task:
-      agent:
-        machine:
-          type: s1-prod-macos-13-5-arm64
-      
       env_vars:
         - name: VCPKG_TARGET_TRIPLET
           value: "arm64-osx-release"
@@ -128,11 +127,10 @@ blocks:
           - cache store cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
 
   - name: "Build and Test - Windows MSVC"
+    agent:
+      machine:
+        type: s1-prod-windows
     task:
-      agent:
-        machine:
-          type: s1-prod-windows 
-      
       env_vars:
         - name: VCPKG_TARGET_TRIPLET
           value: "x64-windows-release"
