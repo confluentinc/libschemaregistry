@@ -5,6 +5,8 @@ agent:
     type: s1-prod-ubuntu24-04-amd64-1
 execution_time_limit:
   hours: 4
+queue:
+  processing: parallel
 
 blocks:
   - name: "Build and Test - Linux GCC"
@@ -84,6 +86,10 @@ blocks:
       prologue:
         commands:
           - checkout
+          - brew install openjdk@11
+          - sudo ln -sfn /usr/local/opt/openjdk@11/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-11.jdk
+          - export JAVA_HOME=/Library/Java/JavaVirtualMachines/openjdk-11.jdk/Contents/Home
+          - export PATH="$JAVA_HOME/bin:$PATH"
           - cache restore cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-macos-$SEMAPHORE_GIT_BRANCH,cmake-build-macos
           
       jobs:
@@ -142,6 +148,8 @@ blocks:
       prologue:
         commands:
           - checkout
+          - choco install openjdk11 -y
+          - refreshenv
           - cache restore cmake-build-windows-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-windows-$SEMAPHORE_GIT_BRANCH,cmake-build-windows
           
       jobs:
@@ -152,9 +160,6 @@ blocks:
             
             # Setup MSVC environment
             - call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-            
-            # Add JDK to PATH
-            - set "PATH=%JAVA_HOME_11_X64%\bin;%PATH%"
             
             # Setup vcpkg
             - |
