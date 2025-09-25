@@ -1,6 +1,5 @@
 version: v1.0
-name: CMake Multi-Platform Build
-
+name: "libschemaregistry build pipeline"
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-1
@@ -23,6 +22,7 @@ blocks:
       prologue:
         commands:
           - checkout
+          - sem-version java 11
           - cache restore cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-$SEMAPHORE_GIT_BRANCH,cmake-build
           
       jobs:
