@@ -152,7 +152,6 @@ blocks:
         commands:
           - checkout
           - choco install openjdk11 -y
-          - refreshenv
           - cache restore cmake-build-windows-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-windows-$SEMAPHORE_GIT_BRANCH,cmake-build-windows
           
       jobs:
