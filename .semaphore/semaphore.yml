@@ -185,9 +185,3 @@ blocks:
       epilogue:
         commands:
           - cache store cmake-build-windows-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
-
-promotions:
-  - name: Auto-promote on master
-    pipeline_file: release.yml
-    auto_promote:
-      when: "result = 'passed' and branch = 'master'"
