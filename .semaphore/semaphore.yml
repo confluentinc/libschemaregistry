@@ -3,6 +3,8 @@ name: "libschemaregistry build pipeline"
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-1
+execution_time_limit:
+  hours: 4
 
 blocks:
   - name: "Build and Test - Linux GCC"
