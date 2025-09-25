@@ -1,0 +1,193 @@
+version: v1.0
+name: CMake Multi-Platform Build
+
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2004
+
+blocks:
+  - name: "Build and Test - Linux GCC"
+    task:
+      env_vars:
+        - name: VCPKG_TARGET_TRIPLET
+          value: "x64-linux-release"
+        - name: VCPKG_HOST_TRIPLET
+          value: "x64-linux-release"
+        - name: BUILD_TYPE
+          value: "Release"
+        - name: C_COMPILER
+          value: "gcc"
+        - name: CXX_COMPILER
+          value: "g++"
+      
+      prologue:
+        commands:
+          - checkout
+          - cache restore cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-$SEMAPHORE_GIT_BRANCH,cmake-build
+          
+      jobs:
+        - name: Build and Test
+          commands:
+            # Install dependencies
+            - sudo apt-get update
+            - sudo apt-get install -y ninja-build cmake pkg-config curl zip unzip tar
+            
+            # Setup vcpkg
+            - |
+              if [ ! -d "/tmp/vcpkg" ]; then
+                git clone https://github.com/Microsoft/vcpkg.git /tmp/vcpkg
+                /tmp/vcpkg/bootstrap-vcpkg.sh
+              fi
+            
+            # Configure CMake
+            - |
+              cmake -G Ninja -B build \
+                -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
+                -DCMAKE_C_COMPILER=$C_COMPILER \
+                -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+                -DCMAKE_TOOLCHAIN_FILE=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake \
+                -DVCPKG_TARGET_TRIPLET=$VCPKG_TARGET_TRIPLET \
+                -DVCPKG_HOST_TRIPLET=$VCPKG_HOST_TRIPLET \
+                -DVCPKG_BUILD_TYPE=release \
+                -S .
+            
+            # Build
+            - cmake --build build --config $BUILD_TYPE
+            
+            # Test
+            - cd build && ctest --build-config $BUILD_TYPE
+      
+      epilogue:
+        commands:
+          - cache store cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
+
+  - name: "Build and Test - macOS Clang"
+    task:
+      agent:
+        machine:
+          type: a1-standard-4
+          os_image: macos-xcode14
+      
+      env_vars:
+        - name: VCPKG_TARGET_TRIPLET
+          value: "arm64-osx-release"
+        - name: VCPKG_HOST_TRIPLET
+          value: "arm64-osx-release"
+        - name: BUILD_TYPE
+          value: "Release"
+        - name: C_COMPILER
+          value: "clang"
+        - name: CXX_COMPILER
+          value: "clang++"
+      
+      prologue:
+        commands:
+          - checkout
+          - cache restore cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-macos-$SEMAPHORE_GIT_BRANCH,cmake-build-macos
+          
+      jobs:
+        - name: Build and Test
+          commands:
+            # Install dependencies
+            - brew install ninja cmake
+            
+            # Setup vcpkg
+            - |
+              if [ ! -d "/tmp/vcpkg" ]; then
+                git clone https://github.com/Microsoft/vcpkg.git /tmp/vcpkg
+                /tmp/vcpkg/bootstrap-vcpkg.sh
+              fi
+            
+            # Configure CMake
+            - |
+              cmake -G Ninja -B build \
+                -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
+                -DCMAKE_C_COMPILER=$C_COMPILER \
+                -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+                -DCMAKE_TOOLCHAIN_FILE=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake \
+                -DVCPKG_TARGET_TRIPLET=$VCPKG_TARGET_TRIPLET \
+                -DVCPKG_HOST_TRIPLET=$VCPKG_HOST_TRIPLET \
+                -DVCPKG_BUILD_TYPE=release \
+                -S .
+            
+            # Build
+            - cmake --build build --config $BUILD_TYPE
+            
+            # Test
+            - cd build && ctest --build-config $BUILD_TYPE
+      
+      epilogue:
+        commands:
+          - cache store cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
+
+  - name: "Build and Test - Windows MSVC"
+    task:
+      agent:
+        machine:
+          type: e1-standard-4
+          os_image: windows-server-2019
+      
+      env_vars:
+        - name: VCPKG_TARGET_TRIPLET
+          value: "x64-windows-release"
+        - name: VCPKG_HOST_TRIPLET
+          value: "x64-windows-release"
+        - name: BUILD_TYPE
+          value: "Release"
+        - name: C_COMPILER
+          value: "cl"
+        - name: CXX_COMPILER
+          value: "cl"
+      
+      prologue:
+        commands:
+          - checkout
+          - cache restore cmake-build-windows-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-windows-$SEMAPHORE_GIT_BRANCH,cmake-build-windows
+          
+      jobs:
+        - name: Build and Test
+          commands:
+            # Install dependencies
+            - choco install -y ninja cmake
+            
+            # Setup MSVC environment
+            - call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            
+            # Add JDK to PATH
+            - set "PATH=%JAVA_HOME_11_X64%\bin;%PATH%"
+            
+            # Setup vcpkg
+            - |
+              if not exist "C:\vcpkg" (
+                git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+                C:\vcpkg\bootstrap-vcpkg.bat
+              )
+            
+            # Configure CMake
+            - |
+              cmake -G Ninja -B build ^
+                -DCMAKE_CXX_COMPILER=%CXX_COMPILER% ^
+                -DCMAKE_C_COMPILER=%C_COMPILER% ^
+                -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
+                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+                -DVCPKG_TARGET_TRIPLET=%VCPKG_TARGET_TRIPLET% ^
+                -DVCPKG_HOST_TRIPLET=%VCPKG_HOST_TRIPLET% ^
+                -DVCPKG_BUILD_TYPE=release ^
+                -S .
+            
+            # Build
+            - cmake --build build --config %BUILD_TYPE%
+            
+            # Test
+            - cd build && ctest --build-config %BUILD_TYPE%
+      
+      epilogue:
+        commands:
+          - cache store cmake-build-windows-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
+
+promotions:
+  - name: Auto-promote on master
+    pipeline_file: release.yml
+    auto_promote:
+      when: "result = 'passed' and branch = 'master'"
