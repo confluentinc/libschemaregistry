@@ -1,13 +1,16 @@
 version: v1.0
-name: CMake Multi-Platform Build
-
+name: "libschemaregistry build pipeline"
 agent:
   machine:
-    type: e1-standard-2
-    os_image: ubuntu2004
+    type: s1-prod-ubuntu24-04-amd64-1
+execution_time_limit:
+  hours: 4
+queue:
+  processing: parallel
 
 blocks:
   - name: "Build and Test - Linux GCC"
+    dependencies: []
     task:
       env_vars:
         - name: VCPKG_TARGET_TRIPLET
@@ -24,6 +27,7 @@ blocks:
       prologue:
         commands:
           - checkout
+          - sem-version java 11
           - cache restore cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-$SEMAPHORE_GIT_BRANCH,cmake-build
           
       jobs:
@@ -63,11 +67,11 @@ blocks:
           - cache store cmake-build-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
 
   - name: "Build and Test - macOS Clang"
+    dependencies: []
     task:
       agent:
         machine:
-          type: a1-standard-4
-          os_image: macos-xcode14
+          type: s1-prod-macos-13-5-arm64
       
       env_vars:
         - name: VCPKG_TARGET_TRIPLET
@@ -84,6 +88,12 @@ blocks:
       prologue:
         commands:
           - checkout
+          - brew install openjdk@11
+          - export HOMEBREW_PREFIX="$(brew --prefix)"
+          - sudo ln -sfn "$HOMEBREW_PREFIX/opt/openjdk@11/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-11.jdk
+          - export JAVA_HOME="$(/usr/libexec/java_home -v 11)"
+          - export PATH="$JAVA_HOME/bin:$PATH"
+          - java -version
           - cache restore cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-macos-$SEMAPHORE_GIT_BRANCH,cmake-build-macos
           
       jobs:
@@ -122,11 +132,11 @@ blocks:
           - cache store cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID build
 
   - name: "Build and Test - Windows MSVC"
+    dependencies: []
     task:
       agent:
         machine:
-          type: e1-standard-4
-          os_image: windows-server-2019
+          type: s1-prod-windows 
       
       env_vars:
         - name: VCPKG_TARGET_TRIPLET
@@ -143,6 +153,7 @@ blocks:
       prologue:
         commands:
           - checkout
+          - choco install openjdk11 -y
           - cache restore cmake-build-windows-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-windows-$SEMAPHORE_GIT_BRANCH,cmake-build-windows
           
       jobs:
@@ -152,35 +163,60 @@ blocks:
             - choco install -y ninja cmake
             
             # Setup MSVC environment
-            - call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-            
-            # Add JDK to PATH
-            - set "PATH=%JAVA_HOME_11_X64%\bin;%PATH%"
+            - |
+              $vcvars = $null
+              $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+              if (Test-Path $vswhere) {
+                $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+                if ($vsPath) {
+                  $candidate = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+                  if (Test-Path $candidate) { $vcvars = $candidate }
+                }
+              }
+              if (-not $vcvars) {
+                $candidates = @(
+                  'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+                )
+                foreach ($p in $candidates) { if (Test-Path $p) { $vcvars = $p; break } }
+              }
+              if (-not $vcvars) { throw "vcvars64.bat not found" }
+              cmd /c "`"$vcvars`" && set" | ForEach-Object {
+                if ($_ -match '^(.*?)=(.*)$') {
+                  [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2])
+                }
+              }
             
             # Setup vcpkg
             - |
-              if not exist "C:\vcpkg" (
+              if (!(Test-Path "C:\vcpkg")) {
                 git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-                C:\vcpkg\bootstrap-vcpkg.bat
-              )
+                & C:\vcpkg\bootstrap-vcpkg.bat
+              }
             
             # Configure CMake
             - |
-              cmake -G Ninja -B build ^
-                -DCMAKE_CXX_COMPILER=%CXX_COMPILER% ^
-                -DCMAKE_C_COMPILER=%C_COMPILER% ^
-                -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
-                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-                -DVCPKG_TARGET_TRIPLET=%VCPKG_TARGET_TRIPLET% ^
-                -DVCPKG_HOST_TRIPLET=%VCPKG_HOST_TRIPLET% ^
-                -DVCPKG_BUILD_TYPE=release ^
+              cmake -G Ninja -B build `
+                -DCMAKE_CXX_COMPILER=$env:CXX_COMPILER `
+                -DCMAKE_C_COMPILER=$env:C_COMPILER `
+                -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
+                -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET `
+                -DVCPKG_HOST_TRIPLET=$env:VCPKG_HOST_TRIPLET `
+                -DVCPKG_BUILD_TYPE=release `
                 -S .
             
             # Build
-            - cmake --build build --config %BUILD_TYPE%
+            - cmake --build build --config $env:BUILD_TYPE
             
             # Test
-            - cd build && ctest --build-config %BUILD_TYPE%
+            - cd build; ctest --build-config $env:BUILD_TYPE
       
       epilogue:
         commands:
