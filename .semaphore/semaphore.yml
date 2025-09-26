@@ -206,11 +206,16 @@ blocks:
             - |
               if (!(Test-Path "C:\vcpkg")) {
                 git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-                & C:\vcpkg\bootstrap-vcpkg.bat
+                & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+              } else {
+                git -C C:\vcpkg pull --ff-only
+                if (Test-Path C:\vcpkg\bootstrap-vcpkg.bat) { & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics }
               }
             
             # Configure CMake
             - |
+              $triplet = $env:VCPKG_TARGET_TRIPLET
+              $hostTriplet = $env:VCPKG_HOST_TRIPLET
               $ninja = $null
               $candidates = @(
                 (Get-Command ninja -ErrorAction SilentlyContinue).Path,
@@ -226,8 +231,8 @@ blocks:
                 -DCMAKE_C_COMPILER=$env:C_COMPILER `
                 -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
                 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
-                -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET `
-                -DVCPKG_HOST_TRIPLET=$env:VCPKG_HOST_TRIPLET `
+                -DVCPKG_TARGET_TRIPLET=$triplet `
+                -DVCPKG_HOST_TRIPLET=$hostTriplet `
                 -DVCPKG_BUILD_TYPE=release `
                 -S .
             
