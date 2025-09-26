@@ -163,32 +163,38 @@ blocks:
             - choco install -y ninja cmake
             
             # Setup MSVC environment
-            - call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            - |
+              $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat'
+              cmd /c """$vcvars"" && set" | ForEach-Object {
+                if ($_ -match '^(.*?)=(.*)$') {
+                  [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2])
+                }
+              }
             
             # Setup vcpkg
             - |
-              if not exist "C:\vcpkg" (
+              if (!(Test-Path "C:\vcpkg")) {
                 git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-                C:\vcpkg\bootstrap-vcpkg.bat
-              )
+                & C:\vcpkg\bootstrap-vcpkg.bat
+              }
             
             # Configure CMake
             - |
-              cmake -G Ninja -B build ^
-                -DCMAKE_CXX_COMPILER=%CXX_COMPILER% ^
-                -DCMAKE_C_COMPILER=%C_COMPILER% ^
-                -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
-                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-                -DVCPKG_TARGET_TRIPLET=%VCPKG_TARGET_TRIPLET% ^
-                -DVCPKG_HOST_TRIPLET=%VCPKG_HOST_TRIPLET% ^
-                -DVCPKG_BUILD_TYPE=release ^
+              cmake -G Ninja -B build `
+                -DCMAKE_CXX_COMPILER=$env:CXX_COMPILER `
+                -DCMAKE_C_COMPILER=$env:C_COMPILER `
+                -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
+                -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET `
+                -DVCPKG_HOST_TRIPLET=$env:VCPKG_HOST_TRIPLET `
+                -DVCPKG_BUILD_TYPE=release `
                 -S .
             
             # Build
-            - cmake --build build --config %BUILD_TYPE%
+            - cmake --build build --config $env:BUILD_TYPE
             
             # Test
-            - cd build && ctest --build-config %BUILD_TYPE%
+            - cd build; ctest --build-config $env:BUILD_TYPE
       
       epilogue:
         commands:
