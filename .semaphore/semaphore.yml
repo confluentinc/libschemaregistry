@@ -211,7 +211,17 @@ blocks:
             
             # Configure CMake
             - |
+              $ninja = $null
+              $candidates = @(
+                (Get-Command ninja -ErrorAction SilentlyContinue).Path,
+                'C:\\ProgramData\\chocolatey\\bin\\ninja.exe',
+                'C:\\Program Files\\Ninja\\ninja.exe',
+                'C:\\Tools\\ninja\\ninja.exe'
+              )
+              foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { $ninja = $p; break } }
+              if (-not $ninja) { throw 'Ninja not found on PATH after install' }
               cmake -G Ninja -B build `
+                -DCMAKE_MAKE_PROGRAM="${ninja}" `
                 -DCMAKE_CXX_COMPILER=$env:CXX_COMPILER `
                 -DCMAKE_C_COMPILER=$env:C_COMPILER `
                 -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
