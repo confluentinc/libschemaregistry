@@ -166,17 +166,40 @@ blocks:
             - |
               $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
               if (Test-Path $chocoBin) { $env:PATH = "$chocoBin;$env:PATH" }
-              $refreshEnv = Join-Path $chocoBin 'RefreshEnv.cmd'
-              if (Test-Path $refreshEnv) { & $refreshEnv }
+              $profileModule = Join-Path $env:ChocolateyInstall 'helpers\chocolateyProfile.psm1'
+              if (Test-Path $profileModule) { Import-Module $profileModule; if (Get-Command refreshenv -ErrorAction SilentlyContinue) { refreshenv } }
               $cmakeBin = 'C:\Program Files\CMake\bin'
               if (Test-Path $cmakeBin) { $env:PATH = "$cmakeBin;$env:PATH" }
               cmake --version
               ninja --version
               $javaCmd = Get-Command java -ErrorAction SilentlyContinue
               if (-not $javaCmd) {
-                $jdkRoot = 'C:\Program Files\OpenJDK'
-                if (Test-Path $jdkRoot) {
-                  $jdkDir = Get-ChildItem $jdkRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+                $roots = @(
+                  'C:\\Program Files\\OpenJDK',
+                  'C:\\Program Files\\Eclipse Adoptium',
+                  'C:\\Program Files\\AdoptOpenJDK',
+                  'C:\\Program Files\\Java'
+                )
+                foreach ($root in $roots) {
+                  if (Test-Path $root) {
+                    $jdkDir = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+                    if ($jdkDir) {
+                      $candidateBin = Join-Path $jdkDir.FullName 'bin'
+                      if (Test-Path (Join-Path $candidateBin 'java.exe')) {
+                        $env:JAVA_HOME = $jdkDir.FullName
+                        $env:PATH = $candidateBin + ';' + $env:PATH
+                        break
+                      }
+                    }
+                  }
+                }
+              }
+              if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
+                choco install -y temurin11
+                if (Test-Path $profileModule) { Import-Module $profileModule; if (Get-Command refreshenv -ErrorAction SilentlyContinue) { refreshenv } }
+                $adoptiumRoot = 'C:\\Program Files\\Eclipse Adoptium'
+                if (Test-Path $adoptiumRoot) {
+                  $jdkDir = Get-ChildItem $adoptiumRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
                   if ($jdkDir) {
                     $env:JAVA_HOME = $jdkDir.FullName
                     $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:PATH
