@@ -161,6 +161,10 @@ blocks:
           commands:
             # Install dependencies
             - choco install -y ninja cmake
+            - |
+              $cmakeBin = 'C:\Program Files\CMake\bin'
+              if (Test-Path $cmakeBin) { $env:PATH = "$cmakeBin;$env:PATH" }
+              cmake --version
             
             # Setup MSVC environment
             - |
