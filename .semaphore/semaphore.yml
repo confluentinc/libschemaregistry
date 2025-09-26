@@ -162,9 +162,14 @@ blocks:
             # Install dependencies
             - choco install -y ninja cmake
             - |
+              $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
+              if (Test-Path $chocoBin) { $env:PATH = "$chocoBin;$env:PATH" }
+              $refreshEnv = Join-Path $chocoBin 'RefreshEnv.cmd'
+              if (Test-Path $refreshEnv) { & $refreshEnv }
               $cmakeBin = 'C:\Program Files\CMake\bin'
               if (Test-Path $cmakeBin) { $env:PATH = "$cmakeBin;$env:PATH" }
               cmake --version
+              ninja --version
             
             # Setup MSVC environment
             - |
