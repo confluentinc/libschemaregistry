@@ -164,8 +164,30 @@ blocks:
             
             # Setup MSVC environment
             - |
-              $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat'
-              cmd /c """$vcvars"" && set" | ForEach-Object {
+              $vcvars = $null
+              $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+              if (Test-Path $vswhere) {
+                $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+                if ($vsPath) {
+                  $candidate = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+                  if (Test-Path $candidate) { $vcvars = $candidate }
+                }
+              }
+              if (-not $vcvars) {
+                $candidates = @(
+                  'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat',
+                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+                )
+                foreach ($p in $candidates) { if (Test-Path $p) { $vcvars = $p; break } }
+              }
+              if (-not $vcvars) { throw "vcvars64.bat not found" }
+              cmd /c "`"$vcvars`" && set" | ForEach-Object {
                 if ($_ -match '^(.*?)=(.*)$') {
                   [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2])
                 }
