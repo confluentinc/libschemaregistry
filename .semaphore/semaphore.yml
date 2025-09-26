@@ -271,14 +271,10 @@ blocks:
                 -S .
             
             # Build
-            - |
-              $buildType = if ($env:BUILD_TYPE) { $env:BUILD_TYPE } else { 'Release' }
-              cmake --build build --config $buildType
+            - cmake --build build
             
             # Test
-            - |
-              $buildType = if ($env:BUILD_TYPE) { $env:BUILD_TYPE } else { 'Release' }
-              cd build; ctest --build-config $buildType
+            - cd build; ctest --output-on-failure
       
       epilogue:
         commands:
