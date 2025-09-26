@@ -172,6 +172,18 @@ blocks:
               if (Test-Path $cmakeBin) { $env:PATH = "$cmakeBin;$env:PATH" }
               cmake --version
               ninja --version
+              $javaCmd = Get-Command java -ErrorAction SilentlyContinue
+              if (-not $javaCmd) {
+                $jdkRoot = 'C:\Program Files\OpenJDK'
+                if (Test-Path $jdkRoot) {
+                  $jdkDir = Get-ChildItem $jdkRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+                  if ($jdkDir) {
+                    $env:JAVA_HOME = $jdkDir.FullName
+                    $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:PATH
+                  }
+                }
+              }
+              java -version
             
             # Setup MSVC environment
             - |
