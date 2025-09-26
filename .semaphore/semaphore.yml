@@ -143,6 +143,8 @@ blocks:
           value: "x64-windows-release"
         - name: VCPKG_HOST_TRIPLET
           value: "x64-windows-release"
+        - name: VCPKG_DEFAULT_TRIPLET
+          value: "x64-windows-release"
         - name: BUILD_TYPE
           value: "Release"
         - name: C_COMPILER
@@ -214,8 +216,6 @@ blocks:
             
             # Configure CMake
             - |
-              $triplet = $env:VCPKG_TARGET_TRIPLET
-              $hostTriplet = $env:VCPKG_HOST_TRIPLET
               $ninja = $null
               $candidates = @(
                 (Get-Command ninja -ErrorAction SilentlyContinue).Path,
@@ -231,8 +231,8 @@ blocks:
                 -DCMAKE_C_COMPILER=$env:C_COMPILER `
                 -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
                 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
-                -DVCPKG_TARGET_TRIPLET=$triplet `
-                -DVCPKG_HOST_TRIPLET=$hostTriplet `
+                -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+                -DVCPKG_HOST_TRIPLET=x64-windows-release `
                 -DVCPKG_BUILD_TYPE=release `
                 -S .
             
