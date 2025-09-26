@@ -1,6 +1,6 @@
 # C++ Schema Registry Client Library
 
-A C++ client library for interacting with the
+A C++ client library for interacting with
 [Confluent Schema Registry](https://github.com/confluentinc/schema-registry).
 
 ## The library
