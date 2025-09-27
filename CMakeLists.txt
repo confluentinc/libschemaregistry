@@ -64,6 +64,11 @@ if(WIN32)
     set(FETCHCONTENT_BASE_DIR C:/deps)
     # Avoid conflicts with min/max macros in Windows headers
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+    # Work around clang-cl + Protobuf constinit issues on Windows by disabling constinit expansion
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        add_compile_definitions(PROTOBUF_CONSTINIT=)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DPROTOBUF_CONSTINIT=")
+    endif()
 endif()
 
 find_package(absl CONFIG REQUIRED)
@@ -140,7 +145,7 @@ if (SCHEMAREGISTRY_WITH_RULES)
     FetchContent_Declare(
         protovalidate_cc
         GIT_REPOSITORY https://github.com/bufbuild/protovalidate-cc.git
-        GIT_TAG        v0.9.0
+        GIT_TAG        v1.0.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
 endif()
