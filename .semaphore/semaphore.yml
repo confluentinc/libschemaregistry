@@ -268,6 +268,7 @@ blocks:
               cmake -G Ninja -B build `
                 -DCMAKE_MAKE_PROGRAM="${ninja}" `
                 -DCMAKE_BUILD_TYPE=Release `
+                -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=TRUE `
                 -DCMAKE_C_COMPILER="$clang" `
                 -DCMAKE_CXX_COMPILER="$clang" `
                 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
