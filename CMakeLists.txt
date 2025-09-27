@@ -134,11 +134,6 @@ if (SCHEMAREGISTRY_WITH_RULES)
     FetchContent_MakeAvailable(jsonata)
 endif()
 
-if (SCHEMAREGISTRY_WITH_PROTOBUF)
-    # Find Protobuf for protoc executable and libraries
-    find_package(protobuf CONFIG REQUIRED)
-endif()
-
 if (SCHEMAREGISTRY_WITH_RULES)
     # Note that cel-cpp has no CMake build and is not packaged anywhere,
     # so we build protovalidate_cc as an in-tree dependency to get cel-cpp.
@@ -148,6 +143,15 @@ if (SCHEMAREGISTRY_WITH_RULES)
         GIT_TAG        v1.0.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
+endif()
+
+# Ensure Protobuf targets are available. If protovalidate_cc has vendored
+# Protobuf, protobuf::libprotobuf will already exist; otherwise, fall back to
+# the system/vcpkg-provided package.
+if (SCHEMAREGISTRY_WITH_PROTOBUF)
+    if (NOT TARGET protobuf::libprotobuf)
+        find_package(protobuf CONFIG REQUIRED)
+    endif()
 endif()
 
 if (SCHEMAREGISTRY_WITH_RULES)
