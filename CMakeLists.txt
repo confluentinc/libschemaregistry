@@ -142,7 +142,21 @@ if (SCHEMAREGISTRY_WITH_RULES)
         GIT_REPOSITORY https://github.com/bufbuild/protovalidate-cc.git
         GIT_TAG        v1.0.0
     )
-    FetchContent_MakeAvailable(protovalidate_cc)
+    # Populate first so we can patch the protobuf check for Protobuf 29+
+    FetchContent_GetProperties(protovalidate_cc)
+    if (NOT protovalidate_cc_POPULATED)
+        FetchContent_Populate(protovalidate_cc)
+        # protovalidate-cc currently errors out on Protobuf 29+ by
+        # misinterpreting the CppStringType probe. Soften the fatal error to a
+        # warning to allow the build to proceed with vendored Protobuf.
+        set(PV_DEPS_CMAKE "${protovalidate_cc_SOURCE_DIR}/cmake/Deps.cmake")
+        if (EXISTS "${PV_DEPS_CMAKE}")
+            file(READ "${PV_DEPS_CMAKE}" _pv_deps)
+            string(REPLACE "message(FATAL_ERROR" "message(WARNING" _pv_deps "${_pv_deps}")
+            file(WRITE "${PV_DEPS_CMAKE}" "${_pv_deps}")
+        endif()
+        add_subdirectory("${protovalidate_cc_SOURCE_DIR}" "${protovalidate_cc_BINARY_DIR}")
+    endif()
 endif()
 
 # Ensure Protobuf targets are available. If protovalidate_cc has vendored
