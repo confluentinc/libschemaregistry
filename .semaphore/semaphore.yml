@@ -260,10 +260,9 @@ blocks:
               )
               foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { $ninja = $p; break } }
               if (-not $ninja) { throw 'Ninja not found on PATH after install' }
-              $buildType = if ($env:BUILD_TYPE) { $env:BUILD_TYPE } else { 'Release' }
               cmake -G Ninja -B build `
                 -DCMAKE_MAKE_PROGRAM="${ninja}" `
-                -DCMAKE_BUILD_TYPE=$buildType `
+                -DCMAKE_BUILD_TYPE=Release `
                 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
                 -DVCPKG_TARGET_TRIPLET=x64-windows-release `
                 -DVCPKG_HOST_TRIPLET=x64-windows-release `
