@@ -162,7 +162,7 @@ blocks:
         - name: Build and Test
           commands:
             # Install dependencies
-            - choco install -y ninja cmake
+            - choco install -y ninja cmake llvm
             - |
               $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
               if (Test-Path $chocoBin) { $env:PATH = "$chocoBin;$env:PATH" }
@@ -172,6 +172,8 @@ blocks:
               if (Test-Path $cmakeBin) { $env:PATH = "$cmakeBin;$env:PATH" }
               cmake --version
               ninja --version
+              $llvmBin = 'C:\\Program Files\\LLVM\\bin'
+              if (Test-Path $llvmBin) { $env:PATH = "$llvmBin;$env:PATH" }
               $javaCmd = Get-Command java -ErrorAction SilentlyContinue
               if (-not $javaCmd) {
                 $roots = @(
@@ -260,9 +262,14 @@ blocks:
               )
               foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { $ninja = $p; break } }
               if (-not $ninja) { throw 'Ninja not found on PATH after install' }
+              $clang = (Get-Command clang-cl.exe -ErrorAction SilentlyContinue).Path
+              if (-not $clang) { $clang = 'C:\\Program Files\\LLVM\\bin\\clang-cl.exe' }
+              if (-not (Test-Path $clang)) { throw 'clang-cl.exe not found after llvm install' }
               cmake -G Ninja -B build `
                 -DCMAKE_MAKE_PROGRAM="${ninja}" `
                 -DCMAKE_BUILD_TYPE=Release `
+                -DCMAKE_C_COMPILER="$clang" `
+                -DCMAKE_CXX_COMPILER="$clang" `
                 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
                 -DVCPKG_TARGET_TRIPLET=x64-windows-release `
                 -DVCPKG_HOST_TRIPLET=x64-windows-release `
