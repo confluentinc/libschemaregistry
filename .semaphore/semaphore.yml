@@ -87,7 +87,17 @@ blocks:
         commands:
           - checkout
           - sudo dnf -y install java-11-openjdk java-11-openjdk-devel
-          - java -version
+          - |
+            export JENV_ROOT="$HOME/.jenv"
+            export PATH="$JENV_ROOT/bin:$PATH"
+            if command -v jenv >/dev/null 2>&1; then
+              eval "$(jenv init -)"
+              JDK_HOME=$(ls -d /usr/lib/jvm/java-11-openjdk-* 2>/dev/null | head -n 1)
+              if [ -n "$JDK_HOME" ]; then jenv add "$JDK_HOME" || true; fi
+              VER=$(jenv versions --bare | awk '/^11\./{print; exit}')
+              if [ -n "$VER" ]; then jenv global "$VER"; jenv rehash; fi
+            fi
+            java -version
           - cache restore cmake-build-rhel9-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-rhel9-$SEMAPHORE_GIT_BRANCH,cmake-build-rhel9
       jobs:
         - name: Build and Test
