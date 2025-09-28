@@ -145,8 +145,6 @@ blocks:
           value: "x64-windows-release"
         - name: VCPKG_DEFAULT_TRIPLET
           value: "x64-windows-release"
-        - name: VCPKG_MAX_CONCURRENCY
-          value: "4"
         - name: BUILD_TYPE
           value: "Release"
         - name: C_COMPILER
