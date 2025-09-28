@@ -86,7 +86,8 @@ blocks:
       prologue:
         commands:
           - checkout
-          - sem-version java 11
+          - sudo dnf -y install java-11-openjdk java-11-openjdk-devel
+          - java -version
           - cache restore cmake-build-rhel9-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-rhel9-$SEMAPHORE_GIT_BRANCH,cmake-build-rhel9
       jobs:
         - name: Build and Test
