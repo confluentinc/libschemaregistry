@@ -1,6 +1,6 @@
 # C++ Schema Registry Client Library
 
-A C++ client library for interacting with the
+A C++ client library for interacting with
 [Confluent Schema Registry](https://github.com/confluentinc/schema-registry).
 
 ## The library
@@ -29,6 +29,7 @@ This library can be used with [librdkafka](https://github.com/confluentinc/librd
 ### Prerequisites
 - C++17 compatible compiler (C++20 is required for data quality rules on Windows)
 - CMake 3.22+
+- Java 11 (for the [Antlr](https://www.antlr.org) parser)
 - vcpkg
 
 To build, first install [vcpkg](https://github.com/microsoft/vcpkg).  Next, run CMake as follows:
