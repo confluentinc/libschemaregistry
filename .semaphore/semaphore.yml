@@ -162,7 +162,7 @@ blocks:
         - name: Build and Test
           commands:
             # Install dependencies
-            - choco install -y ninja cmake visualstudio2022buildtools visualstudio2022-workload-vctools windows-sdk-10-version-10.0.22621.0
+            - choco install -y ninja cmake visualstudio2022buildtools visualstudio2022-workload-vctools
             - |
               $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
               if (Test-Path $chocoBin) { $env:PATH = "$chocoBin;$env:PATH" }
