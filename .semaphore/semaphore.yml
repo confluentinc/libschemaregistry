@@ -95,7 +95,7 @@ blocks:
             # Install dependencies (ninja via EPEL or fallback, modern CMake from Kitware)
             - |
               set -e
-              sudo dnf -y install gcc gcc-c++ pkgconf-pkg-config curl zip unzip tar git perl
+              sudo dnf -y install gcc gcc-c++ pkgconf-pkg-config curl zip unzip tar git perl patch
               # OpenSSL build prereqs
               sudo dnf -y install kernel-headers || true
               # Provide IPC::Cmd for Perl
