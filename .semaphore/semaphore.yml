@@ -95,7 +95,11 @@ blocks:
             # Install dependencies (ninja via EPEL or fallback, modern CMake from Kitware)
             - |
               set -e
-              sudo dnf -y install gcc gcc-c++ pkgconf-pkg-config curl zip unzip tar git
+              sudo dnf -y install gcc gcc-c++ pkgconf-pkg-config curl zip unzip tar git perl
+              # OpenSSL build prereqs
+              sudo dnf -y install kernel-headers || true
+              # Provide IPC::Cmd for Perl
+              sudo dnf -y install 'perl(IPC::Cmd)' || true
               # Try EPEL for ninja-build
               sudo dnf -y install epel-release || true
               if ! sudo dnf -y install ninja-build; then
@@ -123,7 +127,9 @@ blocks:
             
             # Configure CMake
             - |
+              NINJA_BIN=$(command -v ninja || echo /usr/local/bin/ninja)
               cmake -G Ninja -B build \
+                -DCMAKE_MAKE_PROGRAM=${NINJA_BIN} \
                 -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
                 -DCMAKE_C_COMPILER=$C_COMPILER \
                 -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
