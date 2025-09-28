@@ -144,7 +144,12 @@ blocks:
       prologue:
         commands:
           - checkout
-          - sem-version java 11
+          - brew install openjdk@11
+          - export HOMEBREW_PREFIX="$(brew --prefix)"
+          - sudo ln -sfn "$HOMEBREW_PREFIX/opt/openjdk@11/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-11.jdk
+          - export JAVA_HOME="$(/usr/libexec/java_home -v 11)"
+          - export PATH="$JAVA_HOME/bin:$PATH"
+          - java -version
           - cache restore cmake-build-macos-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_WORKFLOW_ID,cmake-build-macos-$SEMAPHORE_GIT_BRANCH,cmake-build-macos
           
       jobs:
