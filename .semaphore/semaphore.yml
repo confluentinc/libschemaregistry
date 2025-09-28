@@ -162,7 +162,7 @@ blocks:
         - name: Build and Test
           commands:
             # Install dependencies
-            - choco install -y ninja cmake
+            - choco install -y ninja cmake visualstudio2022buildtools visualstudio2022-workload-vctools windows-sdk-10-version-10.0.22621.0
             - |
               $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
               if (Test-Path $chocoBin) { $env:PATH = "$chocoBin;$env:PATH" }
@@ -211,26 +211,32 @@ blocks:
             # Setup MSVC environment
             - |
               $vcvars = $null
-              $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-              if (Test-Path $vswhere) {
-                $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-                if ($vsPath) {
-                  $candidate = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-                  if (Test-Path $candidate) { $vcvars = $candidate }
+              # Prefer Visual Studio 2022 first
+              $preferred = @(
+                'C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat',
+                'C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\VC\\Auxiliary\\Build\\vcvars64.bat',
+                'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat',
+                'C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat'
+              )
+              foreach ($p in $preferred) { if (Test-Path $p) { $vcvars = $p; break } }
+              if (-not $vcvars) {
+                $vswhere = "${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+                if (Test-Path $vswhere) {
+                  $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -version "[17.0,18.0)" -property installationPath
+                  if ($vsPath) {
+                    $candidate = Join-Path $vsPath 'VC\\Auxiliary\\Build\\vcvars64.bat'
+                    if (Test-Path $candidate) { $vcvars = $candidate }
+                  }
                 }
               }
               if (-not $vcvars) {
-                $candidates = @(
-                  'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat',
-                  'C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+                $fallback = @(
+                  'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat',
+                  'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvars64.bat',
+                  'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat',
+                  'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat'
                 )
-                foreach ($p in $candidates) { if (Test-Path $p) { $vcvars = $p; break } }
+                foreach ($p in $fallback) { if (Test-Path $p) { $vcvars = $p; break } }
               }
               if (-not $vcvars) { throw "vcvars64.bat not found" }
               cmd /c "`"$vcvars`" && set" | ForEach-Object {
@@ -241,12 +247,12 @@ blocks:
             
             # Setup vcpkg
             - |
-              if (!(Test-Path "C:\vcpkg")) {
-                git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-                & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+              if (!(Test-Path "C:\\vcpkg")) {
+                git clone https://github.com/Microsoft/vcpkg.git C:\\vcpkg
+                & C:\\vcpkg\\bootstrap-vcpkg.bat -disableMetrics
               } else {
-                git -C C:\vcpkg pull --ff-only
-                if (Test-Path C:\vcpkg\bootstrap-vcpkg.bat) { & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics }
+                git -C C:\\vcpkg pull --ff-only
+                if (Test-Path C:\\vcpkg\\bootstrap-vcpkg.bat) { & C:\\vcpkg\\bootstrap-vcpkg.bat -disableMetrics }
               }
             
             # Configure CMake
@@ -263,9 +269,10 @@ blocks:
               cmake -G Ninja -B build `
                 -DCMAKE_MAKE_PROGRAM="${ninja}" `
                 -DCMAKE_BUILD_TYPE=Release `
+                -T v143 `
                 -DCMAKE_C_COMPILER=cl `
                 -DCMAKE_CXX_COMPILER=cl `
-                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
+                -DCMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake `
                 -DVCPKG_TARGET_TRIPLET=x64-windows-release `
                 -DVCPKG_HOST_TRIPLET=x64-windows-release `
                 -DVCPKG_BUILD_TYPE=release `
