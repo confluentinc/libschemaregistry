@@ -271,7 +271,7 @@ blocks:
                 -DCMAKE_BUILD_TYPE=Release `
                 -DCMAKE_C_COMPILER=cl `
                 -DCMAKE_CXX_COMPILER=cl `
-                -DCMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake `
+                -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
                 -DVCPKG_TARGET_TRIPLET=x64-windows-release `
                 -DVCPKG_HOST_TRIPLET=x64-windows-release `
                 -DVCPKG_BUILD_TYPE=release `
