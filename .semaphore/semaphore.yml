@@ -370,10 +370,10 @@ blocks:
                 -S .
             
             # Build
-            - cmake --build build
+            - cmake --build build --config Release
             
             # Test
-            - cd build; ctest --output-on-failure
+            - cd build && ctest --build-config Release
       
       epilogue:
         commands:
