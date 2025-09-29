@@ -16,6 +16,7 @@
     "azure-security-keyvault-keys-cpp",
     {
       "name": "google-cloud-cpp",
+      "default-features": false,
       "features": [
         "kms"
       ]

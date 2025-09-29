@@ -140,7 +140,7 @@ if (SCHEMAREGISTRY_WITH_RULES)
     FetchContent_Declare(
         protovalidate_cc
         GIT_REPOSITORY https://github.com/bufbuild/protovalidate-cc.git
-        GIT_TAG        v0.9.0
+        GIT_TAG        v1.0.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
 endif()
