@@ -373,7 +373,7 @@ blocks:
             - cmake --build build --config Release
             
             # Test
-            - cd build && ctest --build-config Release
+            - cd build; ctest --build-config Release
       
       epilogue:
         commands:
