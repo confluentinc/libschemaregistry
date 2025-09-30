@@ -675,7 +675,7 @@ TEST(JsonTest, CelFieldWithUnionOfRefs) {
     auto deser_conf = DeserializerConfig::createDefault();
     JsonDeserializer deserializer(client, rule_registry, deser_conf);
     
-    // Create expected JSON object (with "-suffix" added to stringField)
+    // Create expected JSON object (with "-suffix" added to messageId)
     std::string expected_obj_str = R"(
     {
         "messageType": "authentication_request",
