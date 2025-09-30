@@ -95,7 +95,8 @@ nlohmann::json transformFields(
                     std::string instance_location_str =
                         instance_location.to_string();
 
-                    if (schema_navigation::isObjectSchema(schema_node) &&
+                    if ((schema_navigation::isObjectSchema(schema_node) ||
+                        schema_node.contains("properties")) &&
                         instance_node.is_object()) {
                         auto properties =
                             schema_navigation::getSchemaProperties(schema_node);
