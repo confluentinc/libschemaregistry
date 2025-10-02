@@ -28,8 +28,9 @@ This library can be used with [librdkafka](https://github.com/confluentinc/librd
 
 ### Prerequisites
 - C++17 compatible compiler (C++20 is required for data quality rules on Windows)
-- CMake 3.22+
 - Java 11 (for the [Antlr](https://www.antlr.org) parser)
+- CMake 3.22+
+- Ninja
 - vcpkg
 
 To build, first install [vcpkg](https://github.com/microsoft/vcpkg).  Next, run CMake as follows:
