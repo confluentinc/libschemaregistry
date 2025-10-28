@@ -228,25 +228,52 @@ schemaregistry::rest::model::Dek DekRegistryClient::registerDek(
         }
     }
 
-    // Prepare request
-    std::string path = "/dek-registry/v1/keks/" + urlEncode(kek_name) + "/deks";
+    // Prepare request body
     json j;
     to_json(j, request);
     std::string body = j.dump();
 
-    // Send request
-    std::string responseBody = sendHttpRequest(path, "POST", {}, body);
+    try {
+        // Try new API with subject in the path
+        std::string path = "/dek-registry/v1/keks/" + urlEncode(kek_name) + 
+                          "/deks/" + urlEncode(request.getSubject());
 
-    // Parse response
-    schemaregistry::rest::model::Dek dek = parseDekFromJson(responseBody);
+        // Send request
+        std::string responseBody = sendHttpRequest(path, "POST", {}, body);
 
-    // Update cache
-    {
-        std::lock_guard<std::mutex> lock(*storeMutex);
-        store->setDek(cacheKey, dek);
+        // Parse response
+        schemaregistry::rest::model::Dek dek = parseDekFromJson(responseBody);
+
+        // Update cache
+        {
+            std::lock_guard<std::mutex> lock(*storeMutex);
+            store->setDek(cacheKey, dek);
+        }
+
+        return dek;
+    } catch (const schemaregistry::rest::RestException &e) {
+        // If 405, fall back to older API without subject in the path
+        if (e.getStatus() == 405) {
+            std::string path = "/dek-registry/v1/keks/" + urlEncode(kek_name) + "/deks";
+
+            // Send request
+            std::string responseBody = sendHttpRequest(path, "POST", {}, body);
+
+            // Parse response
+            schemaregistry::rest::model::Dek dek = parseDekFromJson(responseBody);
+
+            // Update cache
+            {
+                std::lock_guard<std::mutex> lock(*storeMutex);
+                store->setDek(cacheKey, dek);
+            }
+
+            return dek;
+        } else {
+            // Rethrow if not 405
+            throw;
+        }
     }
-
-    return dek;
 }
 
 schemaregistry::rest::model::Kek DekRegistryClient::getKek(
