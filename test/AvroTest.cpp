@@ -130,6 +130,62 @@ TEST(AvroTest, BasicSerialization) {
     EXPECT_EQ(bytes_field[2], 3);
 }
 
+TEST(AvroTest, BytesSerialization) {
+    // Create client configuration with mock URL
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+    
+    // Create serializer and deserializer configurations
+    auto ser_config = SerializerConfig::createDefault();
+    auto deser_config = DeserializerConfig::createDefault();
+    
+    // Define the Avro schema for bytes primitive type
+    const std::string schema_str = "\"bytes\"";
+    
+    // Create schema object
+    schemaregistry::rest::model::Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(schema_str));
+    
+    // Parse the Avro schema
+    ::avro::ValidSchema avro_schema = AvroSerializer::compileJsonSchema(schema_str);
+    
+    // Create bytes datum
+    ::avro::GenericDatum datum(avro_schema);
+    std::vector<uint8_t> test_bytes = {2, 3, 4};
+    datum.value<std::vector<uint8_t>>() = test_bytes;
+    
+    // Create rule registry
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    
+    // Create serializer and deserializer
+    AvroSerializer serializer(client, std::make_optional(schema), rule_registry, ser_config);
+    AvroDeserializer deserializer(client, rule_registry, deser_config);
+    
+    // Create serialization context
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Avro;
+    ser_ctx.headers = std::nullopt;
+    
+    // Serialize the bytes
+    auto serialized_bytes = serializer.serialize(ser_ctx, datum);
+    
+    // Verify the serialized bytes (schema ID 1 + data)
+    std::vector<uint8_t> expected_bytes = {0, 0, 0, 0, 1, 2, 3, 4};
+    ASSERT_EQ(serialized_bytes, expected_bytes);
+    
+    // Deserialize the bytes
+    auto deserialized_value = deserializer.deserialize(ser_ctx, serialized_bytes);
+    
+    // Verify the deserialized bytes
+    ASSERT_TRUE(deserialized_value.value.type() == ::avro::AVRO_BYTES);
+    auto& deserialized_bytes = deserialized_value.value.value<std::vector<uint8_t>>();
+    ASSERT_EQ(deserialized_bytes, test_bytes);
+}
+
 TEST(AvroTest, GuidInHeader) {
     // Create client configuration with mock URL
     std::vector<std::string> urls = {"mock://"};
