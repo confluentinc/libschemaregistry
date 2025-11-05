@@ -471,6 +471,11 @@ std::vector<uint8_t> serializeAvroData(
     const ::avro::GenericDatum &datum, const ::avro::ValidSchema &writer_schema,
     const std::vector<::avro::ValidSchema> &named_schemas) {
     try {
+        // If the writer schema is AVRO_BYTES, just return the raw bytes directly
+        if (writer_schema.root()->type() == ::avro::AVRO_BYTES) {
+            return datum.value<std::vector<uint8_t>>();
+        }
+
         auto output_stream = ::avro::memoryOutputStream();
         auto encoder = ::avro::binaryEncoder();
         encoder->init(*output_stream);
@@ -496,6 +501,13 @@ std::vector<uint8_t> serializeAvroData(
     const ::avro::ValidSchema *reader_schema,
     const std::vector<::avro::ValidSchema> &named_schemas) {
     try {
+        // If the writer schema is AVRO_BYTES, just return the raw bytes directly
+        if (writer_schema.root()->type() == ::avro::AVRO_BYTES) {
+            ::avro::GenericDatum datum(writer_schema);
+            datum.value<std::vector<uint8_t>>() = data;
+            return datum;
+        }
+
         auto input_stream = ::avro::memoryInputStream(data.data(), data.size());
         auto decoder = ::avro::binaryDecoder();
         decoder->init(*input_stream);

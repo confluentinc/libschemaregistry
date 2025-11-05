@@ -111,6 +111,12 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> AwsKmsDriver::buildCredential
             roleExternalId = envRoleExternalId;
         }
     }
+
+    std::string roleWebIdentityTokenFile;
+    const char* envRoleWebIdentityTokenFile = std::getenv("AWS_WEB_IDENTITY_TOKEN_FILE");
+    if (envRoleWebIdentityTokenFile) {
+        roleWebIdentityTokenFile = envRoleWebIdentityTokenFile;
+    }
     
     std::string accessKeyId;
     auto accessKeyIt = conf.find(ACCESS_KEY_ID);
@@ -151,7 +157,8 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> AwsKmsDriver::buildCredential
     }
     
     // If role ARN is specified, wrap with STS assume role provider
-    if (!roleArn.empty()) {
+    // If roleWebIdentityTokenFile is set, use the DefaultCredentialsProvider
+    if (!roleArn.empty() && roleWebIdentityTokenFile.empty()) {
         Aws::Client::ClientConfiguration stsConfig;
         stsConfig.region = region.c_str();
 
