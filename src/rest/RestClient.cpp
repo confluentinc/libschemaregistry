@@ -135,7 +135,7 @@ cpr::Response RestClient::sendRequest(
     // Set default headers including content type
     cpr::Header cpr_headers;
     cpr_headers["Content-Type"] = "application/vnd.schemaregistry.v1+json";
-    cpr_headers["Accept-Version"] = "8.0";
+    cpr_headers["Confluent-Accept-Unknown-Properties"] = "true";
 
     // Handle authentication
     const auto basic_auth = configuration_->getBasicAuth();
