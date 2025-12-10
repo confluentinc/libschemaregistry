@@ -25,13 +25,13 @@ if(VCPKG_MANIFEST_FEATURES)
             set(SCHEMAREGISTRY_WITH_AVRO OFF)
         endif()
     endif()
-    
+
     if(NOT DEFINED SCHEMAREGISTRY_WITH_JSON)
         if(NOT "json" IN_LIST VCPKG_MANIFEST_FEATURES)
             set(SCHEMAREGISTRY_WITH_JSON OFF)
         endif()
     endif()
-    
+
     if(NOT DEFINED SCHEMAREGISTRY_WITH_PROTOBUF)
         if(NOT "protobuf" IN_LIST VCPKG_MANIFEST_FEATURES)
             set(SCHEMAREGISTRY_WITH_PROTOBUF OFF)
@@ -200,7 +200,7 @@ target_sources(schemaregistry PRIVATE ${BASE_HEADERS} ${BASE_SOURCES})
 
 # Core serdes sources (always needed - base serialization framework)
 # Also include JsonValue as it is used for schema migration rules
-file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h" 
+file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
                               "include/schemaregistry/serdes/SerdeConfig.h"
                               "include/schemaregistry/serdes/SerdeError.h"
                               "include/schemaregistry/serdes/SerdeTypes.h"
@@ -208,7 +208,7 @@ file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
                               "include/schemaregistry/serdes/WildcardMatcher.h"
                               "src/internal/schemaregistry/serdes/json/JsonValue.h")
 file(GLOB CORE_SERDES_SOURCES "src/serdes/Serde.cpp"
-                              "src/serdes/SerdeConfig.cpp" 
+                              "src/serdes/SerdeConfig.cpp"
                               "src/serdes/SerdeError.cpp"
                               "src/serdes/SerdeTypes.cpp"
                               "src/serdes/RuleRegistry.cpp"
@@ -240,7 +240,7 @@ if(SCHEMAREGISTRY_WITH_PROTOBUF)
     file(GLOB PROTOBUF_HEADERS "include/schemaregistry/serdes/protobuf/*.h")
     file(GLOB PROTOBUF_SOURCES "src/serdes/protobuf/*.cpp")
     target_sources(schemaregistry PRIVATE ${PROTOBUF_HEADERS} ${PROTOBUF_SOURCES})
-    
+
     # Add generated protobuf files
     if(PROTO_SOURCES)
         target_sources(schemaregistry PRIVATE ${PROTO_SOURCES})
@@ -315,7 +315,7 @@ if(SCHEMAREGISTRY_WITH_AVRO)
     )
 endif()
 
-# Conditionally link JSON libraries  
+# Conditionally link JSON libraries
 if(SCHEMAREGISTRY_WITH_JSON)
     target_link_libraries(schemaregistry
         PRIVATE
@@ -339,24 +339,24 @@ if(SCHEMAREGISTRY_WITH_RULES)
             $<BUILD_INTERFACE:cel_cpp>
             $<BUILD_INTERFACE:cel_cpp_parser>
             $<BUILD_INTERFACE:cel_cpp_minimal_descriptor_set>
-            
+
             # JSON processing for rules
             $<BUILD_INTERFACE:jsonata>
-            
+
             # Cryptography library
             $<BUILD_INTERFACE:tink::static>
-            
+
             # AWS SDK for KMS driver
             aws-cpp-sdk-core
             aws-cpp-sdk-kms
             aws-cpp-sdk-sts
             aws-cpp-sdk-cognito-identity
             aws-cpp-sdk-identity-management
-            
+
             # Azure SDK for Azure KMS driver
             Azure::azure-security-keyvault-keys
             Azure::azure-identity
-            
+
             # Google Cloud SDK for GCP KMS driver
             google-cloud-cpp::kms
 
@@ -381,6 +381,10 @@ endif()
 if(SCHEMAREGISTRY_WITH_RULES)
     target_compile_definitions(schemaregistry PUBLIC SCHEMAREGISTRY_USE_RULES)
 endif()
+
+target_compile_definitions(schemaregistry PRIVATE
+    SCHEMAREGISTRY_VERSION="${PROJECT_VERSION}"
+)
 
 option(SCHEMAREGISTRY_BUILD_TESTS "schemaregistry test suite" ON)
 if(SCHEMAREGISTRY_BUILD_TESTS)
@@ -452,4 +456,3 @@ option(SCHEMAREGISTRY_BUILD_EXAMPLES "Build example programs" OFF)
 if(SCHEMAREGISTRY_BUILD_EXAMPLES)
     add_subdirectory(example)
 endif()
-
