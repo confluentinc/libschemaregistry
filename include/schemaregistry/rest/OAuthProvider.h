@@ -1,0 +1,297 @@
+/**
+ * OAuth 2.0 Provider for Schema Registry Client
+ *
+ * Implements OAuth 2.0 Client Credentials grant (RFC 6749 Section 4.4)
+ * with automatic token caching and refresh.
+ *
+ * Thread-safe: All provider implementations are thread-safe.
+ */
+
+#pragma once
+
+#include <chrono>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+
+namespace schemaregistry::rest {
+
+/**
+ * Bearer authentication fields required for Confluent Cloud Schema Registry.
+ *
+ * Confluent Cloud requires three fields:
+ * - access_token: OAuth bearer token
+ * - logical_cluster: Schema Registry logical cluster ID (e.g., "lsrc-12345")
+ * - identity_pool_id: Identity pool ID (e.g., "pool-abcd")
+ */
+struct BearerFields {
+  std::string access_token;
+  std::string logical_cluster;
+  std::string identity_pool_id;
+
+  BearerFields() = default;
+  BearerFields(std::string token, std::string cluster, std::string pool)
+      : access_token(std::move(token)),
+        logical_cluster(std::move(cluster)),
+        identity_pool_id(std::move(pool)) {}
+};
+
+/**
+ * Abstract base class for OAuth bearer authentication providers.
+ *
+ * All implementations must be thread-safe as they may be called
+ * concurrently from multiple threads making Schema Registry requests.
+ */
+class OAuthProvider {
+ public:
+  virtual ~OAuthProvider() = default;
+
+  /**
+   * Get bearer authentication fields for Schema Registry request.
+   *
+   * This method must be thread-safe. It may block to fetch/refresh tokens.
+   *
+   * @return BearerFields containing access token and cluster identifiers
+   * @throws std::runtime_error if unable to obtain credentials
+   */
+  virtual BearerFields get_bearer_fields() = 0;
+
+  /**
+   * Get only the access token (convenience method).
+   *
+   * @return Access token string
+   * @throws std::runtime_error if unable to obtain token
+   */
+  virtual std::string get_access_token() {
+    return get_bearer_fields().access_token;
+  }
+};
+
+/**
+ * Static token provider - uses a pre-obtained bearer token.
+ *
+ * Use case: Token obtained externally (e.g., from secrets manager, CI/CD)
+ *
+ * Example:
+ * @code
+ *   auto provider = std::make_shared<StaticTokenProvider>(
+ *       "eyJhbGc...",  // token from external source
+ *       "lsrc-12345",
+ *       "pool-abcd"
+ *   );
+ * @endcode
+ *
+ * Thread-safe: Yes (read-only after construction)
+ */
+class StaticTokenProvider : public OAuthProvider {
+ public:
+  StaticTokenProvider(std::string token, std::string logical_cluster,
+                      std::string identity_pool_id);
+
+  BearerFields get_bearer_fields() override;
+
+ private:
+  const BearerFields fields_;
+};
+
+/**
+ * OAuth token with expiry tracking.
+ */
+struct OAuthToken {
+  std::string access_token;
+  std::chrono::system_clock::time_point expires_at;
+  int expires_in_seconds{0};
+
+  OAuthToken() = default;
+
+  bool is_valid() const { return !access_token.empty(); }
+
+  bool is_expired(double threshold = 0.8) const {
+    if (!is_valid()) return true;
+
+    auto now = std::chrono::system_clock::now();
+    auto expiry_window =
+        std::chrono::seconds(static_cast<int>(expires_in_seconds * threshold));
+
+    return (expires_at - expiry_window) < now;
+  }
+};
+
+/**
+ * OAuth 2.0 Client Credentials provider.
+ *
+ * Implements automatic token fetching using OAuth 2.0 Client Credentials
+ * grant flow. Features:
+ * - Automatic token caching
+ * - Proactive refresh at 80% of token lifetime
+ * - Exponential backoff with jitter on failures
+ * - Thread-safe token management
+ *
+ * Example:
+ * @code
+ *   OAuthClientProvider::Config config;
+ *   config.client_id = "my-client-id";
+ *   config.client_secret = "my-secret";
+ *   config.scope = "schema_registry";
+ *   config.token_endpoint_url = "https://idp.com/oauth2/token";
+ *   config.logical_cluster = "lsrc-12345";
+ *   config.identity_pool_id = "pool-abcd";
+ *
+ *   auto provider = std::make_shared<OAuthClientProvider>(config);
+ * @endcode
+ *
+ * Thread-safe: Yes (uses mutex for token access)
+ */
+class OAuthClientProvider : public OAuthProvider {
+ public:
+  /**
+   * Configuration for OAuth Client Credentials flow.
+   */
+  struct Config {
+    // Required OAuth parameters
+    std::string client_id;
+    std::string client_secret;
+    std::string scope;
+    std::string token_endpoint_url;
+
+    // Required Confluent Cloud parameters
+    std::string logical_cluster;
+    std::string identity_pool_id;
+
+    // Optional retry configuration
+    int max_retries{3};
+    int retry_base_delay_ms{1000};
+    int retry_max_delay_ms{20000};
+
+    // Optional token refresh behavior
+    // Token is refreshed when remaining lifetime < threshold * total_lifetime
+    // Default: 0.8 means refresh at 80% of token lifetime
+    double token_refresh_threshold{0.8};
+
+    // Optional HTTP timeout
+    int http_timeout_seconds{30};
+
+    /**
+     * Validate configuration has all required fields.
+     *
+     * @throws std::invalid_argument if configuration is invalid
+     */
+    void validate() const;
+  };
+
+  /**
+   * Construct OAuth provider with configuration.
+   *
+   * @param config OAuth configuration (validated on construction)
+   * @throws std::invalid_argument if configuration is invalid
+   */
+  explicit OAuthClientProvider(const Config& config);
+
+  BearerFields get_bearer_fields() override;
+
+  /**
+   * Force token refresh on next access.
+   *
+   * Useful for testing or to manually invalidate cached token.
+   * Thread-safe.
+   */
+  void invalidate_token();
+
+ private:
+  /**
+   * Fetch new token from OAuth provider using Client Credentials grant.
+   *
+   * Performs exponential backoff with jitter on failures.
+   *
+   * @throws std::runtime_error if unable to fetch token after retries
+   */
+  void fetch_token();
+
+  /**
+   * Calculate jittered delay for exponential backoff.
+   *
+   * Uses full jitter to prevent thundering herd.
+   *
+   * @param attempt Retry attempt number (0-indexed)
+   * @return Delay in milliseconds
+   */
+  int calculate_backoff_delay(int attempt) const;
+
+  const Config config_;
+
+  mutable std::mutex mutex_;
+  OAuthToken token_;
+};
+
+
+/**
+ * Factory for creating OAuth providers from configuration strings.
+ *
+ * Supports creating providers from key-value configuration maps similar
+ * to other Confluent clients (Java, Python).
+ *
+ * Supported authentication methods:
+ * - STATIC_TOKEN: Pre-obtained bearer token
+ * - OAUTHBEARER: OAuth 2.0 Client Credentials flow
+ *
+ * Example:
+ * @code
+ *   std::map<std::string, std::string> config = {
+ *       {"bearer.auth.credentials.source", "OAUTHBEARER"},
+ *       {"bearer.auth.client.id", "my-client-id"},
+ *       {"bearer.auth.client.secret", "my-secret"},
+ *       {"bearer.auth.scope", "schema_registry"},
+ *       {"bearer.auth.issuer.endpoint.url", "https://idp.com/oauth2/token"},
+ *       {"bearer.auth.logical.cluster", "lsrc-12345"},
+ *       {"bearer.auth.identity.pool.id", "pool-abcd"}
+ *   };
+ *
+ *   auto provider = OAuthProviderFactory::create(config);
+ * @endcode
+ */
+class OAuthProviderFactory {
+ public:
+  /**
+   * Create OAuth provider from configuration map.
+   *
+   * Required keys:
+   * - bearer.auth.credentials.source: STATIC_TOKEN or OAUTHBEARER
+   *
+   * For STATIC_TOKEN:
+   * - bearer.auth.token
+   * - bearer.auth.logical.cluster
+   * - bearer.auth.identity.pool.id
+   *
+   * For OAUTHBEARER:
+   * - bearer.auth.client.id
+   * - bearer.auth.client.secret
+   * - bearer.auth.scope
+   * - bearer.auth.issuer.endpoint.url
+   * - bearer.auth.logical.cluster
+   * - bearer.auth.identity.pool.id
+   *
+   * @param config Configuration map
+   * @return Shared pointer to OAuth provider
+   * @throws std::invalid_argument if configuration is invalid or missing keys
+   */
+  static std::shared_ptr<OAuthProvider> create(
+      const std::map<std::string, std::string>& config);
+
+ private:
+  static std::shared_ptr<OAuthProvider> create_static_token_provider(
+      const std::map<std::string, std::string>& config);
+
+  static std::shared_ptr<OAuthProvider> create_oauth_provider(
+      const std::map<std::string, std::string>& config);
+
+  static std::string get_required_config(
+      const std::map<std::string, std::string>& config, const std::string& key);
+
+  static std::string get_optional_config(
+      const std::map<std::string, std::string>& config, const std::string& key,
+      const std::string& default_value);
+};
+
+}  // namespace schemaregistry::rest

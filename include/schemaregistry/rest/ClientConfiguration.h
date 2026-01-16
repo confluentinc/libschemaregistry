@@ -22,11 +22,15 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace schemaregistry::rest {
+
+// Forward declaration
+class OAuthProvider;
 
 class ClientConfiguration {
   public:
@@ -43,6 +47,10 @@ class ClientConfiguration {
     std::optional<std::string> getBearerAccessToken() const;
     void setBearerAccessToken(
         const std::optional<std::string> &bearer_access_token);
+
+    // OAuth provider (for automatic token management)
+    std::shared_ptr<OAuthProvider> getOAuthProvider() const;
+    void setOAuthProvider(std::shared_ptr<OAuthProvider> provider);
 
     // Cache configuration getters and setters
     std::uint64_t getCacheCapacity() const;
@@ -72,6 +80,7 @@ class ClientConfiguration {
 
     std::optional<std::pair<std::string, std::string>> basic_auth_;
     std::optional<std::string> bearer_access_token_;
+    std::shared_ptr<OAuthProvider> oauth_provider_;
 
     std::uint64_t cache_capacity_;
     std::uint64_t cache_latest_ttl_sec_;
