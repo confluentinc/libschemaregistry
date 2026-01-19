@@ -140,7 +140,12 @@ cpr::Response RestClient::sendRequest(
     cpr_headers["Confluent-Accept-Unknown-Properties"] = "true";
     cpr_headers["Confluent-Client-Version"] = std::string("cpp/") + SCHEMAREGISTRY_VERSION;
 
-    // Handle authentication
+    // Handle authentication (mutually exclusive methods)
+    // Authentication methods are mutually exclusive - only one will be set.
+    // Check in order: Basic Auth > OAuth Provider > Bearer Token
+    // - Basic Auth: API Key/Secret authentication
+    // - OAuth Provider: OAuth 2.0 with automatic token refresh
+    // - Bearer Token: Static token (legacy, no refresh)
     const auto oauth_provider = configuration_->getOAuthProvider();
     const auto basic_auth = configuration_->getBasicAuth();
     const auto bearer_token = configuration_->getBearerAccessToken();
@@ -162,7 +167,6 @@ cpr::Response RestClient::sendRequest(
             cpr_headers["Confluent-Identity-Pool-Id"] = fields.identity_pool_id;
             cpr_headers["target-sr-cluster"] = fields.logical_cluster;
         } catch (const std::exception& e) {
-            // OAuth token fetch failed - will be handled by request failure
             throw std::runtime_error(std::string("OAuth authentication failed: ") + e.what());
         }
     } else if (bearer_token.has_value()) {

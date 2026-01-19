@@ -72,6 +72,10 @@ void OAuthClientProvider::Config::validate() const {
   if (retry_max_delay_ms <= 0) {
     throw std::invalid_argument("retry_max_delay_ms must be positive");
   }
+  if (retry_base_delay_ms > retry_max_delay_ms) {
+    throw std::invalid_argument(
+        "retry_base_delay_ms must not exceed retry_max_delay_ms");
+  }
   if (token_refresh_threshold < 0.0 || token_refresh_threshold > 1.0) {
     throw std::invalid_argument(
         "token_refresh_threshold must be between 0.0 and 1.0");
@@ -91,12 +95,20 @@ OAuthClientProvider::OAuthClientProvider(const Config& config)
 }
 
 BearerFields OAuthClientProvider::get_bearer_fields() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
 
   // Check if we need to fetch/refresh token
   if (!token_.is_valid() ||
       token_.is_expired(config_.token_refresh_threshold)) {
-    fetch_token();
+    // Release lock before making network requests to avoid blocking other threads
+    // Note: Multiple threads may fetch concurrently if token is expired, but
+    // this is acceptable - the last fetch to complete will update the cache.
+    lock.unlock();
+    OAuthToken new_token = fetch_token();
+    lock.lock();
+
+    // Update cached token
+    token_ = new_token;
   }
 
   return BearerFields{token_.access_token, config_.logical_cluster,
@@ -108,7 +120,7 @@ void OAuthClientProvider::invalidate_token() {
   token_ = OAuthToken{};
 }
 
-void OAuthClientProvider::fetch_token() {
+OAuthToken OAuthClientProvider::fetch_token() {
   // Build form-encoded body for OAuth client credentials grant
   cpr::Payload payload{{"grant_type", "client_credentials"},
                        {"client_id", config_.client_id},
@@ -116,6 +128,8 @@ void OAuthClientProvider::fetch_token() {
                        {"scope", config_.scope}};
 
   // Retry with exponential backoff
+  // max_retries represents number of retries after initial attempt
+  // e.g., max_retries=3 means 1 initial + 3 retries = 4 total attempts
   for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
     try {
       auto response = cpr::Post(
@@ -133,20 +147,21 @@ void OAuthClientProvider::fetch_token() {
               "OAuth token response missing 'access_token' field");
         }
 
-        token_.access_token = json_response["access_token"].get<std::string>();
+        OAuthToken token;
+        token.access_token = json_response["access_token"].get<std::string>();
 
         // Parse expires_in if present
         if (json_response.contains("expires_in")) {
-          token_.expires_in_seconds = json_response["expires_in"].get<int>();
+          token.expires_in_seconds = json_response["expires_in"].get<int>();
         } else {
-          token_.expires_in_seconds = 3600;  // Default to 1 hour
+          token.expires_in_seconds = 3600;  // Default to 1 hour
         }
 
         // Calculate expiry time
-        token_.expires_at = std::chrono::system_clock::now() +
-                            std::chrono::seconds(token_.expires_in_seconds);
+        token.expires_at = std::chrono::system_clock::now() +
+                           std::chrono::seconds(token.expires_in_seconds);
 
-        return;
+        return token;
       }
 
       // Non-2xx response
@@ -178,7 +193,7 @@ void OAuthClientProvider::fetch_token() {
     } catch (const std::exception& e) { // Network error or other exception
       if (attempt >= config_.max_retries) {
         std::ostringstream error_msg;
-        error_msg << "Failed to fetch OAuth token after " << config_.max_retries
+        error_msg << "Failed to fetch OAuth token after " << (config_.max_retries + 1)
                   << " attempts: " << e.what();
         throw std::runtime_error(error_msg.str());
       }

@@ -32,6 +32,17 @@ namespace schemaregistry::rest {
 // Forward declaration
 class OAuthProvider;
 
+/**
+ * Configuration for Schema Registry client.
+ *
+ * Authentication methods are mutually exclusive:
+ * - Basic Auth (setBasicAuth) - API Key/Secret authentication
+ * - OAuth Provider (setOAuthProvider) - OAuth 2.0 with automatic token refresh
+ * - Bearer Token (setBearerAccessToken) - Static bearer token (legacy, no auto-refresh)
+ *
+ * Setting any authentication method automatically clears previously configured methods.
+ * Only one authentication method can be active at a time.
+ */
 class ClientConfiguration {
   public:
     ClientConfiguration(const std::vector<std::string> &base_urls);
@@ -39,18 +50,30 @@ class ClientConfiguration {
 
     std::vector<std::string> getBaseUrls() const;
 
-    // Authentication getters and setters
+    /**
+     * Basic authentication (API Key/Secret).
+     * Setting this clears OAuth Provider and Bearer Token.
+     */
     std::optional<std::pair<std::string, std::string>> getBasicAuth() const;
     void setBasicAuth(
         const std::optional<std::pair<std::string, std::string>> &basic_auth);
 
+    /**
+     * OAuth provider for automatic token management.
+     * Setting this clears Basic Auth and Bearer Token.
+     * Supports static tokens and OAuth Client Credentials flow.
+     */
+    std::shared_ptr<OAuthProvider> getOAuthProvider() const;
+    void setOAuthProvider(std::shared_ptr<OAuthProvider> provider);
+
+    /**
+     * Static bearer token (legacy, no automatic refresh).
+     * Setting this clears Basic Auth and OAuth Provider.
+     * For automatic token management, use setOAuthProvider instead.
+     */
     std::optional<std::string> getBearerAccessToken() const;
     void setBearerAccessToken(
         const std::optional<std::string> &bearer_access_token);
-
-    // OAuth provider (for automatic token management)
-    std::shared_ptr<OAuthProvider> getOAuthProvider() const;
-    void setOAuthProvider(std::shared_ptr<OAuthProvider> provider);
 
     // Cache configuration getters and setters
     std::uint64_t getCacheCapacity() const;

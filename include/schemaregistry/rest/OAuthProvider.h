@@ -3,6 +3,15 @@
  *
  * Implements OAuth 2.0 Client Credentials grant (RFC 6749 Section 4.4)
  * with automatic token caching and refresh.
+ *
+ * Authentication Methods (Mutually Exclusive):
+ * ClientConfiguration supports three authentication methods:
+ * - Basic Auth (API Key/Secret)
+ * - OAuth Provider (this)
+ * - Static Bearer Token (legacy)
+ *
+ * Setting any authentication method automatically clears the others.
+ * Only one authentication method can be active at a time.
  */
 
 #pragma once
@@ -83,8 +92,8 @@ class StaticTokenProvider : public OAuthProvider {
  */
 struct OAuthToken {
   std::string access_token;
-  std::chrono::system_clock::time_point expires_at;
-  int expires_in_seconds{0};
+  std::chrono::system_clock::time_point expires_at; // Token expiry time
+  int expires_in_seconds{0}; // Token lifetime in seconds
 
   OAuthToken() = default;
 
@@ -94,10 +103,12 @@ struct OAuthToken {
     if (!is_valid()) return true;
 
     auto now = std::chrono::system_clock::now();
-    auto expiry_window =
-        std::chrono::seconds(static_cast<int>(expires_in_seconds * threshold));
+    // refresh buffer: time before actual expiry timestamp of the token
+    // e.g. with threshold=0.8, refresh_buffer=0.2*expires_in_seconds (we refresh when 80% has elapsed (20% remaining)
+    auto refresh_buffer =
+        std::chrono::seconds(static_cast<int>(expires_in_seconds * (1 - threshold)));
 
-    return (expires_at - expiry_window) < now;
+    return (expires_at - refresh_buffer) < now;
   }
 };
 
@@ -105,11 +116,7 @@ struct OAuthToken {
  * OAuth 2.0 Client Credentials provider.
  *
  * Implements automatic token fetching using OAuth 2.0 Client Credentials
- * grant flow. Features:
- * - Automatic token caching
- * - Proactive refresh at 80% of token lifetime
- * - Exponential backoff with jitter on failures
- * - Thread-safe token management
+ * grant flow.
  */
 class OAuthClientProvider : public OAuthProvider {
  public:
@@ -133,8 +140,8 @@ class OAuthClientProvider : public OAuthProvider {
     int retry_max_delay_ms{20000};
 
     // Optional token refresh behavior
-    // Token is refreshed when remaining lifetime < threshold * total_lifetime
-    // Default: 0.8 (refreshes at 80% of token lifetime)
+    // Token is refreshed when elapsed time > threshold * total_lifetime
+    // Default: 0.8 (refreshes when 80% of token lifetime has elapsed)
     double token_refresh_threshold{0.8};
 
     // Optional HTTP timeout
@@ -169,9 +176,10 @@ class OAuthClientProvider : public OAuthProvider {
    *
    * Performs exponential backoff with jitter on failures.
    *
+   * @return Newly fetched OAuth token
    * @throws std::runtime_error if unable to fetch token after retries
    */
-  void fetch_token();
+  OAuthToken fetch_token();
 
   /**
    * Calculate jittered delay for exponential backoff.

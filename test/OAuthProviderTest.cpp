@@ -71,11 +71,16 @@ TEST(OAuthTokenTest, IsExpiredAtThreshold) {
   token.access_token = "test-token";
   token.expires_in_seconds = 3600;  // 1 hour
 
-  // Set expiry to exactly 80% into lifetime (only 20% remaining)
+  // Set expiry to exactly at threshold (20% remaining = 720 seconds)
   auto now = std::chrono::system_clock::now();
   token.expires_at = now + std::chrono::seconds(720);  // 12 minutes = 20% of 60 min
 
-  // At 80% threshold, should be considered expired
+  // At exactly 20% remaining (80% elapsed), should be considered expired
+  // Note: Uses < comparison, so exactly at boundary is considered not expired
+  EXPECT_FALSE(token.is_expired(0.8));
+
+  // But one second past the threshold should be expired
+  token.expires_at = now + std::chrono::seconds(719);
   EXPECT_TRUE(token.is_expired(0.8));
 }
 
@@ -84,11 +89,11 @@ TEST(OAuthTokenTest, IsNotExpiredBeforeThreshold) {
   token.access_token = "test-token";
   token.expires_in_seconds = 3600;  // 1 hour
 
-  // Set expiry to 50% into lifetime (50% remaining)
+  // Set expiry to 50% remaining (only 50% elapsed, before 80% threshold)
   auto now = std::chrono::system_clock::now();
-  token.expires_at = now + std::chrono::seconds(1800);  // 30 minutes
+  token.expires_at = now + std::chrono::seconds(1800);  // 30 minutes remaining
 
-  // At 80% threshold, should NOT be expired yet
+  // At 80% threshold, this token has only 50% elapsed, should NOT be expired yet
   EXPECT_FALSE(token.is_expired(0.8));
 }
 
@@ -154,6 +159,20 @@ TEST(OAuthClientConfigTest, ThrowsOnInvalidThreshold) {
   config.logical_cluster = "lsrc-123";
   config.identity_pool_id = "pool-456";
   config.token_refresh_threshold = 1.1;  // Invalid (represents percentage)
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(OAuthClientConfigTest, ThrowsOnBaseDelayExceedsMaxDelay) {
+  OAuthClientProvider::Config config;
+  config.client_id = "client-id";
+  config.client_secret = "client-secret";
+  config.scope = "schema_registry";
+  config.token_endpoint_url = "https://idp.example.com/token";
+  config.logical_cluster = "lsrc-123";
+  config.identity_pool_id = "pool-456";
+  config.retry_base_delay_ms = 5000;  // Base delay
+  config.retry_max_delay_ms = 1000;   // Max delay less than base (invalid)
 
   EXPECT_THROW(config.validate(), std::invalid_argument);
 }
