@@ -21,6 +21,8 @@
 #include <sstream>
 #include <thread>
 
+#include "schemaregistry/rest/OAuthProvider.h"
+
 namespace schemaregistry::rest {
 
 RestClient::RestClient(std::shared_ptr<const ClientConfiguration> configuration)
@@ -139,14 +141,32 @@ cpr::Response RestClient::sendRequest(
     cpr_headers["Confluent-Client-Version"] = std::string("cpp/") + SCHEMAREGISTRY_VERSION;
 
     // Handle authentication
+    const auto oauth_provider = configuration_->getOAuthProvider();
     const auto basic_auth = configuration_->getBasicAuth();
     const auto bearer_token = configuration_->getBearerAccessToken();
 
     if (basic_auth.has_value()) {
+        // Basic authentication (API Key/Secret)
         session->SetAuth(cpr::Authentication{basic_auth.value().first,
                                              basic_auth.value().second,
                                              cpr::AuthMode::BASIC});
+    } else if (oauth_provider) {
+        // OAuth provider (automatic token management)
+        try {
+            BearerFields fields = oauth_provider->get_bearer_fields();
+
+            // Set bearer token
+            session->SetBearer(cpr::Bearer{fields.access_token});
+
+            // Add Confluent Cloud headers required for OAuth
+            cpr_headers["Confluent-Identity-Pool-Id"] = fields.identity_pool_id;
+            cpr_headers["target-sr-cluster"] = fields.logical_cluster;
+        } catch (const std::exception& e) {
+            // OAuth token fetch failed - will be handled by request failure
+            throw std::runtime_error(std::string("OAuth authentication failed: ") + e.what());
+        }
     } else if (bearer_token.has_value()) {
+        // Static bearer token (no auto-refresh)
         session->SetBearer(cpr::Bearer{bearer_token.value()});
     }
 

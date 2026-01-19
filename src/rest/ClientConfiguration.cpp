@@ -12,6 +12,8 @@
 
 #include "schemaregistry/rest/ClientConfiguration.h"
 
+#include "schemaregistry/rest/OAuthProvider.h"
+
 namespace schemaregistry::rest {
 
 ClientConfiguration::ClientConfiguration(
@@ -49,6 +51,16 @@ std::optional<std::string> ClientConfiguration::getBearerAccessToken() const {
 void ClientConfiguration::setBearerAccessToken(
     const std::optional<std::string> &bearer_access_token) {
     bearer_access_token_ = bearer_access_token;
+}
+
+// OAuth provider getters and setters
+std::shared_ptr<OAuthProvider> ClientConfiguration::getOAuthProvider() const {
+    return oauth_provider_;
+}
+
+void ClientConfiguration::setOAuthProvider(
+    std::shared_ptr<OAuthProvider> provider) {
+    oauth_provider_ = provider;
 }
 
 // Cache configuration getters and setters
