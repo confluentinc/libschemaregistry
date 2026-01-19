@@ -181,16 +181,6 @@ class OAuthClientProvider : public OAuthProvider {
    */
   OAuthToken fetch_token();
 
-  /**
-   * Calculate jittered delay for exponential backoff.
-   *
-   * Uses full jitter to prevent thundering herd.
-   *
-   * @param attempt Retry attempt number (0-indexed)
-   * @return Delay in milliseconds
-   */
-  int calculate_backoff_delay(int attempt) const;
-
   const Config config_;
 
   mutable std::mutex mutex_; // Mutex for thread-safe token access
@@ -245,10 +235,6 @@ class OAuthProviderFactory {
 
   static std::string get_required_config(
       const std::map<std::string, std::string>& config, const std::string& key);
-
-  static std::string get_optional_config(
-      const std::map<std::string, std::string>& config, const std::string& key,
-      const std::string& default_value);
 };
 
 }  // namespace schemaregistry::rest

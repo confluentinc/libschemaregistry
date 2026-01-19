@@ -7,12 +7,12 @@
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
-#include <algorithm>
 #include <chrono>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+
+#include "schemaregistry/rest/BackoffUtils.h"
 
 using json = nlohmann::json;
 
@@ -127,19 +127,16 @@ OAuthToken OAuthClientProvider::fetch_token() {
                        {"client_secret", config_.client_secret},
                        {"scope", config_.scope}};
 
-  // Retry with exponential backoff
-  // max_retries represents number of retries after initial attempt
-  // e.g., max_retries=3 means 1 initial + 3 retries = 4 total attempts
-  for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
-    try {
-      auto response = cpr::Post(
-          cpr::Url{config_.token_endpoint_url}, payload,
-          cpr::Header{{"Content-Type", "application/x-www-form-urlencoded"}},
-          cpr::Timeout{std::chrono::seconds(config_.http_timeout_seconds)});
+  int attempt = 0;
+  while (true) {
+    auto response = cpr::Post(
+        cpr::Url{config_.token_endpoint_url}, payload,
+        cpr::Header{{"Content-Type", "application/x-www-form-urlencoded"}},
+        cpr::Timeout{std::chrono::seconds(config_.http_timeout_seconds)});
 
-      // 2xx response (success)
-      if (response.status_code >= 200 && response.status_code < 300) {
-        // Parse JSON response
+    // Success: parse and return token
+    if (response.status_code >= 200 && response.status_code < 300) {
+      try {
         auto json_response = json::parse(response.text);
 
         if (!json_response.contains("access_token")) {
@@ -149,74 +146,44 @@ OAuthToken OAuthClientProvider::fetch_token() {
 
         OAuthToken token;
         token.access_token = json_response["access_token"].get<std::string>();
-
-        // Parse expires_in if present
-        if (json_response.contains("expires_in")) {
-          token.expires_in_seconds = json_response["expires_in"].get<int>();
-        } else {
-          token.expires_in_seconds = 3600;  // Default to 1 hour
-        }
-
-        // Calculate expiry time
+        token.expires_in_seconds = json_response.value("expires_in", 3600);
         token.expires_at = std::chrono::system_clock::now() +
                            std::chrono::seconds(token.expires_in_seconds);
-
         return token;
+      } catch (const json::exception& e) {
+        // JSON parsing error on 2xx - not retriable
+        throw std::runtime_error(
+            "Failed to parse OAuth token response: " + std::string(e.what()));
       }
+    }
 
-      // Non-2xx response
+    // Check if we should retry
+    bool should_retry = false;
+    if (response.status_code == 0) {
+      // Network error - always retriable
+      should_retry = true;
+    } else if (response.status_code >= 400) {
+      should_retry = utils::isRetriable(response.status_code);
+    }
+
+    if (!should_retry || attempt >= config_.max_retries) {
       std::ostringstream error_msg;
       error_msg << "OAuth token request failed with status "
                 << response.status_code;
       if (!response.text.empty()) {
         error_msg << ": " << response.text;
       }
-
-      // Throw error on last attempt
-      if (attempt >= config_.max_retries) {
-        throw std::runtime_error(error_msg.str());
-      }
-
-      // Retry error after applying backoff delay
-      int delay_ms = calculate_backoff_delay(attempt);
-      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-    } catch (const json::exception& e) { // JSON parsing error
-      std::ostringstream error_msg;
-      error_msg << "Failed to parse OAuth token response: " << e.what();
-      if (attempt >= config_.max_retries) {
-        throw std::runtime_error(error_msg.str());
-      }
-
-      int delay_ms = calculate_backoff_delay(attempt);
-      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-    } catch (const std::exception& e) { // Network error or other exception
-      if (attempt >= config_.max_retries) {
-        std::ostringstream error_msg;
-        error_msg << "Failed to fetch OAuth token after " << (config_.max_retries + 1)
-                  << " attempts: " << e.what();
-        throw std::runtime_error(error_msg.str());
-      }
-
-      int delay_ms = calculate_backoff_delay(attempt);
-      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+      throw std::runtime_error(error_msg.str());
     }
+
+    // Retry with backoff
+    auto delay = utils::calculateExponentialBackoff(
+        config_.retry_base_delay_ms, attempt,
+        std::chrono::milliseconds(config_.retry_max_delay_ms));
+    std::this_thread::sleep_for(delay);
+    attempt++;
   }
 }
-
-int OAuthClientProvider::calculate_backoff_delay(int attempt) const {
-  // Exponential backoff: base * (2^attempt)
-  int exponential_delay = config_.retry_base_delay_ms * (1 << attempt);
-  int capped_delay = std::min(exponential_delay, config_.retry_max_delay_ms);
-
-  // Apply full jitter to prevent thundering herd
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(0, capped_delay);
-
-  return dis(gen);
-}
-
 
 // ============================================================================
 // OAuthProviderFactory Implementation
@@ -281,13 +248,6 @@ std::string OAuthProviderFactory::get_required_config(
     throw std::invalid_argument("Configuration key cannot be empty: " + key);
   }
   return it->second;
-}
-
-std::string OAuthProviderFactory::get_optional_config(
-    const std::map<std::string, std::string>& config, const std::string& key,
-    const std::string& default_value) {
-  auto it = config.find(key);
-  return (it != config.end()) ? it->second : default_value;
 }
 
 }  // namespace schemaregistry::rest
