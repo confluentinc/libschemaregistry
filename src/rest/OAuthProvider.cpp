@@ -123,7 +123,7 @@ void OAuthClientProvider::fetch_token() {
           cpr::Header{{"Content-Type", "application/x-www-form-urlencoded"}},
           cpr::Timeout{std::chrono::seconds(config_.http_timeout_seconds)});
 
-      // Check for success
+      // 2xx response (success)
       if (response.status_code >= 200 && response.status_code < 300) {
         // Parse JSON response
         auto json_response = json::parse(response.text);
@@ -135,18 +135,18 @@ void OAuthClientProvider::fetch_token() {
 
         token_.access_token = json_response["access_token"].get<std::string>();
 
-        // Parse expires_in (optional, default to 3600 seconds = 1 hour)
+        // Parse expires_in if present
         if (json_response.contains("expires_in")) {
           token_.expires_in_seconds = json_response["expires_in"].get<int>();
         } else {
-          token_.expires_in_seconds = 3600;  // Default 1 hour
+          token_.expires_in_seconds = 3600;  // Default to 1 hour
         }
 
         // Calculate expiry time
         token_.expires_at = std::chrono::system_clock::now() +
                             std::chrono::seconds(token_.expires_in_seconds);
 
-        return;  // Success!
+        return;
       }
 
       // Non-2xx response
@@ -157,16 +157,15 @@ void OAuthClientProvider::fetch_token() {
         error_msg << ": " << response.text;
       }
 
-      // Last attempt, throw error
+      // Throw error on last attempt
       if (attempt >= config_.max_retries) {
         throw std::runtime_error(error_msg.str());
       }
 
-      // Retriable error, apply backoff
+      // Retry error after applying backoff delay
       int delay_ms = calculate_backoff_delay(attempt);
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-    } catch (const json::exception& e) {
+    } catch (const json::exception& e) { // JSON parsing error
       std::ostringstream error_msg;
       error_msg << "Failed to parse OAuth token response: " << e.what();
       if (attempt >= config_.max_retries) {
@@ -176,8 +175,7 @@ void OAuthClientProvider::fetch_token() {
       int delay_ms = calculate_backoff_delay(attempt);
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 
-    } catch (const std::exception& e) {
-      // Network error or other exception
+    } catch (const std::exception& e) { // Network error or other exception
       if (attempt >= config_.max_retries) {
         std::ostringstream error_msg;
         error_msg << "Failed to fetch OAuth token after " << config_.max_retries

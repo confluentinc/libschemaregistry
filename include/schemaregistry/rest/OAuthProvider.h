@@ -3,8 +3,6 @@
  *
  * Implements OAuth 2.0 Client Credentials grant (RFC 6749 Section 4.4)
  * with automatic token caching and refresh.
- *
- * Thread-safe: All provider implementations are thread-safe.
  */
 
 #pragma once
@@ -40,9 +38,6 @@ struct BearerFields {
 
 /**
  * Abstract base class for OAuth bearer authentication providers.
- *
- * All implementations must be thread-safe as they may be called
- * concurrently from multiple threads making Schema Registry requests.
  */
 class OAuthProvider {
  public:
@@ -70,20 +65,7 @@ class OAuthProvider {
 };
 
 /**
- * Static token provider - uses a pre-obtained bearer token.
- *
- * Use case: Token obtained externally (e.g., from secrets manager, CI/CD)
- *
- * Example:
- * @code
- *   auto provider = std::make_shared<StaticTokenProvider>(
- *       "eyJhbGc...",  // token from external source
- *       "lsrc-12345",
- *       "pool-abcd"
- *   );
- * @endcode
- *
- * Thread-safe: Yes (read-only after construction)
+ * Static token provider. Uses a pre-obtained bearer token.
  */
 class StaticTokenProvider : public OAuthProvider {
  public:
@@ -128,21 +110,6 @@ struct OAuthToken {
  * - Proactive refresh at 80% of token lifetime
  * - Exponential backoff with jitter on failures
  * - Thread-safe token management
- *
- * Example:
- * @code
- *   OAuthClientProvider::Config config;
- *   config.client_id = "my-client-id";
- *   config.client_secret = "my-secret";
- *   config.scope = "schema_registry";
- *   config.token_endpoint_url = "https://idp.com/oauth2/token";
- *   config.logical_cluster = "lsrc-12345";
- *   config.identity_pool_id = "pool-abcd";
- *
- *   auto provider = std::make_shared<OAuthClientProvider>(config);
- * @endcode
- *
- * Thread-safe: Yes (uses mutex for token access)
  */
 class OAuthClientProvider : public OAuthProvider {
  public:
@@ -167,7 +134,7 @@ class OAuthClientProvider : public OAuthProvider {
 
     // Optional token refresh behavior
     // Token is refreshed when remaining lifetime < threshold * total_lifetime
-    // Default: 0.8 means refresh at 80% of token lifetime
+    // Default: 0.8 (refreshes at 80% of token lifetime)
     double token_refresh_threshold{0.8};
 
     // Optional HTTP timeout
@@ -193,9 +160,6 @@ class OAuthClientProvider : public OAuthProvider {
 
   /**
    * Force token refresh on next access.
-   *
-   * Useful for testing or to manually invalidate cached token.
-   * Thread-safe.
    */
   void invalidate_token();
 
@@ -221,7 +185,7 @@ class OAuthClientProvider : public OAuthProvider {
 
   const Config config_;
 
-  mutable std::mutex mutex_;
+  mutable std::mutex mutex_; // Mutex for thread-safe token access
   OAuthToken token_;
 };
 
@@ -235,21 +199,6 @@ class OAuthClientProvider : public OAuthProvider {
  * Supported authentication methods:
  * - STATIC_TOKEN: Pre-obtained bearer token
  * - OAUTHBEARER: OAuth 2.0 Client Credentials flow
- *
- * Example:
- * @code
- *   std::map<std::string, std::string> config = {
- *       {"bearer.auth.credentials.source", "OAUTHBEARER"},
- *       {"bearer.auth.client.id", "my-client-id"},
- *       {"bearer.auth.client.secret", "my-secret"},
- *       {"bearer.auth.scope", "schema_registry"},
- *       {"bearer.auth.issuer.endpoint.url", "https://idp.com/oauth2/token"},
- *       {"bearer.auth.logical.cluster", "lsrc-12345"},
- *       {"bearer.auth.identity.pool.id", "pool-abcd"}
- *   };
- *
- *   auto provider = OAuthProviderFactory::create(config);
- * @endcode
  */
 class OAuthProviderFactory {
  public:
