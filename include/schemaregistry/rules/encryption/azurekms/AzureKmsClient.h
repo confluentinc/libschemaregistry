@@ -61,8 +61,11 @@ class AzureKmsClient : public crypto::tink::KmsClient {
     /**
      * Parses an Azure Key Vault URL to extract key information
      *
-     * @param keyUrl The key URL to parse
-     * @return Tuple containing (vaultUrl, keyName, keyVersion)
+     * @param keyUrl The key URL to parse. Supports both formats:
+     *               - https://vault-name.vault.azure.net/keys/key-name/key-version
+     *               - https://vault-name.vault.azure.net/keys/key-name (version optional)
+     * @return Tuple containing (vaultUrl, keyName, keyVersion).
+     *         keyVersion will be empty string if not provided in URL.
      * @throws std::invalid_argument if URL format is invalid
      */
     static std::tuple<std::string, std::string, std::string> parseKeyInfo(
