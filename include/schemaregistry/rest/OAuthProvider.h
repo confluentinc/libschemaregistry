@@ -103,10 +103,10 @@ struct OAuthToken {
     if (!is_valid()) return true;
 
     auto now = std::chrono::system_clock::now();
-    // refresh buffer: time before actual expiry timestamp of the token
-    // e.g. with threshold=0.8, refresh_buffer=0.2*expires_in_seconds (we refresh when 80% has elapsed (20% remaining)
-    auto refresh_buffer =
-        std::chrono::seconds(static_cast<int>(expires_in_seconds * (1 - threshold)));
+    // refresh buffer: remaining time before the actual expiry timestamp of the token
+    // e.g. with threshold=0.8, we refresh when 80% of the lifetime has elapsed,
+    // leaving 20% (0.2 * expires_in_seconds) as the refresh buffer.
+    auto refresh_buffer = std::chrono::seconds(static_cast<int>(expires_in_seconds * (1 - threshold)));
 
     return (expires_at - refresh_buffer) < now;
   }
