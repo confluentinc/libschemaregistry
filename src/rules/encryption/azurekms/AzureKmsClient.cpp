@@ -79,7 +79,7 @@ std::tuple<std::string, std::string, std::string> AzureKmsClient::parseKeyInfo(
                                     keyUrl);
     }
 
-    // If version is not provided (match[3] is empty), return empty string
+    // If version is not provided (matches[3] is empty), return empty string
     // Azure Key Vault will use the latest version when no version is specified
     std::string keyVersion = matches[3].matched ? matches[3].str() : "";
 
