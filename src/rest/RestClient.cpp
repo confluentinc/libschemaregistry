@@ -56,7 +56,7 @@ cpr::Response RestClient::sendRequestUrls(
                 }
                 continue;
             } else if (result.status_code < 400 ||
-                       !isRetriable(static_cast<int>(result.status_code))) {
+                       !utils::isRetriable(static_cast<int>(result.status_code))) {
                 return result;
             } else if (i == base_urls.size() - 1) {
                 // Last URL and retriable error, return it

@@ -183,7 +183,7 @@ class OAuthClientProvider : public OAuthProvider {
 
   const Config config_;
 
-  mutable std::mutex mutex_; // Mutex for thread-safe token access
+  mutable std::mutex mutex_;  // Mutex for thread-safe token access
   OAuthToken token_;
 };
 

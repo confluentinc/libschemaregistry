@@ -100,15 +100,20 @@ BearerFields OAuthClientProvider::get_bearer_fields() {
   // Check if we need to fetch/refresh token
   if (!token_.is_valid() ||
       token_.is_expired(config_.token_refresh_threshold)) {
-    // Release lock before making network requests to avoid blocking other threads
-    // Note: Multiple threads may fetch concurrently if token is expired, but
-    // this is acceptable - the last fetch to complete will update the cache.
+    // Release lock before making network requests to avoid blocking other threads.
+    // Multiple threads may fetch concurrently if the token is expired, but only
+    // the first thread that still observes an invalid/expired token after
+    // re-acquiring the lock will update the cache (double-checked locking).
     lock.unlock();
     OAuthToken new_token = fetch_token();
     lock.lock();
 
-    // Update cached token
-    token_ = new_token;
+    // Double-check token validity/expiry before updating the cached token to
+    // avoid redundant overwrites when multiple threads fetched concurrently.
+    if (!token_.is_valid() ||
+        token_.is_expired(config_.token_refresh_threshold)) {
+      token_ = std::move(new_token);
+    }
   }
 
   return BearerFields{token_.access_token, config_.logical_cluster,

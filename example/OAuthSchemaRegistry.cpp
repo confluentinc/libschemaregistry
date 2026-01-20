@@ -65,7 +65,7 @@ int main() {
         {"bearer.auth.identity.pool.id", "pool-abcd"}
     };
 
-  auto provider = OAuthProviderFactory::create(config_map);
+    auto provider = OAuthProviderFactory::create(config_map);
 
     auto config = std::make_shared<ClientConfiguration>(
         std::vector<std::string>{"https://psrc-123456.us-east-1.aws.confluent.cloud"});
