@@ -12,14 +12,6 @@ namespace schemaregistry::rest::utils {
 /**
  * Check if an HTTP status code represents a retriable error.
  *
- * Retriable errors are transient failures that may succeed on retry:
- * - 408 Request Timeout
- * - 429 Too Many Requests
- * - 5xx Server Errors (500, 502, 503, 504, etc.)
- *
- * Non-retriable errors are permanent failures (4xx client errors like
- * 400, 401, 403, 404) that won't succeed on retry.
- *
  * @param status_code HTTP status code
  * @return true if the error is retriable, false otherwise
  */

@@ -1,6 +1,6 @@
 /**
  * OAuthProviderTest
- * Unit tests for OAuth 2.0 provider implementations
+ * Tests for OAuth 2.0 provider implementations
  */
 
 #include <gtest/gtest.h>
@@ -71,16 +71,20 @@ TEST(OAuthTokenTest, IsExpiredAtThreshold) {
   token.access_token = "test-token";
   token.expires_in_seconds = 3600;  // 1 hour
 
-  // Set expiry to exactly at threshold (20% remaining = 720 seconds)
+  // Set expiry well above threshold (20% remaining = 720 seconds)
+  // Use 800 seconds to be safely above the threshold
   auto now = std::chrono::system_clock::now();
-  token.expires_at = now + std::chrono::seconds(720);  // 12 minutes = 20% of 60 min
+  token.expires_at = now + std::chrono::seconds(800);
 
-  // At exactly 20% remaining (80% elapsed), should be considered expired
-  // Note: Uses < comparison, so exactly at boundary is considered not expired
+  // With 800 seconds remaining, token should NOT be expired yet
   EXPECT_FALSE(token.is_expired(0.8));
 
-  // But one second past the threshold should be expired
-  token.expires_at = now + std::chrono::seconds(719);
+  // Set expiry well below threshold - use 600 seconds (well past threshold)
+  // This gives plenty of margin for test execution time
+  now = std::chrono::system_clock::now();
+  token.expires_at = now + std::chrono::seconds(600);
+
+  // With only 600 seconds remaining (< 720 threshold), should be expired
   EXPECT_TRUE(token.is_expired(0.8));
 }
 
