@@ -14,7 +14,10 @@ include(../cmake/CompileProtobuf.cmake)
 CompileProtobuf(generated_test_proto ${CMAKE_SOURCE_DIR}/proto)
 
 # Collect test sources conditionally based on enabled features
-set(TEST_SOURCES WildcardMatcherTest.cpp)  # Always include base tests
+set(TEST_SOURCES
+    WildcardMatcherTest.cpp
+    OAuthProviderTest.cpp  # OAuth provider tests
+)  # Always include base tests
 
 if(SCHEMAREGISTRY_WITH_AVRO)
     list(APPEND TEST_SOURCES AvroTest.cpp)
