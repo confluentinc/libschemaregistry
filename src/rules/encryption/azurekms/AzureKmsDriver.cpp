@@ -77,15 +77,20 @@ std::tuple<std::string, std::string, std::string> AzureKmsDriver::getKeyInfo(
 
     // Parse URL like:
     // https://vault-name.vault.azure.net/keys/key-name/key-version
-    std::regex urlRegex(R"(^(https://[^/]+)/keys/([^/]+)/([^/]+)$)");
+    // or without version:
+    // https://vault-name.vault.azure.net/keys/key-name
+    std::regex urlRegex(R"(^(https://[^/]+)/keys/([^/]+)(?:/([^/]+))?$)");
     std::smatch matches;
 
     if (!std::regex_match(url, matches, urlRegex)) {
         throw TinkError("Invalid Azure Key Vault URL format: " + keyUrl);
     }
 
-    return std::make_tuple(matches[1].str(), matches[2].str(),
-                           matches[3].str());
+    // If version is not provided (matches[3] is empty), return empty string
+    // Azure Key Vault will use the latest version when no version is specified
+    std::string keyVersion = matches[3].matched ? matches[3].str() : "";
+
+    return std::make_tuple(matches[1].str(), matches[2].str(), keyVersion);
 }
 
 bool AzureKmsDriver::isValidKeyUri(const std::string &keyUri) const {
