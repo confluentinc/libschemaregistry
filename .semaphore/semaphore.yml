@@ -192,7 +192,7 @@ blocks:
         - name: Build and Test
           commands:
             # Install dependencies
-            - brew install ninja cmake
+            - brew install ninja cmake pkg-config
             
             # Setup vcpkg
             - |
