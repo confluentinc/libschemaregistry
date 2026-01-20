@@ -79,8 +79,11 @@ class AzureKmsDriver : public KmsDriver {
     /**
      * Extract key information from Azure Key Vault URL
      *
-     * @param keyUrl The Azure Key Vault key URL
-     * @return A tuple containing (vaultUrl, keyName, keyVersion)
+     * @param keyUrl The Azure Key Vault key URL. Supports both formats:
+     *               - azure-kms://https://vault.azure.net/keys/key-name/version
+     *               - azure-kms://https://vault.azure.net/keys/key-name (version optional)
+     * @return A tuple containing (vaultUrl, keyName, keyVersion).
+     *         keyVersion will be empty string if not provided in URL.
      * @throws TinkError if the URL format is invalid
      */
     std::tuple<std::string, std::string, std::string> getKeyInfo(
