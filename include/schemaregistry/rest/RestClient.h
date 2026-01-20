@@ -44,12 +44,6 @@ class RestClient {
         const std::string &body) const;
 
   private:
-    bool isRetriable(int status_code) const;
-
-    std::chrono::milliseconds calculateExponentialBackoff(
-        std::uint32_t initial_backoff_ms, std::uint32_t retry_attempts,
-        std::chrono::milliseconds max_backoff) const;
-
     cpr::Response sendRequest(
         const std::string &url, const std::string &method,
         const std::vector<std::pair<std::string, std::string>> &query,
