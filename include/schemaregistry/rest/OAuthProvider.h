@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 
 namespace schemaregistry::rest {
@@ -75,11 +76,19 @@ class OAuthProvider {
 
 /**
  * Static token provider. Uses a pre-obtained bearer token.
+ *
  */
 class StaticTokenProvider : public OAuthProvider {
  public:
-  StaticTokenProvider(std::string token, std::string logical_cluster,
-                      std::string identity_pool_id);
+  /**
+   * Construct static token provider.
+   *
+   * @param token Bearer access token (required)
+   * @param logical_cluster Schema Registry logical cluster ID (optional, required for Confluent Cloud)
+   * @param identity_pool_id Identity pool ID (optional, required for Confluent Cloud)
+   */
+  StaticTokenProvider(std::string token, std::string logical_cluster = "",
+                      std::string identity_pool_id = "");
 
   BearerFields get_bearer_fields() override;
 
@@ -130,9 +139,10 @@ class OAuthClientProvider : public OAuthProvider {
     std::string scope;
     std::string token_endpoint_url;
 
-    // Required Confluent Cloud parameters
-    std::string logical_cluster;
-    std::string identity_pool_id;
+    // Optional Confluent Cloud parameters
+    // Required for Confluent Cloud
+    std::string logical_cluster;      // Schema Registry logical cluster ID (e.g., "lsrc-12345")
+    std::string identity_pool_id;     // Identity pool ID (e.g., "pool-abcd")
 
     // Optional retry configuration
     int max_retries{3};
@@ -183,7 +193,7 @@ class OAuthClientProvider : public OAuthProvider {
 
   const Config config_;
 
-  mutable std::mutex mutex_;  // Mutex for thread-safe token access
+  mutable std::shared_mutex mutex_;  // Shared mutex for thread-safe token access
   OAuthToken token_;
 };
 
@@ -205,23 +215,24 @@ class OAuthProviderFactory {
    *
    * Required keys:
    * - bearer.auth.credentials.source: STATIC_TOKEN or OAUTHBEARER
-   *
-   * For STATIC_TOKEN:
-   * - bearer.auth.token
+   * Required keys for Confluent Cloud:
    * - bearer.auth.logical.cluster
    * - bearer.auth.identity.pool.id
    *
+   * Additional required keys based on method:
+   * For STATIC_TOKEN:
+   * - bearer.auth.token
    * For OAUTHBEARER:
    * - bearer.auth.client.id
    * - bearer.auth.client.secret
    * - bearer.auth.scope
    * - bearer.auth.issuer.endpoint.url
-   * - bearer.auth.logical.cluster
-   * - bearer.auth.identity.pool.id
+   *
+   * Optional keys
    *
    * @param config Configuration map
    * @return Shared pointer to OAuth provider
-   * @throws std::invalid_argument if configuration is invalid or missing keys
+   * @throws std::invalid_argument if configuration is invalid or missing required keys
    */
   static std::shared_ptr<OAuthProvider> create(
       const std::map<std::string, std::string>& config);

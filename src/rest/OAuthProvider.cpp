@@ -30,12 +30,8 @@ StaticTokenProvider::StaticTokenProvider(std::string token,
   if (fields_.access_token.empty()) {
     throw std::invalid_argument("access_token cannot be empty");
   }
-  if (fields_.logical_cluster.empty()) {
-    throw std::invalid_argument("logical_cluster cannot be empty");
-  }
-  if (fields_.identity_pool_id.empty()) {
-    throw std::invalid_argument("identity_pool_id cannot be empty");
-  }
+  // Note: logical_cluster and identity_pool_id are optional
+  // Required for Confluent Cloud, not needed for self-hosted Confluent Platform
 }
 
 BearerFields StaticTokenProvider::get_bearer_fields() { return fields_; }
@@ -56,12 +52,6 @@ void OAuthClientProvider::Config::validate() const {
   }
   if (token_endpoint_url.empty()) {
     throw std::invalid_argument("token_endpoint_url is required");
-  }
-  if (logical_cluster.empty()) {
-    throw std::invalid_argument("logical_cluster is required");
-  }
-  if (identity_pool_id.empty()) {
-    throw std::invalid_argument("identity_pool_id is required");
   }
   if (max_retries < 0) {
     throw std::invalid_argument("max_retries must be non-negative");
@@ -95,33 +85,35 @@ OAuthClientProvider::OAuthClientProvider(const Config& config)
 }
 
 BearerFields OAuthClientProvider::get_bearer_fields() {
-  std::unique_lock<std::mutex> lock(mutex_);
-
-  // Check if we need to fetch/refresh token
-  if (!token_.is_valid() ||
-      token_.is_expired(config_.token_refresh_threshold)) {
-    // Release lock before making network requests to avoid blocking other threads.
-    // Multiple threads may fetch concurrently if the token is expired, but only
-    // the first thread that still observes an invalid/expired token after
-    // re-acquiring the lock will update the cache (double-checked locking).
-    lock.unlock();
-    OAuthToken new_token = fetch_token();
-    lock.lock();
-
-    // Double-check token validity/expiry before updating the cached token to
-    // avoid redundant overwrites when multiple threads fetched concurrently.
-    if (!token_.is_valid() ||
-        token_.is_expired(config_.token_refresh_threshold)) {
-      token_ = std::move(new_token);
+  // Check if existing lock is valid
+  // Use shared lock for concurrent reads
+  {
+    std::shared_lock<std::shared_mutex> read_lock(mutex_);
+    if (token_.is_valid() &&
+        !token_.is_expired(config_.token_refresh_threshold)) {
+      return BearerFields{token_.access_token, config_.logical_cluster,
+                          config_.identity_pool_id};
     }
   }
+
+  // Refresh token if expired or not present
+  // Use exclusive lock to prevent multiple threads fetching new token simultaneously
+  std::unique_lock<std::shared_mutex> write_lock(mutex_);
+  if (token_.is_valid() &&
+      !token_.is_expired(config_.token_refresh_threshold)) {
+    return BearerFields{token_.access_token, config_.logical_cluster,
+                        config_.identity_pool_id};
+  }
+
+  OAuthToken new_token = fetch_token();
+  token_ = std::move(new_token);
 
   return BearerFields{token_.access_token, config_.logical_cluster,
                       config_.identity_pool_id};
 }
 
 void OAuthClientProvider::invalidate_token() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   token_ = OAuthToken{};
 }
 
@@ -214,10 +206,18 @@ std::shared_ptr<OAuthProvider>
 OAuthProviderFactory::create_static_token_provider(
     const std::map<std::string, std::string>& config) {
   std::string token = get_required_config(config, "bearer.auth.token");
-  std::string logical_cluster =
-      get_required_config(config, "bearer.auth.logical.cluster");
-  std::string identity_pool_id =
-      get_required_config(config, "bearer.auth.identity.pool.id");
+
+  // Optional Confluent Cloud parameters
+  std::string logical_cluster;
+  std::string identity_pool_id;
+  auto cluster_it = config.find("bearer.auth.logical.cluster");
+  if (cluster_it != config.end()) {
+    logical_cluster = cluster_it->second;
+  }
+  auto pool_it = config.find("bearer.auth.identity.pool.id");
+  if (pool_it != config.end()) {
+    identity_pool_id = pool_it->second;
+  }
 
   return std::make_shared<StaticTokenProvider>(
       std::move(token), std::move(logical_cluster),
@@ -234,10 +234,16 @@ std::shared_ptr<OAuthProvider> OAuthProviderFactory::create_oauth_provider(
   oauth_config.scope = get_required_config(config, "bearer.auth.scope");
   oauth_config.token_endpoint_url =
       get_required_config(config, "bearer.auth.issuer.endpoint.url");
-  oauth_config.logical_cluster =
-      get_required_config(config, "bearer.auth.logical.cluster");
-  oauth_config.identity_pool_id =
-      get_required_config(config, "bearer.auth.identity.pool.id");
+
+  // Optional Confluent Cloud parameters
+  auto cluster_it = config.find("bearer.auth.logical.cluster");
+  if (cluster_it != config.end()) {
+    oauth_config.logical_cluster = cluster_it->second;
+  }
+  auto pool_it = config.find("bearer.auth.identity.pool.id");
+  if (pool_it != config.end()) {
+    oauth_config.identity_pool_id = pool_it->second;
+  }
 
   return std::make_shared<OAuthClientProvider>(oauth_config);
 }

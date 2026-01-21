@@ -38,16 +38,22 @@ TEST(StaticTokenProviderTest, ThrowsOnEmptyToken) {
       std::invalid_argument);
 }
 
-TEST(StaticTokenProviderTest, ThrowsOnEmptyCluster) {
-  EXPECT_THROW(
-      StaticTokenProvider("token", "", "pool-456"),
-      std::invalid_argument);
+TEST(StaticTokenProviderTest, AcceptsEmptyClusterForPlatform) {
+  // Empty cluster and pool ID should be accepted (for Confluent Platform)
+  EXPECT_NO_THROW(StaticTokenProvider("token", "", ""));
+
+  auto provider = std::make_shared<StaticTokenProvider>("token", "", "");
+  auto fields = provider->get_bearer_fields();
+
+  EXPECT_EQ(fields.access_token, "token");
+  EXPECT_EQ(fields.logical_cluster, "");
+  EXPECT_EQ(fields.identity_pool_id, "");
 }
 
-TEST(StaticTokenProviderTest, ThrowsOnEmptyPoolId) {
-  EXPECT_THROW(
-      StaticTokenProvider("token", "lsrc-123", ""),
-      std::invalid_argument);
+TEST(StaticTokenProviderTest, AcceptsPartialCloudFields) {
+  // Partial Cloud fields should be accepted (though not recommended)
+  EXPECT_NO_THROW(StaticTokenProvider("token", "lsrc-123", ""));
+  EXPECT_NO_THROW(StaticTokenProvider("token", "", "pool-456"));
 }
 
 // =============================================================================
