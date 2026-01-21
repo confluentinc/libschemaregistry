@@ -16,10 +16,11 @@
 
 #include <chrono>
 #include <iomanip>
-#include <limits>
-#include <random>
 #include <sstream>
 #include <thread>
+
+#include "schemaregistry/rest/BackoffUtils.h"
+#include "schemaregistry/rest/OAuthProvider.h"
 
 namespace schemaregistry::rest {
 
@@ -55,7 +56,7 @@ cpr::Response RestClient::sendRequestUrls(
                 }
                 continue;
             } else if (result.status_code < 400 ||
-                       !isRetriable(static_cast<int>(result.status_code))) {
+                       !utils::isRetriable(static_cast<int>(result.status_code))) {
                 return result;
             } else if (i == base_urls.size() - 1) {
                 // Last URL and retriable error, return it
@@ -98,7 +99,7 @@ cpr::Response RestClient::tryRequest(
             // Network error - always retriable
             should_retry = true;
         } else if (result.status_code >= 400) {
-            should_retry = isRetriable(static_cast<int>(result.status_code));
+            should_retry = utils::isRetriable(static_cast<int>(result.status_code));
         }
 
         if (!should_retry || retries >= max_retries) {
@@ -106,8 +107,8 @@ cpr::Response RestClient::tryRequest(
         }
 
         // Apply exponential backoff with jitter
-        auto backoff =
-            calculateExponentialBackoff(initial_wait_ms, retries, max_wait_ms);
+        auto backoff = utils::calculateExponentialBackoff(initial_wait_ms, retries,
+                                                           max_wait_ms);
         std::this_thread::sleep_for(backoff);
         retries++;
     }
@@ -138,15 +139,40 @@ cpr::Response RestClient::sendRequest(
     cpr_headers["Confluent-Accept-Unknown-Properties"] = "true";
     cpr_headers["Confluent-Client-Version"] = std::string("cpp/") + SCHEMAREGISTRY_VERSION;
 
-    // Handle authentication
+    // Handle authentication. Check in order:
+    // - Basic Auth: API Key/Secret authentication
+    // - OAuth Provider: OAuth 2.0 with automatic token refresh
+    // - Bearer Token: Static token (legacy, no refresh)
+    const auto oauth_provider = configuration_->getOAuthProvider();
     const auto basic_auth = configuration_->getBasicAuth();
     const auto bearer_token = configuration_->getBearerAccessToken();
 
     if (basic_auth.has_value()) {
+        // Basic authentication (API Key/Secret)
         session->SetAuth(cpr::Authentication{basic_auth.value().first,
                                              basic_auth.value().second,
                                              cpr::AuthMode::BASIC});
+    } else if (oauth_provider) {
+        // OAuth provider (automatic token management)
+        try {
+            BearerFields fields = oauth_provider->get_bearer_fields();
+
+            // Set bearer token
+            session->SetBearer(cpr::Bearer{fields.access_token});
+
+            // Add Confluent Cloud headers if provided
+            // Required for Confluent Cloud, not needed for self-hosted Confluent Platform
+            if (!fields.identity_pool_id.empty()) {
+                cpr_headers["Confluent-Identity-Pool-Id"] = fields.identity_pool_id;
+            }
+            if (!fields.logical_cluster.empty()) {
+                cpr_headers["target-sr-cluster"] = fields.logical_cluster;
+            }
+        } catch (const std::exception& e) {
+            throw std::runtime_error(std::string("OAuth authentication failed: ") + e.what());
+        }
     } else if (bearer_token.has_value()) {
+        // Static bearer token (no auto-refresh)
         session->SetBearer(cpr::Bearer{bearer_token.value()});
     }
 
@@ -187,42 +213,6 @@ cpr::Response RestClient::sendRequest(
         // Unsupported method; set an error-like response
         return cpr::Response{};
     }
-}
-
-std::chrono::milliseconds RestClient::calculateExponentialBackoff(
-    std::uint32_t initial_backoff_ms, std::uint32_t retry_attempts,
-    std::chrono::milliseconds max_backoff) const {
-    // Calculate 2^retry_attempts * initial_backoff_ms with overflow protection
-    std::uint64_t backoff_ms;
-    if (retry_attempts >= 32 ||
-        (1ULL << retry_attempts) >
-            std::numeric_limits<std::uint32_t>::max() / initial_backoff_ms) {
-        // Overflow would occur, use max_backoff
-        backoff_ms = static_cast<std::uint64_t>(max_backoff.count());
-    } else {
-        backoff_ms = static_cast<std::uint64_t>((1ULL << retry_attempts) *
-                                                initial_backoff_ms);
-        if (backoff_ms > static_cast<std::uint64_t>(max_backoff.count())) {
-            backoff_ms = static_cast<std::uint64_t>(max_backoff.count());
-        }
-    }
-
-    // Apply jitter (random factor between 0.0 and 1.0)
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-    double jitter = dist(gen);
-
-    return std::chrono::milliseconds(static_cast<long>(backoff_ms * jitter));
-}
-
-bool RestClient::isRetriable(int status_code) const {
-    return status_code == 408      // REQUEST_TIMEOUT
-           || status_code == 429   // TOO_MANY_REQUESTS
-           || status_code == 500   // INTERNAL_SERVER_ERROR
-           || status_code == 502   // BAD_GATEWAY
-           || status_code == 503   // SERVICE_UNAVAILABLE
-           || status_code == 504;  // GATEWAY_TIMEOUT
 }
 
 }  // namespace schemaregistry::rest
