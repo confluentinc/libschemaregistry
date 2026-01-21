@@ -44,6 +44,9 @@ blocks:
                 /tmp/vcpkg/bootstrap-vcpkg.sh
               fi
             
+            # Clean potentially mismatched CMake cache from different platform
+            - rm -rf build/CMakeCache.txt build/CMakeFiles
+            
             # Configure CMake
             - |
               cmake -G Ninja -B build \
@@ -135,6 +138,9 @@ blocks:
                 /tmp/vcpkg/bootstrap-vcpkg.sh
               fi
             
+            # Clean potentially mismatched CMake cache from different platform
+            - rm -rf build/CMakeCache.txt build/CMakeFiles
+            
             # Configure CMake
             - |
               NINJA_BIN=$(command -v ninja || echo /usr/local/bin/ninja)
@@ -200,6 +206,9 @@ blocks:
                 git clone https://github.com/Microsoft/vcpkg.git /tmp/vcpkg
                 /tmp/vcpkg/bootstrap-vcpkg.sh
               fi
+            
+            # Clean potentially mismatched CMake cache from different platform
+            - rm -rf build/CMakeCache.txt build/CMakeFiles
             
             # Configure CMake
             - |
@@ -346,6 +355,11 @@ blocks:
                 git -C C:\\vcpkg pull --ff-only
                 if (Test-Path C:\\vcpkg\\bootstrap-vcpkg.bat) { & C:\\vcpkg\\bootstrap-vcpkg.bat -disableMetrics }
               }
+            
+            # Clean potentially mismatched CMake cache from different platform
+            - |
+              if (Test-Path build/CMakeCache.txt) { Remove-Item -Recurse -Force build/CMakeCache.txt }
+              if (Test-Path build/CMakeFiles) { Remove-Item -Recurse -Force build/CMakeFiles }
             
             # Configure CMake
             - |
