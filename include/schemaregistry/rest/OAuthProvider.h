@@ -7,8 +7,8 @@
  * Authentication Methods (Mutually Exclusive):
  * ClientConfiguration supports three authentication methods:
  * - Basic Auth (API Key/Secret)
- * - OAuth Provider (this)
- * - Static Bearer Token (legacy)
+ * - OAuth Provider
+ * - Static Bearer Token
  *
  * Setting any authentication method automatically clears the others.
  * Only one authentication method can be active at a time.
@@ -72,28 +72,6 @@ class OAuthProvider {
   virtual std::string get_access_token() {
     return get_bearer_fields().access_token;
   }
-};
-
-/**
- * Static token provider. Uses a pre-obtained bearer token.
- *
- */
-class StaticTokenProvider : public OAuthProvider {
- public:
-  /**
-   * Construct static token provider.
-   *
-   * @param token Bearer access token (required)
-   * @param logical_cluster Schema Registry logical cluster ID (optional, required for Confluent Cloud)
-   * @param identity_pool_id Identity pool ID (optional, required for Confluent Cloud)
-   */
-  StaticTokenProvider(std::string token, std::string logical_cluster = "",
-                      std::string identity_pool_id = "");
-
-  BearerFields get_bearer_fields() override;
-
- private:
-  const BearerFields fields_;
 };
 
 /**

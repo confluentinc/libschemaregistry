@@ -19,22 +19,6 @@ using json = nlohmann::json;
 namespace schemaregistry::rest {
 
 // ============================================================================
-// StaticTokenProvider Implementation
-// ============================================================================
-
-StaticTokenProvider::StaticTokenProvider(std::string token,
-                                         std::string logical_cluster,
-                                         std::string identity_pool_id)
-    : fields_(std::move(token), std::move(logical_cluster),
-              std::move(identity_pool_id)) {
-  if (fields_.access_token.empty()) {
-    throw std::invalid_argument("access_token cannot be empty");
-  }
-}
-
-BearerFields StaticTokenProvider::get_bearer_fields() { return fields_; }
-
-// ============================================================================
 // OAuthClientProvider::Config Implementation
 // ============================================================================
 

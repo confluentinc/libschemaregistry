@@ -142,7 +142,7 @@ cpr::Response RestClient::sendRequest(
     // Handle authentication. Check in order:
     // - Basic Auth: API Key/Secret authentication
     // - OAuth Provider: OAuth 2.0 with automatic token refresh
-    // - Bearer Token: Static token (legacy, no refresh)
+    // - Bearer Token: Static token
     const auto oauth_provider = configuration_->getOAuthProvider();
     const auto basic_auth = configuration_->getBasicAuth();
     const auto bearer_token = configuration_->getBearerAccessToken();

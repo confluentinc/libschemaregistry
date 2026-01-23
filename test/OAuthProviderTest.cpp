@@ -11,52 +11,6 @@
 using namespace schemaregistry::rest;
 
 // =============================================================================
-// StaticTokenProvider Tests
-// =============================================================================
-
-TEST(StaticTokenProviderTest, ReturnsCorrectFields) {
-  auto provider = std::make_shared<StaticTokenProvider>(
-      "test-token", "lsrc-123", "pool-456");
-
-  auto fields = provider->get_bearer_fields();
-
-  EXPECT_EQ(fields.access_token, "test-token");
-  EXPECT_EQ(fields.logical_cluster, "lsrc-123");
-  EXPECT_EQ(fields.identity_pool_id, "pool-456");
-}
-
-TEST(StaticTokenProviderTest, GetAccessTokenConvenience) {
-  auto provider = std::make_shared<StaticTokenProvider>(
-      "test-token", "lsrc-123", "pool-456");
-
-  EXPECT_EQ(provider->get_access_token(), "test-token");
-}
-
-TEST(StaticTokenProviderTest, ThrowsOnEmptyToken) {
-  EXPECT_THROW(
-      StaticTokenProvider("", "lsrc-123", "pool-456"),
-      std::invalid_argument);
-}
-
-TEST(StaticTokenProviderTest, AcceptsEmptyClusterForPlatform) {
-  // Empty cluster and pool ID should be accepted (for Confluent Platform)
-  EXPECT_NO_THROW(StaticTokenProvider("token", "", ""));
-
-  auto provider = std::make_shared<StaticTokenProvider>("token", "", "");
-  auto fields = provider->get_bearer_fields();
-
-  EXPECT_EQ(fields.access_token, "token");
-  EXPECT_EQ(fields.logical_cluster, "");
-  EXPECT_EQ(fields.identity_pool_id, "");
-}
-
-TEST(StaticTokenProviderTest, AcceptsPartialCloudFields) {
-  // Partial Cloud fields should be accepted (though not recommended)
-  EXPECT_NO_THROW(StaticTokenProvider("token", "lsrc-123", ""));
-  EXPECT_NO_THROW(StaticTokenProvider("token", "", "pool-456"));
-}
-
-// =============================================================================
 // OAuthToken Tests
 // =============================================================================
 
@@ -290,4 +244,25 @@ TEST(BearerFieldsTest, ParameterizedConstructor) {
   EXPECT_EQ(fields.access_token, "test-token");
   EXPECT_EQ(fields.logical_cluster, "lsrc-123");
   EXPECT_EQ(fields.identity_pool_id, "pool-456");
+}
+
+// =============================================================================
+// Polymorphism Tests (verifies all providers work through base interface)
+// =============================================================================
+
+TEST(PolymorphismTest, AllProvidersWorkThroughBaseInterface) {
+  // Test that OAuth provider types work through OAuthProvider* interface
+  // This mimics how RestClient uses providers
+
+  std::vector<std::shared_ptr<OAuthProvider>> providers;
+
+  // Custom provider
+  providers.push_back(std::make_shared<CustomOAuthProvider>(
+      []() { return "custom-token"; }, "lsrc-222", "pool-222"));
+
+  // Verify it works through base interface (polymorphism)
+  auto fields = providers[0]->get_bearer_fields();
+  EXPECT_EQ(fields.access_token, "custom-token");
+  EXPECT_EQ(fields.logical_cluster, "lsrc-222");
+  EXPECT_EQ(fields.identity_pool_id, "pool-222");
 }
