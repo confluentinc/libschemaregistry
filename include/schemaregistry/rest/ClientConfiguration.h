@@ -22,12 +22,26 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace schemaregistry::rest {
 
+class OAuthProvider;
+
+/**
+ * Configuration for Schema Registry client.
+ *
+ * Authentication methods are mutually exclusive:
+ * - Basic Auth (setBasicAuth) - API Key/Secret authentication
+ * - OAuth Provider (setOAuthProvider) - OAuth 2.0 with automatic token refresh
+ * - Bearer Token (setBearerAccessToken) - Static bearer token (legacy, no auto-refresh)
+ *
+ * Setting any authentication method automatically clears previously configured methods.
+ * Only one authentication method can be active at a time.
+ */
 class ClientConfiguration {
   public:
     ClientConfiguration(const std::vector<std::string> &base_urls);
@@ -35,23 +49,28 @@ class ClientConfiguration {
 
     std::vector<std::string> getBaseUrls() const;
 
-    // Authentication getters and setters
+    // Basic authentication
     std::optional<std::pair<std::string, std::string>> getBasicAuth() const;
     void setBasicAuth(
         const std::optional<std::pair<std::string, std::string>> &basic_auth);
 
+    // Static bearer token
     std::optional<std::string> getBearerAccessToken() const;
     void setBearerAccessToken(
         const std::optional<std::string> &bearer_access_token);
 
-    // Cache configuration getters and setters
+    // OAuth provider
+    std::shared_ptr<OAuthProvider> getOAuthProvider() const;
+    void setOAuthProvider(std::shared_ptr<OAuthProvider> provider);
+
+    // Cache configuration
     std::uint64_t getCacheCapacity() const;
     void setCacheCapacity(std::uint64_t cache_capacity);
 
     std::uint64_t getCacheLatestTtlSec() const;
     void setCacheLatestTtlSec(std::uint64_t cache_latest_ttl_sec);
 
-    // Retry configuration getters and setters
+    // Retry configuration
     std::uint32_t getMaxRetries() const;
     void setMaxRetries(std::uint32_t max_retries);
 
@@ -72,6 +91,7 @@ class ClientConfiguration {
 
     std::optional<std::pair<std::string, std::string>> basic_auth_;
     std::optional<std::string> bearer_access_token_;
+    std::shared_ptr<OAuthProvider> oauth_provider_;
 
     std::uint64_t cache_capacity_;
     std::uint64_t cache_latest_ttl_sec_;
