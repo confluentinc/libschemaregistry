@@ -12,6 +12,8 @@
 
 #include "schemaregistry/rest/ClientConfiguration.h"
 
+#include "schemaregistry/rest/OAuthProvider.h"
+
 namespace schemaregistry::rest {
 
 ClientConfiguration::ClientConfiguration(
@@ -40,6 +42,11 @@ ClientConfiguration::getBasicAuth() const {
 void ClientConfiguration::setBasicAuth(
     const std::optional<std::pair<std::string, std::string>> &basic_auth) {
     basic_auth_ = basic_auth;
+    // Clear other authentication methods (mutually exclusive)
+    if (basic_auth.has_value()) {
+        oauth_provider_ = nullptr;
+        bearer_access_token_ = std::nullopt;
+    }
 }
 
 std::optional<std::string> ClientConfiguration::getBearerAccessToken() const {
@@ -49,6 +56,26 @@ std::optional<std::string> ClientConfiguration::getBearerAccessToken() const {
 void ClientConfiguration::setBearerAccessToken(
     const std::optional<std::string> &bearer_access_token) {
     bearer_access_token_ = bearer_access_token;
+    // Clear other authentication methods (mutually exclusive)
+    if (bearer_access_token.has_value()) {
+        basic_auth_ = std::nullopt;
+        oauth_provider_ = nullptr;
+    }
+}
+
+// OAuth provider getters and setters
+std::shared_ptr<OAuthProvider> ClientConfiguration::getOAuthProvider() const {
+    return oauth_provider_;
+}
+
+void ClientConfiguration::setOAuthProvider(
+    std::shared_ptr<OAuthProvider> provider) {
+    oauth_provider_ = provider;
+    // Clear other authentication methods (mutually exclusive)
+    if (provider) {
+        basic_auth_ = std::nullopt;
+        bearer_access_token_ = std::nullopt;
+    }
 }
 
 // Cache configuration getters and setters
