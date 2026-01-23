@@ -31,8 +31,8 @@ namespace schemaregistry::rest {
  *
  * Confluent Cloud requires three fields:
  * - access_token: OAuth bearer token
- * - logical_cluster: Schema Registry logical cluster ID (e.g., "lsrc-12345")
- * - identity_pool_id: Identity pool ID (e.g., "pool-abcd")
+ * - logical_cluster: Schema Registry logical cluster ID (e.g., "lsrc-12345"). Required for Confluent Cloud
+ * - identity_pool_id: Identity pool ID (e.g., "pool-abcd"). Required for Confluent Cloud
  */
 struct BearerFields {
   std::string access_token;
@@ -221,7 +221,7 @@ class OAuthProviderFactory {
    *
    * Additional required keys based on method:
    * For STATIC_TOKEN:
-   * - bearer.auth.token
+   * - bearer.auth.token (pre-obtained)
    * For OAUTHBEARER:
    * - bearer.auth.client.id
    * - bearer.auth.client.secret

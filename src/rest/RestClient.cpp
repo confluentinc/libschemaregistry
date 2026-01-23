@@ -161,7 +161,6 @@ cpr::Response RestClient::sendRequest(
             session->SetBearer(cpr::Bearer{fields.access_token});
 
             // Add Confluent Cloud headers if provided
-            // Required for Confluent Cloud, not needed for self-hosted Confluent Platform
             if (!fields.identity_pool_id.empty()) {
                 cpr_headers["Confluent-Identity-Pool-Id"] = fields.identity_pool_id;
             }

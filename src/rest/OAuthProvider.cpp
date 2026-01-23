@@ -30,8 +30,6 @@ StaticTokenProvider::StaticTokenProvider(std::string token,
   if (fields_.access_token.empty()) {
     throw std::invalid_argument("access_token cannot be empty");
   }
-  // Note: logical_cluster and identity_pool_id are optional
-  // Required for Confluent Cloud, not needed for self-hosted Confluent Platform
 }
 
 BearerFields StaticTokenProvider::get_bearer_fields() { return fields_; }
@@ -205,9 +203,10 @@ std::shared_ptr<OAuthProvider> OAuthProviderFactory::create(
 std::shared_ptr<OAuthProvider>
 OAuthProviderFactory::create_static_token_provider(
     const std::map<std::string, std::string>& config) {
+  // Required params
   std::string token = get_required_config(config, "bearer.auth.token");
 
-  // Optional Confluent Cloud parameters
+  // Params required for Confluent Cloud
   std::string logical_cluster;
   std::string identity_pool_id;
   auto cluster_it = config.find("bearer.auth.logical.cluster");
@@ -228,6 +227,7 @@ std::shared_ptr<OAuthProvider> OAuthProviderFactory::create_oauth_provider(
     const std::map<std::string, std::string>& config) {
   OAuthClientProvider::Config oauth_config;
 
+  // Required params
   oauth_config.client_id = get_required_config(config, "bearer.auth.client.id");
   oauth_config.client_secret =
       get_required_config(config, "bearer.auth.client.secret");
@@ -235,7 +235,7 @@ std::shared_ptr<OAuthProvider> OAuthProviderFactory::create_oauth_provider(
   oauth_config.token_endpoint_url =
       get_required_config(config, "bearer.auth.issuer.endpoint.url");
 
-  // Optional Confluent Cloud parameters
+  // Params required for Confluent Cloud
   auto cluster_it = config.find("bearer.auth.logical.cluster");
   if (cluster_it != config.end()) {
     oauth_config.logical_cluster = cluster_it->second;
