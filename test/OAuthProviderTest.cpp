@@ -199,82 +199,79 @@ TEST(OAuthClientConfigTest, DefaultValuesMatch) {
 }
 
 // =============================================================================
-// OAuthProviderFactory Tests
+// CustomOAuthProvider Tests
 // =============================================================================
 
-TEST(OAuthProviderFactoryTest, CreatesStaticTokenProvider) {
-  std::map<std::string, std::string> config = {
-      {"bearer.auth.credentials.source", "STATIC_TOKEN"},
-      {"bearer.auth.token", "test-token"},
-      {"bearer.auth.logical.cluster", "lsrc-123"},
-      {"bearer.auth.identity.pool.id", "pool-456"}
+TEST(CustomOAuthProviderTest, CallsUserFunction) {
+  int call_count = 0;
+  auto fetch_fn = [&call_count]() {
+    call_count++;
+    return "custom-token-" + std::to_string(call_count);
   };
 
-  auto provider = OAuthProviderFactory::create(config);
-  ASSERT_NE(provider, nullptr);
+  auto provider = std::make_shared<CustomOAuthProvider>(fetch_fn, "lsrc-123", "pool-456");
+
+  auto fields1 = provider->get_bearer_fields();
+  EXPECT_EQ(fields1.access_token, "custom-token-1");
+  EXPECT_EQ(fields1.logical_cluster, "lsrc-123");
+  EXPECT_EQ(fields1.identity_pool_id, "pool-456");
+
+  // Function is called every time (no caching)
+  auto fields2 = provider->get_bearer_fields();
+  EXPECT_EQ(fields2.access_token, "custom-token-2");
+  EXPECT_EQ(call_count, 2);
+}
+
+TEST(CustomOAuthProviderTest, WorksWithoutCloudFields) {
+  auto fetch_fn = []() { return "my-token"; };
+  auto provider = std::make_shared<CustomOAuthProvider>(fetch_fn);
 
   auto fields = provider->get_bearer_fields();
-  EXPECT_EQ(fields.access_token, "test-token");
-  EXPECT_EQ(fields.logical_cluster, "lsrc-123");
-  EXPECT_EQ(fields.identity_pool_id, "pool-456");
+  EXPECT_EQ(fields.access_token, "my-token");
+  EXPECT_EQ(fields.logical_cluster, "");
+  EXPECT_EQ(fields.identity_pool_id, "");
 }
 
-TEST(OAuthProviderFactoryTest, CreatesOAuthClientProvider) {
-  std::map<std::string, std::string> config = {
-      {"bearer.auth.credentials.source", "OAUTHBEARER"},
-      {"bearer.auth.client.id", "client-id"},
-      {"bearer.auth.client.secret", "client-secret"},
-      {"bearer.auth.scope", "schema_registry"},
-      {"bearer.auth.issuer.endpoint.url", "https://idp.example.com/token"},
-      {"bearer.auth.logical.cluster", "lsrc-123"},
-      {"bearer.auth.identity.pool.id", "pool-456"}
-  };
-
-  auto provider = OAuthProviderFactory::create(config);
-  ASSERT_NE(provider, nullptr);
-
-  // Can't test much without actual OAuth server, but creation should succeed
+TEST(CustomOAuthProviderTest, ThrowsOnEmptyFunction) {
+  CustomOAuthProvider::TokenFetchFunction empty_fn;
+  EXPECT_THROW(CustomOAuthProvider(empty_fn, "lsrc-123", "pool-456"),
+               std::invalid_argument);
 }
 
-TEST(OAuthProviderFactoryTest, ThrowsOnMissingSource) {
-  std::map<std::string, std::string> config = {
-      {"bearer.auth.token", "test-token"}
-  };
+TEST(CustomOAuthProviderTest, ThrowsWhenFunctionReturnsEmpty) {
+  auto fetch_fn = []() { return ""; };
+  auto provider = std::make_shared<CustomOAuthProvider>(fetch_fn, "lsrc-123", "pool-456");
 
-  EXPECT_THROW(OAuthProviderFactory::create(config), std::invalid_argument);
+  EXPECT_THROW(provider->get_bearer_fields(), std::runtime_error);
 }
 
-TEST(OAuthProviderFactoryTest, ThrowsOnInvalidSource) {
-  std::map<std::string, std::string> config = {
-      {"bearer.auth.credentials.source", "INVALID_SOURCE"}
+TEST(CustomOAuthProviderTest, PropagatlesUserFunctionExceptions) {
+  auto fetch_fn = []() -> std::string {
+    throw std::runtime_error("Custom IdP unavailable");
   };
+  auto provider = std::make_shared<CustomOAuthProvider>(fetch_fn, "lsrc-123", "pool-456");
 
-  EXPECT_THROW(OAuthProviderFactory::create(config), std::invalid_argument);
+  EXPECT_THROW({
+    try {
+      provider->get_bearer_fields();
+    } catch (const std::runtime_error& e) {
+      EXPECT_STREQ(e.what(), "Custom IdP unavailable");
+      throw;
+    }
+  }, std::runtime_error);
 }
 
-TEST(OAuthProviderFactoryTest, ThrowsOnMissingStaticToken) {
-  std::map<std::string, std::string> config = {
-      {"bearer.auth.credentials.source", "STATIC_TOKEN"},
-      // Missing bearer.auth.token
-      {"bearer.auth.logical.cluster", "lsrc-123"},
-      {"bearer.auth.identity.pool.id", "pool-456"}
-  };
+TEST(CustomOAuthProviderTest, WorksWithLambdaCapture) {
+  std::string token = "captured-token";
+  std::string cluster = "lsrc-999";
 
-  EXPECT_THROW(OAuthProviderFactory::create(config), std::invalid_argument);
-}
+  auto fetch_fn = [token]() { return token; };
+  auto provider = std::make_shared<CustomOAuthProvider>(fetch_fn, cluster, "pool-888");
 
-TEST(OAuthProviderFactoryTest, ThrowsOnMissingOAuthClientId) {
-  std::map<std::string, std::string> config = {
-      {"bearer.auth.credentials.source", "OAUTHBEARER"},
-      // Missing bearer.auth.client.id
-      {"bearer.auth.client.secret", "client-secret"},
-      {"bearer.auth.scope", "schema_registry"},
-      {"bearer.auth.issuer.endpoint.url", "https://idp.example.com/token"},
-      {"bearer.auth.logical.cluster", "lsrc-123"},
-      {"bearer.auth.identity.pool.id", "pool-456"}
-  };
-
-  EXPECT_THROW(OAuthProviderFactory::create(config), std::invalid_argument);
+  auto fields = provider->get_bearer_fields();
+  EXPECT_EQ(fields.access_token, "captured-token");
+  EXPECT_EQ(fields.logical_cluster, "lsrc-999");
+  EXPECT_EQ(fields.identity_pool_id, "pool-888");
 }
 
 // =============================================================================

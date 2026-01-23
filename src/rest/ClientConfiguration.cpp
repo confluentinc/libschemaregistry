@@ -33,7 +33,7 @@ std::vector<std::string> ClientConfiguration::getBaseUrls() const {
     return baseUrls_;
 }
 
-// Authentication getters and setters
+// Basic authentication
 std::optional<std::pair<std::string, std::string>>
 ClientConfiguration::getBasicAuth() const {
     return basic_auth_;
@@ -42,13 +42,14 @@ ClientConfiguration::getBasicAuth() const {
 void ClientConfiguration::setBasicAuth(
     const std::optional<std::pair<std::string, std::string>> &basic_auth) {
     basic_auth_ = basic_auth;
-    // Clear other authentication methods (mutually exclusive)
+    // Clear other authentication methods
     if (basic_auth.has_value()) {
         oauth_provider_ = nullptr;
         bearer_access_token_ = std::nullopt;
     }
 }
 
+// Static bearer token
 std::optional<std::string> ClientConfiguration::getBearerAccessToken() const {
     return bearer_access_token_;
 }
@@ -56,14 +57,14 @@ std::optional<std::string> ClientConfiguration::getBearerAccessToken() const {
 void ClientConfiguration::setBearerAccessToken(
     const std::optional<std::string> &bearer_access_token) {
     bearer_access_token_ = bearer_access_token;
-    // Clear other authentication methods (mutually exclusive)
+    // Clear other authentication methods
     if (bearer_access_token.has_value()) {
         basic_auth_ = std::nullopt;
         oauth_provider_ = nullptr;
     }
 }
 
-// OAuth provider getters and setters
+// OAuth provider
 std::shared_ptr<OAuthProvider> ClientConfiguration::getOAuthProvider() const {
     return oauth_provider_;
 }
@@ -71,14 +72,14 @@ std::shared_ptr<OAuthProvider> ClientConfiguration::getOAuthProvider() const {
 void ClientConfiguration::setOAuthProvider(
     std::shared_ptr<OAuthProvider> provider) {
     oauth_provider_ = provider;
-    // Clear other authentication methods (mutually exclusive)
+    // Clear other authentication methods
     if (provider) {
         basic_auth_ = std::nullopt;
         bearer_access_token_ = std::nullopt;
     }
 }
 
-// Cache configuration getters and setters
+// Cache configuration
 std::uint64_t ClientConfiguration::getCacheCapacity() const {
     return cache_capacity_;
 }
@@ -96,7 +97,7 @@ void ClientConfiguration::setCacheLatestTtlSec(
     cache_latest_ttl_sec_ = cache_latest_ttl_sec;
 }
 
-// Retry configuration getters and setters
+// Retry configuration
 std::uint32_t ClientConfiguration::getMaxRetries() const {
     return max_retries_;
 }

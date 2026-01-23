@@ -29,7 +29,6 @@
 
 namespace schemaregistry::rest {
 
-// Forward declaration
 class OAuthProvider;
 
 /**
@@ -50,39 +49,28 @@ class ClientConfiguration {
 
     std::vector<std::string> getBaseUrls() const;
 
-    /**
-     * Basic authentication (API Key/Secret).
-     * Setting this clears OAuth Provider and Bearer Token.
-     */
+    // Basic authentication
     std::optional<std::pair<std::string, std::string>> getBasicAuth() const;
     void setBasicAuth(
         const std::optional<std::pair<std::string, std::string>> &basic_auth);
 
-    /**
-     * OAuth provider for automatic token management.
-     * Setting this clears Basic Auth and Bearer Token.
-     * Supports static tokens and OAuth Client Credentials flow.
-     */
-    std::shared_ptr<OAuthProvider> getOAuthProvider() const;
-    void setOAuthProvider(std::shared_ptr<OAuthProvider> provider);
-
-    /**
-     * Static bearer token (legacy, no automatic refresh).
-     * Setting this clears Basic Auth and OAuth Provider.
-     * For automatic token management, use setOAuthProvider instead.
-     */
+    // Static bearer token
     std::optional<std::string> getBearerAccessToken() const;
     void setBearerAccessToken(
         const std::optional<std::string> &bearer_access_token);
 
-    // Cache configuration getters and setters
+    // OAuth provider
+    std::shared_ptr<OAuthProvider> getOAuthProvider() const;
+    void setOAuthProvider(std::shared_ptr<OAuthProvider> provider);
+
+    // Cache configuration
     std::uint64_t getCacheCapacity() const;
     void setCacheCapacity(std::uint64_t cache_capacity);
 
     std::uint64_t getCacheLatestTtlSec() const;
     void setCacheLatestTtlSec(std::uint64_t cache_latest_ttl_sec);
 
-    // Retry configuration getters and setters
+    // Retry configuration
     std::uint32_t getMaxRetries() const;
     void setMaxRetries(std::uint32_t max_retries);
 

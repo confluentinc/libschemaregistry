@@ -181,84 +181,29 @@ OAuthToken OAuthClientProvider::fetch_token() {
 }
 
 // ============================================================================
-// OAuthProviderFactory Implementation
+// CustomOAuthProvider Implementation
 // ============================================================================
 
-std::shared_ptr<OAuthProvider> OAuthProviderFactory::create(
-    const std::map<std::string, std::string>& config) {
-  std::string source =
-      get_required_config(config, "bearer.auth.credentials.source");
-
-  if (source == "STATIC_TOKEN") {
-    return create_static_token_provider(config);
-  } else if (source == "OAUTHBEARER") {
-    return create_oauth_provider(config);
-  } else {
-    throw std::invalid_argument(
-        "Invalid bearer.auth.credentials.source: " + source +
-        ". Must be STATIC_TOKEN or OAUTHBEARER");
+CustomOAuthProvider::CustomOAuthProvider(TokenFetchFunction fetch_fn,
+                                         std::string logical_cluster,
+                                         std::string identity_pool_id)
+    : fetch_fn_(std::move(fetch_fn)),
+      logical_cluster_(std::move(logical_cluster)),
+      identity_pool_id_(std::move(identity_pool_id)) {
+  if (!fetch_fn_) {
+    throw std::invalid_argument("fetch_fn cannot be empty");
   }
 }
 
-std::shared_ptr<OAuthProvider>
-OAuthProviderFactory::create_static_token_provider(
-    const std::map<std::string, std::string>& config) {
-  // Required params
-  std::string token = get_required_config(config, "bearer.auth.token");
+BearerFields CustomOAuthProvider::get_bearer_fields() {
+  // Call the custom function to get access token
+  std::string access_token = fetch_fn_();
 
-  // Params required for Confluent Cloud
-  std::string logical_cluster;
-  std::string identity_pool_id;
-  auto cluster_it = config.find("bearer.auth.logical.cluster");
-  if (cluster_it != config.end()) {
-    logical_cluster = cluster_it->second;
-  }
-  auto pool_it = config.find("bearer.auth.identity.pool.id");
-  if (pool_it != config.end()) {
-    identity_pool_id = pool_it->second;
+  if (access_token.empty()) {
+    throw std::runtime_error("Custom token fetch function returned empty token");
   }
 
-  return std::make_shared<StaticTokenProvider>(
-      std::move(token), std::move(logical_cluster),
-      std::move(identity_pool_id));
-}
-
-std::shared_ptr<OAuthProvider> OAuthProviderFactory::create_oauth_provider(
-    const std::map<std::string, std::string>& config) {
-  OAuthClientProvider::Config oauth_config;
-
-  // Required params
-  oauth_config.client_id = get_required_config(config, "bearer.auth.client.id");
-  oauth_config.client_secret =
-      get_required_config(config, "bearer.auth.client.secret");
-  oauth_config.scope = get_required_config(config, "bearer.auth.scope");
-  oauth_config.token_endpoint_url =
-      get_required_config(config, "bearer.auth.issuer.endpoint.url");
-
-  // Params required for Confluent Cloud
-  auto cluster_it = config.find("bearer.auth.logical.cluster");
-  if (cluster_it != config.end()) {
-    oauth_config.logical_cluster = cluster_it->second;
-  }
-  auto pool_it = config.find("bearer.auth.identity.pool.id");
-  if (pool_it != config.end()) {
-    oauth_config.identity_pool_id = pool_it->second;
-  }
-
-  return std::make_shared<OAuthClientProvider>(oauth_config);
-}
-
-
-std::string OAuthProviderFactory::get_required_config(
-    const std::map<std::string, std::string>& config, const std::string& key) {
-  auto it = config.find(key);
-  if (it == config.end()) {
-    throw std::invalid_argument("Missing required configuration key: " + key);
-  }
-  if (it->second.empty()) {
-    throw std::invalid_argument("Configuration key cannot be empty: " + key);
-  }
-  return it->second;
+  return BearerFields{std::move(access_token), logical_cluster_, identity_pool_id_};
 }
 
 }  // namespace schemaregistry::rest

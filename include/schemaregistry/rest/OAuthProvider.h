@@ -197,55 +197,57 @@ class OAuthClientProvider : public OAuthProvider {
   OAuthToken token_;
 };
 
-
 /**
- * Factory for creating OAuth providers from configuration strings.
+ * Custom OAuth provider that delegates token fetching to a user-provided function.
  *
- * Supports creating providers from key-value configuration maps similar
- * to other Confluent clients (Java, Python).
+ * This allows users to implement custom token fetching logic without implementing
+ * a full provider class.
  *
- * Supported authentication methods:
- * - STATIC_TOKEN: Pre-obtained bearer token
- * - OAUTHBEARER: OAuth 2.0 Client Credentials flow
+ * Example usage:
+ * @code
+ * auto provider = std::make_shared<CustomOAuthProvider>(
+ *     []() { return fetch_token_from_my_idp(); },
+ *     "lsrc-12345",
+ *     "pool-67890"
+ * );
+ * @endcode
+ *
+ * Note: The function is called on every get_bearer_fields() call.
+ * Users should implement their own caching and thread safety if needed.
  */
-class OAuthProviderFactory {
+class CustomOAuthProvider : public OAuthProvider {
  public:
   /**
-   * Create OAuth provider from configuration map.
+   * Function type that returns an access token string.
+   * The function should handle all token fetching logic including:
+   * - Fetching from custom OAuth endpoints
+   * - Caching (if desired)
+   * - Thread safety (if needed)
+   * - Error handling
    *
-   * Required keys:
-   * - bearer.auth.credentials.source: STATIC_TOKEN or OAUTHBEARER
-   * Required keys for Confluent Cloud:
-   * - bearer.auth.logical.cluster
-   * - bearer.auth.identity.pool.id
-   *
-   * Additional required keys based on method:
-   * For STATIC_TOKEN:
-   * - bearer.auth.token (pre-obtained)
-   * For OAUTHBEARER:
-   * - bearer.auth.client.id
-   * - bearer.auth.client.secret
-   * - bearer.auth.scope
-   * - bearer.auth.issuer.endpoint.url
-   *
-   * Optional keys
-   *
-   * @param config Configuration map
-   * @return Shared pointer to OAuth provider
-   * @throws std::invalid_argument if configuration is invalid or missing required keys
+   * @return Access token string
+   * @throws std::runtime_error if unable to fetch token
    */
-  static std::shared_ptr<OAuthProvider> create(
-      const std::map<std::string, std::string>& config);
+  using TokenFetchFunction = std::function<std::string()>;
+
+  /**
+   * Construct custom OAuth provider with user-provided token fetch function.
+   *
+   * @param fetch_fn Function that returns access token (required)
+   * @param logical_cluster Schema Registry logical cluster ID (optional, required for Confluent Cloud)
+   * @param identity_pool_id Identity pool ID (optional, required for Confluent Cloud)
+   * @throws std::invalid_argument if fetch_fn is empty
+   */
+  CustomOAuthProvider(TokenFetchFunction fetch_fn,
+                     std::string logical_cluster = "",
+                     std::string identity_pool_id = "");
+
+  BearerFields get_bearer_fields() override;
 
  private:
-  static std::shared_ptr<OAuthProvider> create_static_token_provider(
-      const std::map<std::string, std::string>& config);
-
-  static std::shared_ptr<OAuthProvider> create_oauth_provider(
-      const std::map<std::string, std::string>& config);
-
-  static std::string get_required_config(
-      const std::map<std::string, std::string>& config, const std::string& key);
+  const TokenFetchFunction fetch_fn_;
+  const std::string logical_cluster_;
+  const std::string identity_pool_id_;
 };
 
 }  // namespace schemaregistry::rest
