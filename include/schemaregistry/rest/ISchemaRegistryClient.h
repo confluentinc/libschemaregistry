@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
+#include "schemaregistry/rest/model/Association.h"
 #include "schemaregistry/rest/model/RegisteredSchema.h"
 #include "schemaregistry/rest/model/ServerConfig.h"
 
@@ -143,6 +144,33 @@ class ISchemaRegistryClient {
      */
     virtual schemaregistry::rest::model::ServerConfig updateDefaultConfig(
         const schemaregistry::rest::model::ServerConfig &config) = 0;
+
+    /**
+     * Get associations by resource name
+     * Maps to get_associations_by_resource_name from schema_registry_client.rs
+     */
+    virtual std::vector<schemaregistry::rest::model::Association>
+    getAssociationsByResourceName(
+        const std::string &resource_name, const std::string &resource_namespace,
+        const std::string &resource_type,
+        const std::vector<std::string> &association_types,
+        const std::string &lifecycle, int32_t offset, int32_t limit) = 0;
+
+    /**
+     * Create or update associations
+     */
+    virtual schemaregistry::rest::model::AssociationResponse createAssociation(
+        const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+            &request) = 0;
+
+    /**
+     * Delete associations
+     */
+    virtual void deleteAssociations(
+        const std::string &resource_id,
+        const std::optional<std::string> &resource_type,
+        const std::optional<std::vector<std::string>> &association_types,
+        bool cascade_lifecycle) = 0;
 
     /**
      * Clear latest version caches

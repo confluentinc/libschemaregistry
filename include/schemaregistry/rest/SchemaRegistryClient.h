@@ -20,6 +20,7 @@
 #include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/rest/SchemaStore.h"
 #include "schemaregistry/rest/TtlLruCache.h"
+#include "schemaregistry/rest/model/Association.h"
 #include "schemaregistry/rest/model/RegisteredSchema.h"
 #include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/rest/model/ServerConfig.h"
@@ -161,6 +162,23 @@ class SchemaRegistryClient : public ISchemaRegistryClient {
 
     schemaregistry::rest::model::ServerConfig updateDefaultConfig(
         const schemaregistry::rest::model::ServerConfig &config) override;
+
+    std::vector<schemaregistry::rest::model::Association>
+    getAssociationsByResourceName(
+        const std::string &resource_name, const std::string &resource_namespace,
+        const std::string &resource_type,
+        const std::vector<std::string> &association_types,
+        const std::string &lifecycle, int32_t offset, int32_t limit) override;
+
+    schemaregistry::rest::model::AssociationResponse createAssociation(
+        const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+            &request) override;
+
+    void deleteAssociations(
+        const std::string &resource_id,
+        const std::optional<std::string> &resource_type,
+        const std::optional<std::vector<std::string>> &association_types,
+        bool cascade_lifecycle) override;
 
     void clearLatestCaches() override;
 

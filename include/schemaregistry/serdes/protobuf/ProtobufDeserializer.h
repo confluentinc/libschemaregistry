@@ -112,8 +112,7 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     using namespace schemaregistry::serdes;
     using namespace schemaregistry::serdes::protobuf;
 
-    auto strategy = base_->getConfig().subject_name_strategy;
-    auto subject_opt = strategy(ctx.topic, ctx.serde_type, std::nullopt);
+    auto subject_opt = topicNameStrategy(ctx.topic, ctx.serde_type, std::nullopt);
     bool has_subject = subject_opt.has_value();
     std::optional<schemaregistry::rest::model::RegisteredSchema> latest_schema;
 
@@ -145,8 +144,8 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     }
 
     if (!has_subject) {
-        subject_opt = strategy(ctx.topic, ctx.serde_type,
-                               std::make_optional(writer_schema_raw));
+        subject_opt = topicNameStrategy(ctx.topic, ctx.serde_type,
+                                        std::make_optional(writer_schema_raw));
         if (subject_opt) {
             latest_schema = base_->getSerde().getReaderSchema(
                 subject_opt.value(), "serialized",

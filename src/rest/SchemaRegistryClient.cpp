@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "schemaregistry/rest/MockSchemaRegistryClient.h"
+#include "schemaregistry/rest/model/Association.h"
 
 using json = nlohmann::json;
 
@@ -626,6 +627,95 @@ SchemaRegistryClient::updateDefaultConfig(
 
     // Parse response
     return parseConfigFromJson(responseBody);
+}
+
+std::vector<schemaregistry::rest::model::Association>
+SchemaRegistryClient::getAssociationsByResourceName(
+    const std::string &resource_name, const std::string &resource_namespace,
+    const std::string &resource_type,
+    const std::vector<std::string> &association_types,
+    const std::string &lifecycle, int32_t offset, int32_t limit) {
+    // Prepare request
+    std::string path = "/associations";
+    std::vector<std::pair<std::string, std::string>> query;
+    query.emplace_back("resourceName", resource_name);
+    if (!resource_namespace.empty()) {
+        query.emplace_back("resourceNamespace", resource_namespace);
+    }
+    if (!resource_type.empty()) {
+        query.emplace_back("resourceType", resource_type);
+    }
+    for (const auto &assoc_type : association_types) {
+        query.emplace_back("associationType", assoc_type);
+    }
+    if (!lifecycle.empty()) {
+        query.emplace_back("lifecycle", lifecycle);
+    }
+    if (offset > 0) {
+        query.emplace_back("offset", std::to_string(offset));
+    }
+    if (limit >= 0) {
+        query.emplace_back("limit", std::to_string(limit));
+    }
+
+    // Send request
+    std::string responseBody = sendHttpRequest(path, "GET", query);
+
+    // Parse response
+    json j = json::parse(responseBody);
+    std::vector<schemaregistry::rest::model::Association> associations;
+    for (const auto &item : j) {
+        schemaregistry::rest::model::Association assoc;
+        from_json(item, assoc);
+        associations.push_back(assoc);
+    }
+    return associations;
+}
+
+schemaregistry::rest::model::AssociationResponse
+SchemaRegistryClient::createAssociation(
+    const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+        &request) {
+    // Prepare request
+    std::string path = "/associations";
+
+    // Serialize request to JSON
+    json j;
+    to_json(j, request);
+    std::string body = j.dump();
+
+    // Send request
+    std::string responseBody = sendHttpRequest(path, "POST", {}, body);
+
+    // Parse response
+    json response_json = json::parse(responseBody);
+    schemaregistry::rest::model::AssociationResponse response;
+    from_json(response_json, response);
+    return response;
+}
+
+void SchemaRegistryClient::deleteAssociations(
+    const std::string &resource_id,
+    const std::optional<std::string> &resource_type,
+    const std::optional<std::vector<std::string>> &association_types,
+    bool cascade_lifecycle) {
+    // Prepare request
+    std::string path = "/associations/resources/" + urlEncode(resource_id);
+    std::vector<std::pair<std::string, std::string>> query;
+
+    if (resource_type.has_value()) {
+        query.emplace_back("resourceType", resource_type.value());
+    }
+    if (association_types.has_value()) {
+        for (const auto &assoc_type : association_types.value()) {
+            query.emplace_back("associationType", assoc_type);
+        }
+    }
+    query.emplace_back("cascadeLifecycle",
+                       cascade_lifecycle ? "true" : "false");
+
+    // Send request (DELETE returns no content)
+    sendHttpRequest(path, "DELETE", query);
 }
 
 }  // namespace schemaregistry::rest

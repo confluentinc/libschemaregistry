@@ -126,12 +126,12 @@ class AvroSerializer::Impl {
                                    const ::avro::GenericDatum &datum) {
         auto value = datum;  // Copy for potential transformation
 
-        // Get subject using strategy
-        auto strategy = base_->getConfig().subject_name_strategy;
+        // Get subject using topic name strategy
         auto subject_opt =
-            strategy(ctx.topic, ctx.serde_type,
-                     schema_.has_value() ? std::make_optional(schema_.value())
-                                         : std::nullopt);
+            topicNameStrategy(ctx.topic, ctx.serde_type,
+                              schema_.has_value()
+                                  ? std::make_optional(schema_.value())
+                                  : std::nullopt);
         if (!subject_opt.has_value()) {
             throw AvroError("Subject name strategy returned no subject");
         }

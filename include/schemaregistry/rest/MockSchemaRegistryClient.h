@@ -15,6 +15,7 @@
 #include "schemaregistry/rest/ClientConfiguration.h"
 #include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/rest/SchemaRegistryClient.h"
+#include "schemaregistry/rest/model/Association.h"
 #include "schemaregistry/rest/model/RegisteredSchema.h"
 #include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/rest/model/ServerConfig.h"
@@ -96,11 +97,59 @@ class MockSchemaStore {
 };
 
 /**
+ * Store entry for associations
+ */
+struct AssociationCacheEntry {
+    std::string resource_id;
+    std::string resource_name;
+    std::string resource_namespace;
+    std::string resource_type;
+    std::vector<schemaregistry::rest::model::Association> associations;
+};
+
+/**
+ * Mock Association Store for testing
+ */
+class MockAssociationStore {
+  private:
+    // Maps resource_id -> association cache entry
+    std::unordered_map<std::string, AssociationCacheEntry> associations;
+    int64_t next_resource_id = 1;
+
+  public:
+    MockAssociationStore() = default;
+    ~MockAssociationStore() = default;
+
+    schemaregistry::rest::model::AssociationResponse createAssociation(
+        const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+            &request);
+
+    std::vector<schemaregistry::rest::model::Association>
+    getAssociationsByResourceName(
+        const std::string &resource_name, const std::string &resource_namespace,
+        const std::string &resource_type,
+        const std::vector<std::string> &association_types,
+        const std::string &lifecycle, int32_t offset, int32_t limit);
+
+    void deleteAssociations(
+        const std::string &resource_id,
+        const std::optional<std::string> &resource_type,
+        const std::optional<std::vector<std::string>> &association_types,
+        bool cascade_lifecycle);
+
+    void clear();
+
+  private:
+    std::string generateResourceId();
+};
+
+/**
  * Mock Schema Registry Client for testing
  */
 class MockSchemaRegistryClient : public ISchemaRegistryClient {
   private:
     std::shared_ptr<MockSchemaStore> store;
+    std::shared_ptr<MockAssociationStore> associationStore;
     std::shared_ptr<const schemaregistry::rest::ClientConfiguration> config;
     std::shared_ptr<std::mutex> storeMutex;
 
@@ -182,6 +231,24 @@ class MockSchemaRegistryClient : public ISchemaRegistryClient {
 
     virtual schemaregistry::rest::model::ServerConfig updateDefaultConfig(
         const schemaregistry::rest::model::ServerConfig &config) override;
+
+    // Association operations
+    virtual std::vector<schemaregistry::rest::model::Association>
+    getAssociationsByResourceName(
+        const std::string &resource_name, const std::string &resource_namespace,
+        const std::string &resource_type,
+        const std::vector<std::string> &association_types,
+        const std::string &lifecycle, int32_t offset, int32_t limit) override;
+
+    virtual schemaregistry::rest::model::AssociationResponse createAssociation(
+        const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+            &request) override;
+
+    virtual void deleteAssociations(
+        const std::string &resource_id,
+        const std::optional<std::string> &resource_type,
+        const std::optional<std::vector<std::string>> &association_types,
+        bool cascade_lifecycle) override;
 
     // Cache operations
     virtual void clearLatestCaches() override;
