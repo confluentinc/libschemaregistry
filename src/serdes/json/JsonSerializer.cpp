@@ -212,9 +212,9 @@ class JsonSerializer::Impl {
                                    const nlohmann::json &value) {
         auto mutable_value = value;  // Copy for potential transformation
 
-        // Get subject using strategy
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt = strategy(ctx.topic, ctx.serde_type, schema_);
+        // Get subject using topic name strategy
+        auto subject_opt =
+            topicNameStrategy(ctx.topic, ctx.serde_type, schema_);
         if (!subject_opt.has_value()) {
             throw JsonError("Subject name strategy returned no subject");
         }

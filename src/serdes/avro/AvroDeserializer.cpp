@@ -36,9 +36,9 @@ class AvroDeserializer::Impl {
 
     NamedValue deserialize(const SerializationContext &ctx,
                            const std::vector<uint8_t> &data) {
-        // Get subject using strategy
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt = strategy(ctx.topic, ctx.serde_type, std::nullopt);
+        // Get subject using topic name strategy
+        auto subject_opt =
+            topicNameStrategy(ctx.topic, ctx.serde_type, std::nullopt);
         std::optional<schemaregistry::rest::model::RegisteredSchema>
             latest_schema;
         bool has_subject = subject_opt.has_value();
@@ -68,8 +68,8 @@ class AvroDeserializer::Impl {
 
         // Update subject if not initially determined
         if (!has_subject) {
-            subject_opt = strategy(ctx.topic, ctx.serde_type,
-                                   std::make_optional(writer_schema_raw));
+            subject_opt = topicNameStrategy(ctx.topic, ctx.serde_type,
+                                            std::make_optional(writer_schema_raw));
             if (subject_opt.has_value()) {
                 try {
                     latest_schema = base_->getSerde().getReaderSchema(
