@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
+#include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
 #include "schemaregistry/serdes/SerdeConfig.h"
 #include "schemaregistry/serdes/WildcardMatcher.h"
@@ -1043,8 +1044,16 @@ std::string AssociatedNameStrategy::loadAssociatedSubjectName(
     SerdeType serde_type) const {
     std::string association_type = is_key ? "key" : "value";
 
-    auto associations = client_->getAssociationsByResourceName(
-        topic, kafka_cluster_id_, "topic", {association_type}, "", 0, -1);
+    std::vector<schemaregistry::rest::model::Association> associations;
+    try {
+        associations = client_->getAssociationsByResourceName(
+            topic, kafka_cluster_id_, "topic", {association_type}, "", 0, -1);
+    } catch (const schemaregistry::rest::RestException &e) {
+        if (e.getStatus() == 404 && fallback_strategy_.has_value()) {
+            return fallback_strategy_.value()(topic, serde_type, schema);
+        }
+        throw;
+    }
 
     if (associations.size() > 1) {
         throw SerializationError(
