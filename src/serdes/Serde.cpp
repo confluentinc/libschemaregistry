@@ -1049,10 +1049,11 @@ std::string AssociatedNameStrategy::loadAssociatedSubjectName(
         associations = client_->getAssociationsByResourceName(
             topic, kafka_cluster_id_, "topic", {association_type}, "", 0, -1);
     } catch (const schemaregistry::rest::RestException &e) {
-        if (e.getStatus() == 404 && fallback_strategy_.has_value()) {
-            return fallback_strategy_.value()(topic, serde_type, schema);
+        if (e.getStatus() == 404) {
+            associations = {};
+        } else {
+            throw;
         }
-        throw;
     }
 
     if (associations.size() > 1) {
