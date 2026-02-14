@@ -181,6 +181,34 @@ void JsonSerde::resolveNamedSchema(
     }
 }
 
+// Helper function to extract record name from JSON Schema model
+static std::string getJsonSchemaRecordName(const std::optional<Schema> &schema) {
+    if (!schema.has_value() || !schema->getSchema().has_value()) {
+        return "";
+    }
+    try {
+        auto json = nlohmann::json::parse(schema->getSchema().value());
+        if (json.is_object()) {
+            // Try "title" first, then "$id"
+            if (json.contains("title") && json["title"].is_string()) {
+                return json["title"].get<std::string>();
+            }
+            if (json.contains("$id") && json["$id"].is_string()) {
+                std::string id = json["$id"].get<std::string>();
+                // Extract name from URI (last path component)
+                auto pos = id.find_last_of('/');
+                if (pos != std::string::npos && pos < id.length() - 1) {
+                    return id.substr(pos + 1);
+                }
+                return id;
+            }
+        }
+    } catch (...) {
+        // Fall through to return empty
+    }
+    return "";
+}
+
 class JsonSerializer::Impl {
   public:
     Impl(std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
@@ -190,7 +218,9 @@ class JsonSerializer::Impl {
         : schema_(std::move(schema)),
           base_(std::make_shared<BaseSerializer>(
               Serde(std::move(client), rule_registry), config)),
-          serde_(std::make_unique<JsonSerde>()) {
+          serde_(std::make_unique<JsonSerde>()),
+          subject_name_strategy_(configureSubjectNameStrategy(
+              config.subject_name_strategy_type, getJsonSchemaRecordName)) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -212,13 +242,9 @@ class JsonSerializer::Impl {
                                    const nlohmann::json &value) {
         auto mutable_value = value;  // Copy for potential transformation
 
-        // Get subject using topic name strategy
-        auto subject_opt =
-            topicNameStrategy(ctx.topic, ctx.serde_type, schema_);
-        if (!subject_opt.has_value()) {
-            throw JsonError("Subject name strategy returned no subject");
-        }
-        std::string subject = subject_opt.value();
+        // Get subject using configured subject name strategy
+        std::string subject =
+            subject_name_strategy_(ctx.topic, ctx.serde_type, schema_);
 
         // Get or register schema
         SchemaId schema_id(SerdeFormat::Json);
@@ -362,6 +388,7 @@ class JsonSerializer::Impl {
     std::optional<schemaregistry::rest::model::Schema> schema_;
     std::shared_ptr<BaseSerializer> base_;
     std::unique_ptr<JsonSerde> serde_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 };
 
 JsonSerializer::JsonSerializer(
