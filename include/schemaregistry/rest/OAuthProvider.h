@@ -18,11 +18,11 @@
 
 #include <chrono>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <vector>
 
 namespace schemaregistry::rest {
 
@@ -32,7 +32,7 @@ namespace schemaregistry::rest {
  * Confluent Cloud requires three fields:
  * - access_token: OAuth bearer token
  * - logical_cluster: Schema Registry logical cluster ID (e.g., "lsrc-12345"). Required for Confluent Cloud
- * - identity_pool_id: Identity pool ID (e.g., "pool-abcd"). Required for Confluent Cloud
+ * - identity_pool_id: Identity pool ID (e.g., "pool-abcd", "pool1,pool2,pool3", {"pool1", "pool2", "pool3"}). Optional, when omitted server will use auto pool mapping.
  */
 struct BearerFields {
   std::string access_token;
@@ -117,10 +117,12 @@ class OAuthClientProvider : public OAuthProvider {
     std::string scope;
     std::string token_endpoint_url;
 
-    // Optional Confluent Cloud parameters
-    // Required for Confluent Cloud
+    // Confluent Cloud parameters
     std::string logical_cluster;      // Schema Registry logical cluster ID (e.g., "lsrc-12345")
-    std::string identity_pool_id;     // Identity pool ID (e.g., "pool-abcd")
+
+    // Identity pool ID(s) are optional. May contain a single
+    // pool ID, a comma-separated list, or a vector of pool IDs.
+    std::string identity_pool_id;
 
     // Optional retry configuration
     int max_retries{3};
@@ -141,6 +143,15 @@ class OAuthClientProvider : public OAuthProvider {
      * @throws std::invalid_argument if configuration is invalid
      */
     void validate() const;
+
+    /**
+     * Set identity pool ID(s) from a vector of pool IDs.
+     *
+     * Joins the entries with commas and stores the result in identity_pool_id.
+     *
+     * @param pool_ids Vector of identity pool ID strings
+     */
+    void set_identity_pool_ids(const std::vector<std::string>& pool_ids);
   };
 
   /**
@@ -213,7 +224,7 @@ class CustomOAuthProvider : public OAuthProvider {
    *
    * @param fetch_fn Function that returns access token (required)
    * @param logical_cluster Schema Registry logical cluster ID (optional, required for Confluent Cloud)
-   * @param identity_pool_id Identity pool ID (optional, required for Confluent Cloud)
+   * @param identity_pool_id Identity pool ID(s) as comma-separated string (optional)
    * @throws std::invalid_argument if fetch_fn is empty
    */
   CustomOAuthProvider(TokenFetchFunction fetch_fn,

@@ -5,7 +5,9 @@
 
 #include <gtest/gtest.h>
 #include <chrono>
+#include <string>
 #include <thread>
+#include <vector>
 #include "schemaregistry/rest/OAuthProvider.h"
 
 using namespace schemaregistry::rest;
@@ -244,6 +246,37 @@ TEST(BearerFieldsTest, ParameterizedConstructor) {
   EXPECT_EQ(fields.access_token, "test-token");
   EXPECT_EQ(fields.logical_cluster, "lsrc-123");
   EXPECT_EQ(fields.identity_pool_id, "pool-456");
+}
+
+// =============================================================================
+// Identity Pool Optional + Union-of-Pools Tests
+// =============================================================================
+
+TEST(OAuthClientConfigTest, ValidConfigWithoutIdentityPool) {
+  OAuthClientProvider::Config config;
+  config.client_id = "client-id";
+  config.client_secret = "client-secret";
+  config.scope = "schema_registry";
+  config.token_endpoint_url = "https://idp.example.com/token";
+  config.logical_cluster = "lsrc-123";
+
+  EXPECT_NO_THROW(config.validate());
+  EXPECT_TRUE(config.identity_pool_id.empty());
+}
+
+TEST(OAuthClientConfigTest, SetIdentityPoolIdsJoinsWithCommas) {
+  OAuthClientProvider::Config config;
+  config.set_identity_pool_ids({"pool-1", "pool-2", "pool-3"});
+  EXPECT_EQ(config.identity_pool_id, "pool-1,pool-2,pool-3");
+}
+
+TEST(CustomOAuthProviderTest, WorksWithCommaSeparatedPools) {
+  auto provider = std::make_shared<CustomOAuthProvider>(
+      []() { return "custom-token"; }, "lsrc-123", "pool-a,pool-b");
+
+  auto fields = provider->get_bearer_fields();
+  EXPECT_EQ(fields.access_token, "custom-token");
+  EXPECT_EQ(fields.identity_pool_id, "pool-a,pool-b");
 }
 
 // =============================================================================

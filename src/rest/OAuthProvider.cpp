@@ -57,6 +57,16 @@ void OAuthClientProvider::Config::validate() const {
   }
 }
 
+void OAuthClientProvider::Config::set_identity_pool_ids(
+    const std::vector<std::string>& pool_ids) {
+  std::ostringstream oss;
+  for (size_t i = 0; i < pool_ids.size(); ++i) {
+    if (i > 0) oss << ",";
+    oss << pool_ids[i];
+  }
+  identity_pool_id = oss.str();
+}
+
 // ============================================================================
 // OAuthClientProvider Implementation
 // ============================================================================
