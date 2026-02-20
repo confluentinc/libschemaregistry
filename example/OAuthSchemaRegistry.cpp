@@ -1,12 +1,12 @@
 /**
- * Examples of setting up Schema Registry with OAuth using static token
- * and Client Credentials flow
+ * Examples of setting up Schema Registry with OAuth, including
+ * optional identity pool and union-of-pools support.
  */
 
 #include <iostream>
-#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
 #include "schemaregistry/rest/OAuthProvider.h"
@@ -32,7 +32,7 @@ int main() {
     std::cout << "Static token: Found " << subjects.size() << " subjects" << std::endl;
   }
 
-  // Example 2.1: OAuth Client Credentials (native configuration)
+  // Example 2: OAuth Client Credentials (native configuration)
   {
     OAuthClientProvider::Config oauth_config;
     oauth_config.client_id = "client-id";
@@ -50,22 +50,62 @@ int main() {
 
     auto client = SchemaRegistryClient::newClient(config);
     auto subjects = client->getAllSubjects();
-    std::cout << "OAuth client credentials: Found " << subjects.size() << " subjects" << std::endl;
+    std::cout << "Single pool: Found " << subjects.size() << " subjects" << std::endl;
   }
 
-  // Example 2.2: OAuth Client Credentials (factory pattern)
+  // Example 3: No identity pool (auto pool mapping)
   {
-    std::map<std::string, std::string> config_map = {
-        {"bearer.auth.credentials.source", "OAUTHBEARER"},
-        {"bearer.auth.client.id", "client-id"},
-        {"bearer.auth.client.secret", "client-secret"},
-        {"bearer.auth.scope", "schema_registry"},
-        {"bearer.auth.issuer.endpoint.url", "https://yourauthprovider.com/v1/token"},
-        {"bearer.auth.logical.cluster", "lsrc-12345"},
-        {"bearer.auth.identity.pool.id", "pool-abcd"}
-    };
+    OAuthClientProvider::Config oauth_config;
+    oauth_config.client_id = "client-id";
+    oauth_config.client_secret = "client-secret";
+    oauth_config.scope = "schema_registry";
+    oauth_config.token_endpoint_url = "https://yourauthprovider.com/v1/token";
+    oauth_config.logical_cluster = "lsrc-12345";
+    // identity_pool_id left empty -- header is omitted, server uses auto pool mapping
 
-    auto provider = OAuthProviderFactory::create(config_map);
+    auto provider = std::make_shared<OAuthClientProvider>(oauth_config);
+
+    auto config = std::make_shared<ClientConfiguration>(
+        std::vector<std::string>{"https://psrc-123456.us-east-1.aws.confluent.cloud"});
+    config->setOAuthProvider(provider);
+
+    auto client = SchemaRegistryClient::newClient(config);
+    auto subjects = client->getAllSubjects();
+    std::cout << "Auto pool mapping: Found " << subjects.size() << " subjects" << std::endl;
+  }
+
+  // Example 4: Union-of-pools via comma-separated string
+  {
+    OAuthClientProvider::Config oauth_config;
+    oauth_config.client_id = "client-id";
+    oauth_config.client_secret = "client-secret";
+    oauth_config.scope = "schema_registry";
+    oauth_config.token_endpoint_url = "https://yourauthprovider.com/v1/token";
+    oauth_config.logical_cluster = "lsrc-12345";
+    oauth_config.identity_pool_id = "pool-1,pool-2,pool-3";
+
+    auto provider = std::make_shared<OAuthClientProvider>(oauth_config);
+
+    auto config = std::make_shared<ClientConfiguration>(
+        std::vector<std::string>{"https://psrc-123456.us-east-1.aws.confluent.cloud"});
+    config->setOAuthProvider(provider);
+
+    auto client = SchemaRegistryClient::newClient(config);
+    auto subjects = client->getAllSubjects();
+    std::cout << "Union of pools (string): Found " << subjects.size() << " subjects" << std::endl;
+  }
+
+  // Example 5: Union-of-pools from a vector (if you have a list)
+  {
+    OAuthClientProvider::Config oauth_config;
+    oauth_config.client_id = "client-id";
+    oauth_config.client_secret = "client-secret";
+    oauth_config.scope = "schema_registry";
+    oauth_config.token_endpoint_url = "https://yourauthprovider.com/v1/token";
+    oauth_config.logical_cluster = "lsrc-12345";
+    oauth_config.set_identity_pool_ids({"pool-1", "pool-2", "pool-3"});
+
+    auto provider = std::make_shared<OAuthClientProvider>(oauth_config);
 
     auto config = std::make_shared<ClientConfiguration>(
         std::vector<std::string>{"https://psrc-123456.us-east-1.aws.confluent.cloud"});
