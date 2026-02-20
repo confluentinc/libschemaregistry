@@ -53,7 +53,7 @@ int main() {
     std::cout << "Single pool: Found " << subjects.size() << " subjects" << std::endl;
   }
 
-  // Example 2: No identity pool (auto pool mapping)
+  // Example 3: No identity pool (auto pool mapping)
   {
     OAuthClientProvider::Config oauth_config;
     oauth_config.client_id = "client-id";
@@ -74,7 +74,7 @@ int main() {
     std::cout << "Auto pool mapping: Found " << subjects.size() << " subjects" << std::endl;
   }
 
-  // Example 3: Union-of-pools via comma-separated string
+  // Example 4: Union-of-pools via comma-separated string
   {
     OAuthClientProvider::Config oauth_config;
     oauth_config.client_id = "client-id";
@@ -95,7 +95,7 @@ int main() {
     std::cout << "Union of pools (string): Found " << subjects.size() << " subjects" << std::endl;
   }
 
-  // Example 4: Union-of-pools from a vector (if you have a list)
+  // Example 5: Union-of-pools from a vector (if you have a list)
   {
     OAuthClientProvider::Config oauth_config;
     oauth_config.client_id = "client-id";

@@ -27,9 +27,8 @@
 namespace schemaregistry::rest {
 
 /**
- * Bearer authentication fields required for Confluent Cloud Schema Registry.
+ * Confluent Cloud parameters for Schema Registry bearer authentication.
  *
- * Confluent Cloud requires three fields:
  * - access_token: OAuth bearer token
  * - logical_cluster: Schema Registry logical cluster ID (e.g., "lsrc-12345"). Required for Confluent Cloud
  * - identity_pool_id: Identity pool ID (e.g., "pool-abcd", "pool1,pool2,pool3", {"pool1", "pool2", "pool3"}). Optional, when omitted server will use auto pool mapping.
