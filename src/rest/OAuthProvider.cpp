@@ -8,7 +8,6 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
-#include <sstream>
 #include <stdexcept>
 #include <thread>
 
@@ -55,6 +54,27 @@ void OAuthClientProvider::Config::validate() const {
   if (http_timeout_seconds <= 0) {
     throw std::invalid_argument("http_timeout_seconds must be positive");
   }
+}
+
+void OAuthClientProvider::Config::set_identity_pool_ids(
+    const std::vector<std::string>& pool_ids) {
+  if (pool_ids.empty()) {
+    identity_pool_id.clear();
+    return;
+  }
+
+  size_t total_size = 0;
+  for (const auto& s : pool_ids) total_size += s.size();
+  total_size += pool_ids.size() - 1; // for commas
+
+  std::string joined;
+  joined.reserve(total_size);
+
+  for (size_t i = 0; i < pool_ids.size(); ++i) {
+    if (i > 0) joined += ",";
+    joined += pool_ids[i];
+  }
+  identity_pool_id = std::move(joined);
 }
 
 // ============================================================================
