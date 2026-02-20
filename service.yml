@@ -17,6 +17,11 @@ semaphore:
           required: true
           description: The name of the tag to be created.
           default_value: "X.Y.Z"
+  managed_sections:
+    - version
+    - name
+    - agent
+    - global_job_config
 codeowners:
   enable: true
 renovatebot:
