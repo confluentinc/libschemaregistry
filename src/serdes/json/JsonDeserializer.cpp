@@ -88,9 +88,13 @@ class JsonDeserializer::Impl {
         const uint8_t *message_data = data.data() + bytes_read;
         size_t message_size = data.size() - bytes_read;
 
-        // Get writer schema
+        // Get writer schema (pass nullopt when initial subject is unknown)
         auto writer_schema_raw =
-            base_->getWriterSchema(schema_id, std::make_optional(initial_subject), std::nullopt);
+            base_->getWriterSchema(schema_id,
+                                   initial_subject.empty()
+                                       ? std::nullopt
+                                       : std::make_optional(initial_subject),
+                                   std::nullopt);
         auto writer_schema = getParsedSchema(writer_schema_raw);
 
         // Recompute subject with writer schema (needed for Record/TopicRecord strategies)
