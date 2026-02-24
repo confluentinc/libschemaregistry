@@ -189,18 +189,8 @@ static std::string getJsonSchemaRecordName(const std::optional<Schema> &schema) 
     try {
         auto json = nlohmann::json::parse(schema->getSchema().value());
         if (json.is_object()) {
-            // Try "title" first, then "$id"
             if (json.contains("title") && json["title"].is_string()) {
                 return json["title"].get<std::string>();
-            }
-            if (json.contains("$id") && json["$id"].is_string()) {
-                std::string id = json["$id"].get<std::string>();
-                // Extract name from URI (last path component)
-                auto pos = id.find_last_of('/');
-                if (pos != std::string::npos && pos < id.length() - 1) {
-                    return id.substr(pos + 1);
-                }
-                return id;
             }
         }
     } catch (...) {

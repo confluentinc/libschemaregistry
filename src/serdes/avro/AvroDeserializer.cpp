@@ -8,7 +8,7 @@
 
 namespace schemaregistry::serdes::avro {
 
-// Helper function to extract record name from Avro Schema model
+// Helper function to extract fully-qualified record name from Avro Schema model
 static std::string getAvroRecordName(const std::optional<Schema> &schema) {
     if (!schema.has_value() || !schema->getSchema().has_value()) {
         return "";
@@ -16,7 +16,19 @@ static std::string getAvroRecordName(const std::optional<Schema> &schema) {
     try {
         auto json = nlohmann::json::parse(schema->getSchema().value());
         if (json.is_object() && json.contains("name")) {
-            return json["name"].get<std::string>();
+            std::string name = json["name"].get<std::string>();
+            // If already fully-qualified (contains a dot), use as-is
+            if (name.find('.') != std::string::npos) {
+                return name;
+            }
+            // Prepend namespace if present
+            if (json.contains("namespace") && json["namespace"].is_string()) {
+                std::string ns = json["namespace"].get<std::string>();
+                if (!ns.empty()) {
+                    return ns + "." + name;
+                }
+            }
+            return name;
         }
     } catch (...) {
         // Fall through to return empty
