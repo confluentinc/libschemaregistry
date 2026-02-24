@@ -1483,14 +1483,14 @@ TEST(AvroTest, AvroSerdeWithAssociatedNameStrategy) {
 
     // Associate topic1 → my-custom-subject
     AssociationCreateOrUpdateRequest req;
-    req.resource_name = "topic1";
-    req.resource_namespace = "-";
-    req.resource_id = "lkc-123:topic1";
-    req.resource_type = "topic";
+    req.setResourceName("topic1");
+    req.setResourceNamespace("-");
+    req.setResourceId("lkc-123:topic1");
+    req.setResourceType("topic");
     AssociationCreateOrUpdateInfo assoc;
-    assoc.subject = "my-custom-subject";
-    assoc.association_type = "value";
-    req.associations = std::vector<AssociationCreateOrUpdateInfo>{assoc};
+    assoc.setSubject("my-custom-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
     client->createAssociation(req);
 
     auto ser_config = SerializerConfig::createDefault();
@@ -1580,14 +1580,14 @@ TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyMultipleAssociations) {
     auto makeReq = [](const std::string &resource_id,
                       const std::string &subject_name) {
         AssociationCreateOrUpdateRequest r;
-        r.resource_name = "topic1";
-        r.resource_namespace = "-";
-        r.resource_id = resource_id;
-        r.resource_type = "topic";
+        r.setResourceName("topic1");
+        r.setResourceNamespace("-");
+        r.setResourceId(resource_id);
+        r.setResourceType("topic");
         AssociationCreateOrUpdateInfo a;
-        a.subject = subject_name;
-        a.association_type = "value";
-        r.associations = std::vector<AssociationCreateOrUpdateInfo>{a};
+        a.setSubject(subject_name);
+        a.setAssociationType("value");
+        r.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{a});
         return r;
     };
     client->createAssociation(makeReq("lkc-123:topic1", "subject1"));
@@ -1617,14 +1617,14 @@ TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyWithKafkaClusterID) {
 
     // Associate with a specific cluster namespace
     AssociationCreateOrUpdateRequest req;
-    req.resource_name = "topic1";
-    req.resource_namespace = "lkc-my-cluster";
-    req.resource_id = "lkc-my-cluster:topic1";
-    req.resource_type = "topic";
+    req.setResourceName("topic1");
+    req.setResourceNamespace("lkc-my-cluster");
+    req.setResourceId("lkc-my-cluster:topic1");
+    req.setResourceType("topic");
     AssociationCreateOrUpdateInfo assoc;
-    assoc.subject = "my-custom-subject";
-    assoc.association_type = "value";
-    req.associations = std::vector<AssociationCreateOrUpdateInfo>{assoc};
+    assoc.setSubject("my-custom-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
     client->createAssociation(req);
 
     auto ser_config = SerializerConfig::createDefault();
@@ -1660,14 +1660,14 @@ TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyCaching) {
     client->registerSchema("my-cached-subject", schema, false);
 
     AssociationCreateOrUpdateRequest req;
-    req.resource_name = "topic1";
-    req.resource_namespace = "-";
-    req.resource_id = "lkc-123:topic1";
-    req.resource_type = "topic";
+    req.setResourceName("topic1");
+    req.setResourceNamespace("-");
+    req.setResourceId("lkc-123:topic1");
+    req.setResourceType("topic");
     AssociationCreateOrUpdateInfo assoc;
-    assoc.subject = "my-cached-subject";
-    assoc.association_type = "value";
-    req.associations = std::vector<AssociationCreateOrUpdateInfo>{assoc};
+    assoc.setSubject("my-cached-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
     client->createAssociation(req);
 
     auto ser_config = SerializerConfig::createDefault();
