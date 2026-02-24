@@ -223,7 +223,7 @@ struct Migration {
  * Based on SubjectNameStrategyType from serde.rs
  */
 enum class SubjectNameStrategyType {
-    None,         // No explicit  subject name strategy
+    None,         // No explicit subject name strategy
     Topic,        // Creates a subject name by appending -[key|value] to the topic
     Record,       // Creates a subject name from the record name
     TopicRecord,  // Creates a subject name from the topic and record name
