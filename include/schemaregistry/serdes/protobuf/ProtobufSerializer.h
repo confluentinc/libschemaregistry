@@ -96,6 +96,7 @@ class ProtobufSerializer {
     std::shared_ptr<BaseSerializer> base_;
     std::unique_ptr<ProtobufSerde> serde_;
     ReferenceSubjectNameStrategy reference_subject_name_strategy_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 
     // Helper methods
     std::vector<int32_t> toIndexArray(
@@ -106,6 +107,9 @@ class ProtobufSerializer {
                         const google::protobuf::FileDescriptor *file_desc);
 
     void validateSchema(const schemaregistry::rest::model::Schema &schema);
+
+    std::string getRecordName(
+        const std::optional<schemaregistry::rest::model::Schema> &schema);
 };
 
 }  // namespace schemaregistry::serdes::protobuf
@@ -132,7 +136,12 @@ inline ProtobufSerializer<T>::ProtobufSerializer(
       base_(std::make_shared<BaseSerializer>(
           Serde(std::move(client), rule_registry), config)),
       serde_(std::make_unique<ProtobufSerde>()),
-      reference_subject_name_strategy_(defaultReferenceSubjectNameStrategy) {
+      reference_subject_name_strategy_(defaultReferenceSubjectNameStrategy),
+      subject_name_strategy_(configureSubjectNameStrategy(
+          config.subject_name_strategy_type,
+          [this](const std::optional<schemaregistry::rest::model::Schema> &s) {
+              return getRecordName(s);
+          })) {
     std::vector<std::shared_ptr<RuleExecutor>> executors;
     if (rule_registry) {
         executors = rule_registry->getExecutors();
@@ -160,7 +169,12 @@ inline ProtobufSerializer<T>::ProtobufSerializer(
       base_(std::make_shared<BaseSerializer>(
           Serde(std::move(client), rule_registry), config)),
       serde_(std::make_unique<ProtobufSerde>()),
-      reference_subject_name_strategy_(std::move(strategy)) {
+      reference_subject_name_strategy_(std::move(strategy)),
+      subject_name_strategy_(configureSubjectNameStrategy(
+          config.subject_name_strategy_type,
+          [this](const std::optional<schemaregistry::rest::model::Schema> &s) {
+              return getRecordName(s);
+          })) {
     std::vector<std::shared_ptr<RuleExecutor>> executors;
     if (rule_registry) {
         executors = rule_registry->getExecutors();
@@ -207,6 +221,20 @@ ProtobufSerializer<T>::serializeWithFileDescriptorSet(
     return serializeWithMessageDescriptor(ctx, message, descriptor);
 }
 
+template <typename T>
+inline std::string ProtobufSerializer<T>::getRecordName(
+    const std::optional<schemaregistry::rest::model::Schema> &schema) {
+    if (!schema.has_value()) return "";
+    try {
+        auto [file_desc, pool] =
+            serde_->getParsedSchema(*schema, base_->getSerde().getClient());
+        if (file_desc && file_desc->message_type_count() > 0) {
+            return file_desc->message_type(0)->full_name();
+        }
+    } catch (...) {}
+    return "";
+}
+
 // Forward declaration for transformFields helper that lives in
 // ProtobufUtils.cpp
 namespace utils {
@@ -226,13 +254,8 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
     using schemaregistry::rest::model::RegisteredSchema;
 
     // Resolve the subject name using the configured strategy.
-    // Use the message descriptor's full name for Record/TopicRecord strategies.
-    auto record_name_func = [descriptor](const std::optional<schemaregistry::rest::model::Schema> &) {
-        return descriptor->full_name();
-    };
-    auto subject_strategy = configureSubjectNameStrategy(
-        base_->getConfig().subject_name_strategy_type, record_name_func);
-    std::string subject = subject_strategy(ctx.topic, ctx.serde_type, schema_);
+    std::string subject =
+        subject_name_strategy_(ctx.topic, ctx.serde_type, schema_);
 
     // Retrieve (or register) the schema in the registry.
     SchemaId schema_id(SerdeFormat::Protobuf);
