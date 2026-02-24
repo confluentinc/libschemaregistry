@@ -43,12 +43,16 @@ class ProtobufDeserializer {
   private:
     std::shared_ptr<BaseDeserializer> base_;
     std::unique_ptr<ProtobufSerde> serde_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 
     std::unique_ptr<google::protobuf::Message> createMessageFromDescriptor(
         const google::protobuf::Descriptor *descriptor);
 
     std::optional<std::string> getName(
         const google::protobuf::Message &message);
+
+    std::string getRecordName(
+        const std::optional<schemaregistry::rest::model::Schema> &schema);
 
     std::unique_ptr<google::protobuf::Message> deserializeWithMessageDescriptor(
         const std::vector<uint8_t> &payload,
@@ -66,6 +70,20 @@ std::unique_ptr<schemaregistry::serdes::SerdeValue> transformFields(
     schemaregistry::serdes::RuleContext &ctx,
     const std::string &field_executor_type,
     const schemaregistry::serdes::SerdeValue &value);
+}
+
+template <typename T>
+inline std::string ProtobufDeserializer<T>::getRecordName(
+    const std::optional<schemaregistry::rest::model::Schema> &schema) {
+    if (!schema.has_value()) return "";
+    try {
+        auto [file_desc, pool] =
+            serde_->getParsedSchema(*schema, base_->getSerde().getClient());
+        if (file_desc && file_desc->message_type_count() > 0) {
+            return file_desc->message_type(0)->full_name();
+        }
+    } catch (...) {}
+    return "";
 }
 
 template <typename T>
@@ -88,7 +106,12 @@ inline ProtobufDeserializer<T>::ProtobufDeserializer(
     const DeserializerConfig &config)
     : base_(std::make_shared<BaseDeserializer>(
           Serde(std::move(client), rule_registry), config)),
-      serde_(std::make_unique<ProtobufSerde>()) {
+      serde_(std::make_unique<ProtobufSerde>()),
+      subject_name_strategy_(configureSubjectNameStrategy(
+          config.subject_name_strategy_type,
+          [this](const std::optional<schemaregistry::rest::model::Schema> &s) {
+              return getRecordName(s);
+          })) {
     std::vector<std::shared_ptr<RuleExecutor>> executors;
     if (rule_registry) {
         executors = rule_registry->getExecutors();
@@ -112,16 +135,11 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     using namespace schemaregistry::serdes;
     using namespace schemaregistry::serdes::protobuf;
 
-    // Get initial subject using configured strategy (without descriptor yet).
+    // Get initial subject using configured strategy (without schema yet).
     // Topic strategy works immediately; Record/TopicRecord will be recomputed
-    // once we have the writer descriptor with the actual message name.
-    auto initial_subject_strategy = configureSubjectNameStrategy(
-        base_->getConfig().subject_name_strategy_type,
-        [](const std::optional<schemaregistry::rest::model::Schema> &) {
-            return std::string{};
-        });
+    // once we have the writer schema with the actual message name.
     std::string initial_subject =
-        initial_subject_strategy(ctx.topic, ctx.serde_type, std::nullopt);
+        subject_name_strategy_(ctx.topic, ctx.serde_type, std::nullopt);
     std::optional<schemaregistry::rest::model::RegisteredSchema> latest_schema;
 
     if (!initial_subject.empty()) {
@@ -159,17 +177,9 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
         throw ProtobufError("Failed to get writer message descriptor");
     }
 
-    // Recompute subject with writer descriptor's full name for
-    // Record/TopicRecord strategies.
-    auto full_name = writer_desc->full_name();
-    auto subject_strategy = configureSubjectNameStrategy(
-        base_->getConfig().subject_name_strategy_type,
-        [&full_name](const std::optional<schemaregistry::rest::model::Schema> &) {
-            return full_name;
-        });
-    std::string subject =
-        subject_strategy(ctx.topic, ctx.serde_type,
-                         std::make_optional(writer_schema_raw));
+    // Recompute subject with writer schema for Record/TopicRecord strategies.
+    std::string subject = subject_name_strategy_(
+        ctx.topic, ctx.serde_type, std::make_optional(writer_schema_raw));
 
     // If subject changed, try to get reader schema again
     if (subject != initial_subject && !subject.empty()) {

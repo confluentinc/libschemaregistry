@@ -181,24 +181,6 @@ void JsonSerde::resolveNamedSchema(
     }
 }
 
-// Helper function to extract record name from JSON Schema model
-static std::string getJsonSchemaRecordName(const std::optional<Schema> &schema) {
-    if (!schema.has_value() || !schema->getSchema().has_value()) {
-        return "";
-    }
-    try {
-        auto json = nlohmann::json::parse(schema->getSchema().value());
-        if (json.is_object()) {
-            if (json.contains("title") && json["title"].is_string()) {
-                return json["title"].get<std::string>();
-            }
-        }
-    } catch (...) {
-        // Fall through to return empty
-    }
-    return "";
-}
-
 class JsonSerializer::Impl {
   public:
     Impl(std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
@@ -210,7 +192,10 @@ class JsonSerializer::Impl {
               Serde(std::move(client), rule_registry), config)),
           serde_(std::make_unique<JsonSerde>()),
           subject_name_strategy_(configureSubjectNameStrategy(
-              config.subject_name_strategy_type, getJsonSchemaRecordName)) {
+              config.subject_name_strategy_type,
+              [this](const std::optional<Schema> &s) {
+                  return getRecordName(s);
+              })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -372,6 +357,22 @@ class JsonSerializer::Impl {
     std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>
     getParsedSchema(const schemaregistry::rest::model::Schema &schema) {
         return serde_->getParsedSchema(schema, base_->getSerde().getClient());
+    }
+
+    std::string getRecordName(const std::optional<Schema> &schema) {
+        if (!schema.has_value() || !schema->getSchema().has_value()) return "";
+        try {
+            auto json = nlohmann::json::parse(schema->getSchema().value());
+            if (json.is_object()) {
+                if (json.contains("title") && json["title"].is_string()) {
+                    return json["title"].get<std::string>();
+                }
+                if (json.contains("$id") && json["$id"].is_string()) {
+                    return json["$id"].get<std::string>();
+                }
+            }
+        } catch (...) {}
+        return "";
     }
 
   private:
