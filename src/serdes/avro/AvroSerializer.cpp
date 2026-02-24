@@ -93,34 +93,6 @@ void AvroSerde::clear() {
     parsed_schemas_.clear();
 }
 
-// Helper function to extract fully-qualified record name from Avro Schema model
-static std::string getAvroRecordName(const std::optional<Schema> &schema) {
-    if (!schema.has_value() || !schema->getSchema().has_value()) {
-        return "";
-    }
-    try {
-        auto json = nlohmann::json::parse(schema->getSchema().value());
-        if (json.is_object() && json.contains("name")) {
-            std::string name = json["name"].get<std::string>();
-            // If already fully-qualified (contains a dot), use as-is
-            if (name.find('.') != std::string::npos) {
-                return name;
-            }
-            // Prepend namespace if present
-            if (json.contains("namespace") && json["namespace"].is_string()) {
-                std::string ns = json["namespace"].get<std::string>();
-                if (!ns.empty()) {
-                    return ns + "." + name;
-                }
-            }
-            return name;
-        }
-    } catch (...) {
-        // Fall through to return empty
-    }
-    return "";
-}
-
 // AvroSerializer implementation (PIMPL)
 
 class AvroSerializer::Impl {
@@ -134,7 +106,10 @@ class AvroSerializer::Impl {
               Serde(std::move(client), rule_registry), config)),
           serde_(std::make_shared<AvroSerde>()),
           subject_name_strategy_(configureSubjectNameStrategy(
-              config.subject_name_strategy_type, getAvroRecordName)) {
+              config.subject_name_strategy_type,
+              [this](const std::optional<Schema> &s) {
+                  return getRecordName(s);
+              })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -291,6 +266,16 @@ class AvroSerializer::Impl {
     std::pair<::avro::ValidSchema, std::vector<::avro::ValidSchema>>
     getParsedSchema(const schemaregistry::rest::model::Schema &schema) {
         return serde_->getParsedSchema(schema, base_->getSerde().getClient());
+    }
+
+    std::string getRecordName(const std::optional<Schema> &schema) {
+        if (!schema.has_value()) return "";
+        try {
+            auto [valid_schema, refs] = getParsedSchema(*schema);
+            return utils::getSchemaName(valid_schema).value_or("");
+        } catch (...) {
+            return "";
+        }
     }
 
   private:
