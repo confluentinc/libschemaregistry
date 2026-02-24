@@ -112,14 +112,25 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     using namespace schemaregistry::serdes;
     using namespace schemaregistry::serdes::protobuf;
 
-    auto strategy = base_->getConfig().subject_name_strategy;
-    auto subject_opt = strategy(ctx.topic, ctx.serde_type, std::nullopt);
-    bool has_subject = subject_opt.has_value();
+    // Get initial subject using configured strategy (without descriptor yet).
+    // Topic strategy works immediately; Record/TopicRecord will be recomputed
+    // once we have the writer descriptor with the actual message name.
+    auto initial_subject_strategy = configureSubjectNameStrategy(
+        base_->getConfig().subject_name_strategy_type,
+        [](const std::optional<schemaregistry::rest::model::Schema> &) {
+            return std::string{};
+        });
+    std::string initial_subject =
+        initial_subject_strategy(ctx.topic, ctx.serde_type, std::nullopt);
     std::optional<schemaregistry::rest::model::RegisteredSchema> latest_schema;
 
-    if (has_subject) {
-        latest_schema = base_->getSerde().getReaderSchema(
-            subject_opt.value(), "serialized", base_->getConfig().use_schema);
+    if (!initial_subject.empty()) {
+        try {
+            latest_schema = base_->getSerde().getReaderSchema(
+                initial_subject, "serialized", base_->getConfig().use_schema);
+        } catch (const std::exception &) {
+            // Schema not found - will be determined from writer schema
+        }
     }
 
     SchemaId schema_id(SerdeFormat::Protobuf);
@@ -131,7 +142,7 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     std::vector<uint8_t> remaining_data(data.begin() + bytes_read, data.end());
 
     auto writer_schema_raw =
-        base_->getWriterSchema(schema_id, subject_opt, "serialized");
+        base_->getWriterSchema(schema_id, std::make_optional(initial_subject), "serialized");
     auto [writer_schema, pool_ptr] = serde_->getParsedSchema(
         writer_schema_raw, base_->getSerde().getClient());
     if (!writer_schema) {
@@ -144,20 +155,31 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
         throw ProtobufError("Failed to get writer message descriptor");
     }
 
-    if (!has_subject) {
-        subject_opt = strategy(ctx.topic, ctx.serde_type,
-                               std::make_optional(writer_schema_raw));
-        if (subject_opt) {
+    // Recompute subject with writer descriptor's full name for
+    // Record/TopicRecord strategies.
+    auto full_name = writer_desc->full_name();
+    auto subject_strategy = configureSubjectNameStrategy(
+        base_->getConfig().subject_name_strategy_type,
+        [&full_name](const std::optional<schemaregistry::rest::model::Schema> &) {
+            return full_name;
+        });
+    std::string subject =
+        subject_strategy(ctx.topic, ctx.serde_type,
+                         std::make_optional(writer_schema_raw));
+
+    // If subject changed, try to get reader schema again
+    if (subject != initial_subject && !subject.empty()) {
+        try {
             latest_schema = base_->getSerde().getReaderSchema(
-                subject_opt.value(), "serialized",
-                base_->getConfig().use_schema);
+                subject, "serialized", base_->getConfig().use_schema);
+        } catch (const std::exception &) {
+            // Schema not found
         }
     }
 
-    if (!subject_opt) {
+    if (subject.empty()) {
         throw ProtobufError("Subject name could not be determined");
     }
-    std::string subject = *subject_opt;
 
     std::vector<uint8_t> processed_data = remaining_data;
 
