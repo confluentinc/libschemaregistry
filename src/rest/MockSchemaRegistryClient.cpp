@@ -10,6 +10,8 @@
 #include <random>
 #include <sstream>
 
+#include "schemaregistry/rest/model/Association.h"
+
 namespace schemaregistry::rest {
 
 // MockSchemaStore implementation
@@ -221,11 +223,161 @@ bool MockSchemaStore::hasMetadata(
                        });
 }
 
+// MockAssociationStore implementation
+
+std::string MockAssociationStore::generateResourceId() {
+    return std::to_string(next_resource_id++);
+}
+
+schemaregistry::rest::model::AssociationResponse
+MockAssociationStore::createAssociation(
+    const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+        &request) {
+    std::string resource_id =
+        request.resource_id.value_or(generateResourceId());
+    std::string resource_name = request.resource_name.value_or("");
+    std::string resource_namespace = request.resource_namespace.value_or("");
+    std::string resource_type = request.resource_type.value_or("");
+
+    // Get or create entry
+    AssociationCacheEntry &entry = associations[resource_id];
+    entry.resource_id = resource_id;
+    entry.resource_name = resource_name;
+    entry.resource_namespace = resource_namespace;
+    entry.resource_type = resource_type;
+
+    // Process associations from request
+    if (request.associations.has_value()) {
+        for (const auto &info : request.associations.value()) {
+            schemaregistry::rest::model::Association assoc;
+            assoc.subject = info.subject;
+            assoc.resource_id = resource_id;
+            assoc.resource_name = resource_name;
+            assoc.resource_namespace = resource_namespace;
+            assoc.resource_type = resource_type;
+            assoc.association_type = info.association_type;
+
+            // Parse lifecycle
+            if (info.lifecycle.has_value()) {
+                if (info.lifecycle.value() == "STRONG") {
+                    assoc.lifecycle =
+                        schemaregistry::rest::model::LifecyclePolicy::Strong;
+                } else if (info.lifecycle.value() == "WEAK") {
+                    assoc.lifecycle =
+                        schemaregistry::rest::model::LifecyclePolicy::Weak;
+                }
+            }
+            assoc.frozen = info.frozen;
+            entry.associations.push_back(assoc);
+        }
+    }
+
+    // Build response
+    schemaregistry::rest::model::AssociationResponse response;
+    response.resource_id = resource_id;
+    response.associations = entry.associations;
+    return response;
+}
+
+std::vector<schemaregistry::rest::model::Association>
+MockAssociationStore::getAssociationsByResourceName(
+    const std::string &resource_name, const std::string &resource_namespace,
+    const std::string &resource_type,
+    const std::vector<std::string> &association_types,
+    const std::string &lifecycle, int32_t offset, int32_t limit) {
+    std::vector<schemaregistry::rest::model::Association> result;
+
+    for (const auto &pair : associations) {
+        const AssociationCacheEntry &entry = pair.second;
+        if (entry.resource_name == resource_name &&
+            (resource_namespace.empty() ||
+             entry.resource_namespace == resource_namespace) &&
+            (resource_type.empty() || entry.resource_type == resource_type)) {
+            for (const auto &assoc : entry.associations) {
+                // Filter by association type if specified
+                if (!association_types.empty()) {
+                    bool found = false;
+                    for (const auto &t : association_types) {
+                        if (assoc.association_type.value_or("") == t) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) continue;
+                }
+                // Filter by lifecycle if specified
+                if (!lifecycle.empty()) {
+                    std::string assoc_lifecycle;
+                    if (assoc.lifecycle.has_value()) {
+                        assoc_lifecycle =
+                            assoc.lifecycle.value() ==
+                                    schemaregistry::rest::model::LifecyclePolicy::
+                                        Strong
+                                ? "STRONG"
+                                : "WEAK";
+                    }
+                    if (assoc_lifecycle != lifecycle) continue;
+                }
+                result.push_back(assoc);
+            }
+        }
+    }
+
+    // Apply offset and limit
+    if (offset > 0 && offset < static_cast<int32_t>(result.size())) {
+        result.erase(result.begin(), result.begin() + offset);
+    } else if (offset >= static_cast<int32_t>(result.size())) {
+        result.clear();
+    }
+
+    if (limit >= 0 && limit < static_cast<int32_t>(result.size())) {
+        result.resize(limit);
+    }
+
+    return result;
+}
+
+void MockAssociationStore::deleteAssociations(
+    const std::string &resource_id,
+    const std::optional<std::string> &resource_type,
+    const std::optional<std::vector<std::string>> &association_types,
+    bool cascade_lifecycle) {
+    auto it = associations.find(resource_id);
+    if (it != associations.end()) {
+        if (association_types.has_value() && !association_types->empty()) {
+            // Delete specific association types
+            auto &entry = it->second;
+            entry.associations.erase(
+                std::remove_if(
+                    entry.associations.begin(), entry.associations.end(),
+                    [&](const schemaregistry::rest::model::Association &a) {
+                        for (const auto &t : association_types.value()) {
+                            if (a.association_type.value_or("") == t) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }),
+                entry.associations.end());
+            // Remove entry if no associations left
+            if (entry.associations.empty()) {
+                associations.erase(it);
+            }
+        } else {
+            // Delete all associations for this resource
+            associations.erase(it);
+        }
+    }
+}
+
+void MockAssociationStore::clear() { associations.clear(); }
+
 // MockSchemaRegistryClient implementation
 
 MockSchemaRegistryClient::MockSchemaRegistryClient(
     std::shared_ptr<const schemaregistry::rest::ClientConfiguration> config)
     : store(std::make_shared<MockSchemaStore>()),
+      associationStore(std::make_shared<MockAssociationStore>()),
       config(config),
       storeMutex(std::make_shared<std::mutex>()) {
     if (config->getBaseUrls().empty()) {
@@ -416,6 +568,36 @@ MockSchemaRegistryClient::updateDefaultConfig(
     return schemaregistry::rest::model::ServerConfig();
 }
 
+std::vector<schemaregistry::rest::model::Association>
+MockSchemaRegistryClient::getAssociationsByResourceName(
+    const std::string &resource_name, const std::string &resource_namespace,
+    const std::string &resource_type,
+    const std::vector<std::string> &association_types,
+    const std::string &lifecycle, int32_t offset, int32_t limit) {
+    std::lock_guard<std::mutex> lock(*storeMutex);
+    return associationStore->getAssociationsByResourceName(
+        resource_name, resource_namespace, resource_type, association_types,
+        lifecycle, offset, limit);
+}
+
+schemaregistry::rest::model::AssociationResponse
+MockSchemaRegistryClient::createAssociation(
+    const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
+        &request) {
+    std::lock_guard<std::mutex> lock(*storeMutex);
+    return associationStore->createAssociation(request);
+}
+
+void MockSchemaRegistryClient::deleteAssociations(
+    const std::string &resource_id,
+    const std::optional<std::string> &resource_type,
+    const std::optional<std::vector<std::string>> &association_types,
+    bool cascade_lifecycle) {
+    std::lock_guard<std::mutex> lock(*storeMutex);
+    associationStore->deleteAssociations(resource_id, resource_type,
+                                         association_types, cascade_lifecycle);
+}
+
 void MockSchemaRegistryClient::clearLatestCaches() {
     // Mock implementation - no caches to clear
 }
@@ -423,6 +605,7 @@ void MockSchemaRegistryClient::clearLatestCaches() {
 void MockSchemaRegistryClient::clearCaches() {
     std::lock_guard<std::mutex> lock(*storeMutex);
     store->clear();
+    associationStore->clear();
 }
 
 void MockSchemaRegistryClient::close() { clearCaches(); }
