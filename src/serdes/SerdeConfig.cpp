@@ -14,7 +14,7 @@ SerializerConfig::SerializerConfig()
       normalize_schemas(false),
       validate(false),
       rule_config({}),
-      subject_name_strategy(topicNameStrategy),
+      subject_name_strategy_type(SubjectNameStrategyType::Topic),
       schema_id_serializer(prefixSchemaIdSerializer) {}
 
 SerializerConfig::SerializerConfig(
@@ -26,7 +26,7 @@ SerializerConfig::SerializerConfig(
       normalize_schemas(normalize_schemas),
       validate(validate),
       rule_config(rule_config),
-      subject_name_strategy(topicNameStrategy),
+      subject_name_strategy_type(SubjectNameStrategyType::Topic),
       schema_id_serializer(prefixSchemaIdSerializer) {}
 
 SerializerConfig SerializerConfig::createDefault() {
@@ -38,7 +38,7 @@ DeserializerConfig::DeserializerConfig()
     : use_schema(std::nullopt),
       validate(false),
       rule_config({}),
-      subject_name_strategy(topicNameStrategy),
+      subject_name_strategy_type(SubjectNameStrategyType::Topic),
       schema_id_deserializer(dualSchemaIdDeserializer) {}
 
 DeserializerConfig::DeserializerConfig(
@@ -47,7 +47,7 @@ DeserializerConfig::DeserializerConfig(
     : use_schema(use_schema),
       validate(validate),
       rule_config(rule_config),
-      subject_name_strategy(topicNameStrategy),
+      subject_name_strategy_type(SubjectNameStrategyType::Topic),
       schema_id_deserializer(dualSchemaIdDeserializer) {}
 
 DeserializerConfig DeserializerConfig::createDefault() {
@@ -67,6 +67,57 @@ std::optional<std::string> topicNameStrategy(
         default:
             return std::nullopt;
     }
+}
+
+std::optional<SubjectNameStrategyFunc> strategyFunc(
+    SubjectNameStrategyType strategy_type, RecordNameFunc get_record_name) {
+    switch (strategy_type) {
+        case SubjectNameStrategyType::Topic:
+            return [](const std::string &topic, SerdeType serde_type,
+                      const std::optional<Schema> &schema) -> std::string {
+                return topicNameStrategy(topic, serde_type, schema).value();
+            };
+        case SubjectNameStrategyType::Record:
+            return recordNameStrategy(get_record_name);
+        case SubjectNameStrategyType::TopicRecord:
+            return topicRecordNameStrategy(get_record_name);
+        case SubjectNameStrategyType::None:
+        case SubjectNameStrategyType::Associated:
+            // AssociatedNameStrategy requires a client and config
+            return std::nullopt;
+        default:
+            return [](const std::string &topic, SerdeType serde_type,
+                      const std::optional<Schema> &schema) -> std::string {
+                return topicNameStrategy(topic, serde_type, schema).value();
+            };
+    }
+}
+
+SubjectNameStrategyFunc recordNameStrategy(RecordNameFunc get_record_name) {
+    return [get_record_name](const std::string &topic, SerdeType serde_type,
+                             const std::optional<Schema> &schema) -> std::string {
+        return get_record_name(schema);
+    };
+}
+
+SubjectNameStrategyFunc topicRecordNameStrategy(RecordNameFunc get_record_name) {
+    return [get_record_name](const std::string &topic, SerdeType serde_type,
+                             const std::optional<Schema> &schema) -> std::string {
+        std::string record_name = get_record_name(schema);
+        return topic + "-" + record_name;
+    };
+}
+
+SubjectNameStrategyFunc configureSubjectNameStrategy(
+    SubjectNameStrategyType strategy_type, RecordNameFunc get_record_name) {
+    auto strategy = strategyFunc(strategy_type, get_record_name);
+    if (!strategy.has_value()) {
+        // If the requested strategy type cannot be constructed here, treat this
+        // as a configuration error instead of silently falling back.
+        throw SerializationError(
+            "Unsupported or unconfigured subject name strategy type");
+    }
+    return strategy.value();
 }
 
 std::vector<uint8_t> prefixSchemaIdSerializer(
