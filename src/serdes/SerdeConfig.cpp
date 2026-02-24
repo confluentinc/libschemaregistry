@@ -111,15 +111,13 @@ SubjectNameStrategyFunc topicRecordNameStrategy(RecordNameFunc get_record_name) 
 SubjectNameStrategyFunc configureSubjectNameStrategy(
     SubjectNameStrategyType strategy_type, RecordNameFunc get_record_name) {
     auto strategy = strategyFunc(strategy_type, get_record_name);
-    if (strategy.has_value()) {
-        return strategy.value();
-    } else {
-        // Default to TopicNameStrategy for main strategy
-        return [](const std::string &topic, SerdeType serde_type,
-                  const std::optional<Schema> &schema) -> std::string {
-            return topicNameStrategy(topic, serde_type, schema).value();
-        };
+    if (!strategy.has_value()) {
+        // If the requested strategy type cannot be constructed here, treat this
+        // as a configuration error instead of silently falling back.
+        throw SerializationError(
+            "Unsupported or unconfigured subject name strategy type");
     }
+    return strategy.value();
 }
 
 std::vector<uint8_t> prefixSchemaIdSerializer(
