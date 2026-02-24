@@ -190,7 +190,12 @@ class JsonSerializer::Impl {
         : schema_(std::move(schema)),
           base_(std::make_shared<BaseSerializer>(
               Serde(std::move(client), rule_registry), config)),
-          serde_(std::make_unique<JsonSerde>()) {
+          serde_(std::make_unique<JsonSerde>()),
+          subject_name_strategy_(configureSubjectNameStrategy(
+              config.subject_name_strategy_type,
+              [this](const std::optional<Schema> &s) {
+                  return getRecordName(s);
+              })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -212,13 +217,9 @@ class JsonSerializer::Impl {
                                    const nlohmann::json &value) {
         auto mutable_value = value;  // Copy for potential transformation
 
-        // Get subject using strategy
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt = strategy(ctx.topic, ctx.serde_type, schema_);
-        if (!subject_opt.has_value()) {
-            throw JsonError("Subject name strategy returned no subject");
-        }
-        std::string subject = subject_opt.value();
+        // Get subject using configured subject name strategy
+        std::string subject =
+            subject_name_strategy_(ctx.topic, ctx.serde_type, schema_);
 
         // Get or register schema
         SchemaId schema_id(SerdeFormat::Json);
@@ -358,10 +359,27 @@ class JsonSerializer::Impl {
         return serde_->getParsedSchema(schema, base_->getSerde().getClient());
     }
 
+    std::string getRecordName(const std::optional<Schema> &schema) {
+        if (!schema.has_value() || !schema->getSchema().has_value()) return "";
+        try {
+            auto json = nlohmann::json::parse(schema->getSchema().value());
+            if (json.is_object()) {
+                if (json.contains("title") && json["title"].is_string()) {
+                    return json["title"].get<std::string>();
+                }
+                if (json.contains("$id") && json["$id"].is_string()) {
+                    return json["$id"].get<std::string>();
+                }
+            }
+        } catch (...) {}
+        return "";
+    }
+
   private:
     std::optional<schemaregistry::rest::model::Schema> schema_;
     std::shared_ptr<BaseSerializer> base_;
     std::unique_ptr<JsonSerde> serde_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 };
 
 JsonSerializer::JsonSerializer(
