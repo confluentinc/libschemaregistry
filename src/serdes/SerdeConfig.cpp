@@ -96,9 +96,7 @@ std::optional<SubjectNameStrategyFunc> strategyFunc(
 SubjectNameStrategyFunc recordNameStrategy(RecordNameFunc get_record_name) {
     return [get_record_name](const std::string &topic, SerdeType serde_type,
                              const std::optional<Schema> &schema) -> std::string {
-        std::string record_name = get_record_name(schema);
-        std::string suffix = (serde_type == SerdeType::Key) ? "-key" : "-value";
-        return record_name + suffix;
+        return get_record_name(schema);
     };
 }
 
@@ -106,8 +104,7 @@ SubjectNameStrategyFunc topicRecordNameStrategy(RecordNameFunc get_record_name) 
     return [get_record_name](const std::string &topic, SerdeType serde_type,
                              const std::optional<Schema> &schema) -> std::string {
         std::string record_name = get_record_name(schema);
-        std::string suffix = (serde_type == SerdeType::Key) ? "-key" : "-value";
-        return topic + "-" + record_name + suffix;
+        return topic + "-" + record_name;
     };
 }
 
