@@ -31,28 +31,9 @@ struct Association {
     Association() = default;
 };
 
-// Custom JSON conversion for LifecyclePolicy
-inline void to_json(nlohmann::json &j, const LifecyclePolicy &p) {
-    switch (p) {
-        case LifecyclePolicy::Strong:
-            j = "STRONG";
-            break;
-        case LifecyclePolicy::Weak:
-            j = "WEAK";
-            break;
-    }
-}
-
-inline void from_json(const nlohmann::json &j, LifecyclePolicy &p) {
-    std::string s = j.get<std::string>();
-    if (s == "STRONG") {
-        p = LifecyclePolicy::Strong;
-    } else if (s == "WEAK") {
-        p = LifecyclePolicy::Weak;
-    } else {
-        p = LifecyclePolicy::Strong;  // Default
-    }
-}
+NLOHMANN_JSON_SERIALIZE_ENUM(LifecyclePolicy,
+                             {{LifecyclePolicy::Strong, "STRONG"},
+                              {LifecyclePolicy::Weak, "WEAK"}})
 
 // Manual JSON conversion for Association to handle optional fields and
 // lifecycle
@@ -80,7 +61,7 @@ inline void to_json(nlohmann::json &j, const Association &a) {
         j["associationType"] = a.association_type.value();
     }
     if (a.lifecycle.has_value()) {
-        to_json(j["lifecycle"], a.lifecycle.value());
+        j["lifecycle"] = a.lifecycle.value();
     }
     if (a.frozen.has_value()) {
         j["frozen"] = a.frozen.value();
@@ -110,9 +91,7 @@ inline void from_json(const nlohmann::json &j, Association &a) {
         a.association_type = j["associationType"].get<std::string>();
     }
     if (j.contains("lifecycle") && !j["lifecycle"].is_null()) {
-        LifecyclePolicy lp;
-        from_json(j["lifecycle"], lp);
-        a.lifecycle = lp;
+        a.lifecycle = j["lifecycle"].get<LifecyclePolicy>();
     }
     if (j.contains("frozen") && !j["frozen"].is_null()) {
         a.frozen = j["frozen"].get<bool>();
