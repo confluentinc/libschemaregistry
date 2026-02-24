@@ -90,9 +90,13 @@ class AvroDeserializer::Impl {
         std::vector<uint8_t> payload_data(data.begin() + bytes_read,
                                           data.end());
 
-        // Get writer schema
+        // Get writer schema (pass nullopt when initial subject is unknown)
         auto writer_schema_raw =
-            base_->getWriterSchema(schema_id, std::make_optional(initial_subject), std::nullopt);
+            base_->getWriterSchema(schema_id,
+                                   initial_subject.empty()
+                                       ? std::nullopt
+                                       : std::make_optional(initial_subject),
+                                   std::nullopt);
         auto writer_parsed = serde_->getParsedSchema(
             writer_schema_raw, base_->getSerde().getClient());
 

@@ -142,7 +142,11 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     std::vector<uint8_t> remaining_data(data.begin() + bytes_read, data.end());
 
     auto writer_schema_raw =
-        base_->getWriterSchema(schema_id, std::make_optional(initial_subject), "serialized");
+        base_->getWriterSchema(schema_id,
+                               initial_subject.empty()
+                                   ? std::nullopt
+                                   : std::make_optional(initial_subject),
+                               "serialized");
     auto [writer_schema, pool_ptr] = serde_->getParsedSchema(
         writer_schema_raw, base_->getSerde().getClient());
     if (!writer_schema) {
