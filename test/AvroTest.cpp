@@ -1222,7 +1222,7 @@ TEST(AvroTest, EncryptionDekRotationF1Preserialized) {
     CreateKekRequest kek_req("kek1-rot-f1", "local-kms", "mykey", std::nullopt, std::nullopt, false);
     auto registered_kek = dek_client->registerKek(kek_req);
     
-    // Register DEK with pre-encrypted key materhttps://neilmadden.blog/2025/09/12/rating-26-years-of-java-changes/l for AES256_GCM (default algorithm)
+    // Register DEK with pre-encrypted key material for AES256_GCM (default algorithm)
     const std::string encrypted_dek = 
         "W/v6hOQYq1idVAcs1pPWz9UUONMVZW4IrglTnG88TsWjeCjxmtRQ4VaNe/I5dCfm2zyY9Cu0nqdvqImtUk4=";
     CreateDekRequest dek_req("test-value", std::nullopt, 
