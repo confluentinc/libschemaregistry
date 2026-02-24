@@ -367,9 +367,6 @@ class JsonSerializer::Impl {
                 if (json.contains("title") && json["title"].is_string()) {
                     return json["title"].get<std::string>();
                 }
-                if (json.contains("$id") && json["$id"].is_string()) {
-                    return json["$id"].get<std::string>();
-                }
             }
         } catch (...) {}
         return "";
