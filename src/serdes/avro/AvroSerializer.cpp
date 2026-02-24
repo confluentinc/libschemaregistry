@@ -104,7 +104,30 @@ class AvroSerializer::Impl {
         : schema_(std::move(schema)),
           base_(std::make_shared<BaseSerializer>(
               Serde(std::move(client), rule_registry), config)),
-          serde_(std::make_shared<AvroSerde>()) {
+          serde_(std::make_shared<AvroSerde>()),
+          subject_name_strategy_(
+              [this, &config]() -> SubjectNameStrategyFunc {
+                  if (config.subject_name_strategy_type ==
+                      SubjectNameStrategyType::Associated) {
+                      auto strategy = std::make_shared<AssociatedNameStrategy>(
+                          base_->getSerde().getClient(),
+                          config.subject_name_strategy_config,
+                          [this](const std::optional<Schema> &schema) {
+                              return getRecordName(schema);
+                          });
+                      return [strategy](const std::string &topic,
+                                        SerdeType serde_type,
+                                        const std::optional<Schema> &schema) {
+                          return strategy->getSubject(topic, serde_type,
+                                                      schema);
+                      };
+                  }
+                  return configureSubjectNameStrategy(
+                      config.subject_name_strategy_type,
+                      [this](const std::optional<Schema> &s) {
+                          return getRecordName(s);
+                      });
+              }()) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -126,16 +149,12 @@ class AvroSerializer::Impl {
                                    const ::avro::GenericDatum &datum) {
         auto value = datum;  // Copy for potential transformation
 
-        // Get subject using strategy
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt =
-            strategy(ctx.topic, ctx.serde_type,
-                     schema_.has_value() ? std::make_optional(schema_.value())
-                                         : std::nullopt);
-        if (!subject_opt.has_value()) {
-            throw AvroError("Subject name strategy returned no subject");
-        }
-        std::string subject = subject_opt.value();
+        // Get subject using configured subject name strategy
+        std::string subject =
+            subject_name_strategy_(ctx.topic, ctx.serde_type,
+                              schema_.has_value()
+                                  ? std::make_optional(schema_.value())
+                                  : std::nullopt);
 
         // Get or register schema
         SchemaId schema_id(SerdeFormat::Avro);
@@ -267,10 +286,21 @@ class AvroSerializer::Impl {
         return serde_->getParsedSchema(schema, base_->getSerde().getClient());
     }
 
+    std::string getRecordName(const std::optional<Schema> &schema) {
+        if (!schema.has_value()) return "";
+        try {
+            auto [valid_schema, refs] = getParsedSchema(*schema);
+            return utils::getSchemaName(valid_schema).value_or("");
+        } catch (...) {
+            return "";
+        }
+    }
+
   private:
     std::optional<schemaregistry::rest::model::Schema> schema_;
     std::shared_ptr<BaseSerializer> base_;
     std::shared_ptr<AvroSerde> serde_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 };
 
 AvroSerializer::AvroSerializer(
