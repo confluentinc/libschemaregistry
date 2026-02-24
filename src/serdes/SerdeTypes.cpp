@@ -102,7 +102,7 @@ SubjectNameStrategyType parseSubjectNameStrategyType(const std::string &s) {
     } else if (upper == "NONE") {
         return SubjectNameStrategyType::None;
     } else {
-        return SubjectNameStrategyType::Topic;
+        throw SerdeError("Unrecognized subject name strategy type: " + s);
     }
 }
 
