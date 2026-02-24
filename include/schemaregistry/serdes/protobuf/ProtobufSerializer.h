@@ -225,13 +225,14 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
     using namespace schemaregistry::serdes::protobuf;
     using schemaregistry::rest::model::RegisteredSchema;
 
-    // Resolve the subject name.
-    auto strategy = base_->getConfig().subject_name_strategy;
-    auto subject_opt = strategy(ctx.topic, ctx.serde_type, schema_);
-    if (!subject_opt.has_value()) {
-        throw ProtobufError("Subject name strategy returned no subject");
-    }
-    std::string subject = *subject_opt;
+    // Resolve the subject name using the configured strategy.
+    // Use the message descriptor's full name for Record/TopicRecord strategies.
+    auto record_name_func = [descriptor](const std::optional<schemaregistry::rest::model::Schema> &) {
+        return descriptor->full_name();
+    };
+    auto subject_strategy = configureSubjectNameStrategy(
+        base_->getConfig().subject_name_strategy_type, record_name_func);
+    std::string subject = subject_strategy(ctx.topic, ctx.serde_type, schema_);
 
     // Retrieve (or register) the schema in the registry.
     SchemaId schema_id(SerdeFormat::Protobuf);
