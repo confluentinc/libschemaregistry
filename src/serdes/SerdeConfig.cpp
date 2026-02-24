@@ -15,6 +15,7 @@ SerializerConfig::SerializerConfig()
       validate(false),
       rule_config({}),
       subject_name_strategy_type(SubjectNameStrategyType::Topic),
+      subject_name_strategy_config({}),
       schema_id_serializer(prefixSchemaIdSerializer) {}
 
 SerializerConfig::SerializerConfig(
@@ -27,6 +28,7 @@ SerializerConfig::SerializerConfig(
       validate(validate),
       rule_config(rule_config),
       subject_name_strategy_type(SubjectNameStrategyType::Topic),
+      subject_name_strategy_config({}),
       schema_id_serializer(prefixSchemaIdSerializer) {}
 
 SerializerConfig SerializerConfig::createDefault() {
@@ -39,6 +41,7 @@ DeserializerConfig::DeserializerConfig()
       validate(false),
       rule_config({}),
       subject_name_strategy_type(SubjectNameStrategyType::Topic),
+      subject_name_strategy_config({}),
       schema_id_deserializer(dualSchemaIdDeserializer) {}
 
 DeserializerConfig::DeserializerConfig(
@@ -48,6 +51,7 @@ DeserializerConfig::DeserializerConfig(
       validate(validate),
       rule_config(rule_config),
       subject_name_strategy_type(SubjectNameStrategyType::Topic),
+      subject_name_strategy_config({}),
       schema_id_deserializer(dualSchemaIdDeserializer) {}
 
 DeserializerConfig DeserializerConfig::createDefault() {

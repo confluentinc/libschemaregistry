@@ -1432,265 +1432,261 @@ TEST(AvroTest, SerdeWithTopicRecordNameStrategy) {
 
 
 // AssociatedNameStrategy Tests
+// Ported from TestAvroSerdeWithAssociated* in confluent-kafka-go/schemaregistry/serde/avrov2/avro_test.go
 
-TEST(AvroTest, AssociatedNameStrategy_ReturnsSingleAssociation) {
-    // Create client configuration with mock URL
-    std::vector<std::string> urls = {"mock://"};
-    auto client_config = std::make_shared<const ClientConfiguration>(urls);
-    auto client = SchemaRegistryClient::newClient(client_config);
+namespace {
+const std::string kDemoSchema = R"({
+    "name": "DemoSchema",
+    "type": "record",
+    "fields": [
+        {"name": "IntField",    "type": "int"},
+        {"name": "DoubleField", "type": "double"},
+        {"name": "StringField", "type": "string"},
+        {"name": "BoolField",   "type": "boolean"},
+        {"name": "BytesField",  "type": "bytes"}
+    ]
+})";
 
-    // Create an association - AssociatedNameStrategy uses resource_type="topic" 
-    // and association_type="value" or "key"
-    schemaregistry::rest::model::AssociationCreateOrUpdateRequest request;
-    request.resource_name = "test-topic";
-    request.resource_namespace = "-";  // Wildcard namespace
-    request.resource_type = "topic";
-
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info;
-    assoc_info.subject = "test-subject";
-    assoc_info.association_type = "value";
-    assoc_info.lifecycle = "STRONG";
-    request.associations = std::vector<schemaregistry::rest::model::AssociationCreateOrUpdateInfo>{assoc_info};
-
-    auto response = client->createAssociation(request);
-    ASSERT_TRUE(response.resource_id.has_value());
-
-    // Create the strategy with fallback to NONE
-    std::unordered_map<std::string, std::string> config = {
-        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}
-    };
-
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
-
-    AssociatedNameStrategy strategy(client, config, get_record_name);
-
-    // Get subject - should return the associated subject
-    std::string subject = strategy.getSubject("test-topic", SerdeType::Value, std::nullopt);
-    EXPECT_EQ(subject, "test-subject");
+::avro::GenericDatum makeDemoDatum() {
+    auto avro_schema = AvroSerializer::compileJsonSchema(kDemoSchema);
+    ::avro::GenericDatum datum(avro_schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.setFieldAt(0, ::avro::GenericDatum(int32_t{123}));
+    record.setFieldAt(1, ::avro::GenericDatum(45.67));
+    record.setFieldAt(2, ::avro::GenericDatum(std::string("hi")));
+    record.setFieldAt(3, ::avro::GenericDatum(true));
+    record.setFieldAt(4, ::avro::GenericDatum(std::vector<uint8_t>{1, 2}));
+    return datum;
 }
 
-TEST(AvroTest, AssociatedNameStrategy_ReturnsKeyAssociation) {
-    // Create client configuration with mock URL
+void verifyDemoDatum(const ::avro::GenericDatum &datum) {
+    const auto &record = datum.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.fieldAt(0).value<int32_t>(), 123);
+    EXPECT_DOUBLE_EQ(record.fieldAt(1).value<double>(), 45.67);
+    EXPECT_EQ(record.fieldAt(2).value<std::string>(), "hi");
+    EXPECT_EQ(record.fieldAt(3).value<bool>(), true);
+    EXPECT_EQ(record.fieldAt(4).value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{1, 2}));
+}
+}  // namespace
+
+TEST(AvroTest, AvroSerdeWithAssociatedNameStrategy) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = SchemaRegistryClient::newClient(client_config);
 
-    // Create an association for key
-    schemaregistry::rest::model::AssociationCreateOrUpdateRequest request;
-    request.resource_name = "key-test-topic";
-    request.resource_namespace = "-";
-    request.resource_type = "topic";
+    // Register schema under a custom subject
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(kDemoSchema));
+    client->registerSchema("my-custom-subject", schema, false);
 
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info;
-    assoc_info.subject = "test-key-subject";
-    assoc_info.association_type = "key";
-    request.associations = std::vector<schemaregistry::rest::model::AssociationCreateOrUpdateInfo>{assoc_info};
+    // Associate topic1 → my-custom-subject
+    AssociationCreateOrUpdateRequest req;
+    req.resource_name = "topic1";
+    req.resource_namespace = "-";
+    req.resource_id = "lkc-123:topic1";
+    req.resource_type = "topic";
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.subject = "my-custom-subject";
+    assoc.association_type = "value";
+    req.associations = std::vector<AssociationCreateOrUpdateInfo>{assoc};
+    client->createAssociation(req);
 
-    client->createAssociation(request);
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
 
-    // Create the strategy
-    std::unordered_map<std::string, std::string> config;
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ctx("topic1", SerdeType::Value, SerdeFormat::Avro);
+    auto bytes = serializer.serialize(ctx, makeDemoDatum());
 
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
-
-    AssociatedNameStrategy strategy(client, config, get_record_name);
-
-    // Get subject for key - should return the key association
-    std::string subject = strategy.getSubject("key-test-topic", SerdeType::Key, std::nullopt);
-    EXPECT_EQ(subject, "test-key-subject");
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    AvroDeserializer deserializer(client, rule_registry, deser_config);
+    auto result = deserializer.deserialize(ctx, bytes);
+    verifyDemoDatum(result.value);
 }
 
-TEST(AvroTest, AssociatedNameStrategy_CachesSubjectNameLookups) {
-    // Create client configuration with mock URL
+TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyFallbackToTopic) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = SchemaRegistryClient::newClient(client_config);
 
-    // Create an association
-    schemaregistry::rest::model::AssociationCreateOrUpdateRequest request;
-    request.resource_name = "cached-topic";
-    request.resource_namespace = "-";
-    request.resource_type = "topic";
+    // Register schema under the topic name strategy subject (no association)
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(kDemoSchema));
+    client->registerSchema("topic1-value", schema, false);
 
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info;
-    assoc_info.subject = "cached-subject";
-    assoc_info.association_type = "value";
-    request.associations = std::vector<schemaregistry::rest::model::AssociationCreateOrUpdateInfo>{assoc_info};
+    // Serializer uses AssociatedNameStrategy; falls back to TOPIC (default)
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
 
-    client->createAssociation(request);
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ctx("topic1", SerdeType::Value, SerdeFormat::Avro);
+    auto bytes = serializer.serialize(ctx, makeDemoDatum());
 
-    // Create the strategy
-    std::unordered_map<std::string, std::string> config;
-
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
-
-    AssociatedNameStrategy strategy(client, config, get_record_name);
-
-    // Call getSubject multiple times
-    std::string subject1 = strategy.getSubject("cached-topic", SerdeType::Value, std::nullopt);
-    std::string subject2 = strategy.getSubject("cached-topic", SerdeType::Value, std::nullopt);
-    std::string subject3 = strategy.getSubject("cached-topic", SerdeType::Value, std::nullopt);
-
-    // All should return the same cached result
-    EXPECT_EQ(subject1, "cached-subject");
-    EXPECT_EQ(subject2, "cached-subject");
-    EXPECT_EQ(subject3, "cached-subject");
+    // Deserializer uses default TopicNameStrategy
+    auto deser_config = DeserializerConfig::createDefault();
+    AvroDeserializer deserializer(client, rule_registry, deser_config);
+    auto result = deserializer.deserialize(ctx, bytes);
+    verifyDemoDatum(result.value);
 }
 
-TEST(AvroTest, AssociatedNameStrategy_FallsBackToTopicNameStrategy) {
-    // Create client configuration with mock URL
+TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyFallbackNone) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = SchemaRegistryClient::newClient(client_config);
 
-    // No associations created - should fall back to topic name strategy
+    // Register schema but create no association
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(kDemoSchema));
+    client->registerSchema("topic1-value", schema, false);
 
-    std::unordered_map<std::string, std::string> config = {
-        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "TOPIC"}
-    };
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ser_config.subject_name_strategy_config = {
+        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}};
 
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
-
-    AssociatedNameStrategy strategy(client, config, get_record_name);
-
-    // Get subject - should fall back to topic name strategy
-    std::string subject = strategy.getSubject("fallback-topic", SerdeType::Value, std::nullopt);
-    EXPECT_EQ(subject, "fallback-topic-value");
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ctx("topic1", SerdeType::Value, SerdeFormat::Avro);
+    EXPECT_THROW(serializer.serialize(ctx, makeDemoDatum()), SerializationError);
 }
 
-TEST(AvroTest, AssociatedNameStrategy_ThrowsOnMultipleAssociations) {
-    // Create client configuration with mock URL
+TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyMultipleAssociations) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = SchemaRegistryClient::newClient(client_config);
 
-    // Create multiple associations for the same resource
-    schemaregistry::rest::model::AssociationCreateOrUpdateRequest request;
-    request.resource_name = "multi-topic";
-    request.resource_namespace = "-";
-    request.resource_type = "topic";
+    // Register two schemas under different subjects
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(kDemoSchema));
+    client->registerSchema("subject1", schema, false);
+    client->registerSchema("subject2", schema, false);
 
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info1;
-    assoc_info1.subject = "subject-1";
-    assoc_info1.association_type = "value";
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info2;
-    assoc_info2.subject = "subject-2";
-    assoc_info2.association_type = "value";
-    request.associations = std::vector<schemaregistry::rest::model::AssociationCreateOrUpdateInfo>{assoc_info1, assoc_info2};
-
-    client->createAssociation(request);
-
-    // Create the strategy
-    std::unordered_map<std::string, std::string> config = {
-        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}
+    // Create two associations for the same topic (different resource IDs,
+    // simulating two Kafka clusters with the same topic name)
+    auto makeReq = [](const std::string &resource_id,
+                      const std::string &subject_name) {
+        AssociationCreateOrUpdateRequest r;
+        r.resource_name = "topic1";
+        r.resource_namespace = "-";
+        r.resource_id = resource_id;
+        r.resource_type = "topic";
+        AssociationCreateOrUpdateInfo a;
+        a.subject = subject_name;
+        a.association_type = "value";
+        r.associations = std::vector<AssociationCreateOrUpdateInfo>{a};
+        return r;
     };
+    client->createAssociation(makeReq("lkc-123:topic1", "subject1"));
+    client->createAssociation(makeReq("lkc-456:topic1", "subject2"));
 
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
 
-    AssociatedNameStrategy strategy(client, config, get_record_name);
-
-    // Get subject - should throw due to multiple associations
-    EXPECT_THROW(strategy.getSubject("multi-topic", SerdeType::Value, std::nullopt), SerializationError);
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ctx("topic1", SerdeType::Value, SerdeFormat::Avro);
+    EXPECT_THROW(serializer.serialize(ctx, makeDemoDatum()), SerializationError);
 }
 
-TEST(AvroTest, AssociatedNameStrategy_ThrowsWhenNoFallback) {
-    // Create client configuration with mock URL
+TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyWithKafkaClusterID) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = SchemaRegistryClient::newClient(client_config);
 
-    // No associations created
+    // Register schema under a custom subject
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(kDemoSchema));
+    client->registerSchema("my-custom-subject", schema, false);
 
-    std::unordered_map<std::string, std::string> config = {
-        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}
-    };
+    // Associate with a specific cluster namespace
+    AssociationCreateOrUpdateRequest req;
+    req.resource_name = "topic1";
+    req.resource_namespace = "lkc-my-cluster";
+    req.resource_id = "lkc-my-cluster:topic1";
+    req.resource_type = "topic";
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.subject = "my-custom-subject";
+    assoc.association_type = "value";
+    req.associations = std::vector<AssociationCreateOrUpdateInfo>{assoc};
+    client->createAssociation(req);
 
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ser_config.subject_name_strategy_config = {
+        {KAFKA_CLUSTER_ID_CONFIG, "lkc-my-cluster"}};
 
-    AssociatedNameStrategy strategy(client, config, get_record_name);
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ctx("topic1", SerdeType::Value, SerdeFormat::Avro);
+    auto bytes = serializer.serialize(ctx, makeDemoDatum());
 
-    // Get subject - should throw due to no fallback
-    EXPECT_THROW(strategy.getSubject("no-assoc-topic", SerdeType::Value, std::nullopt), SerializationError);
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    deser_config.subject_name_strategy_config = {
+        {KAFKA_CLUSTER_ID_CONFIG, "lkc-my-cluster"}};
+    AvroDeserializer deserializer(client, rule_registry, deser_config);
+    auto result = deserializer.deserialize(ctx, bytes);
+    verifyDemoDatum(result.value);
 }
 
-TEST(AvroTest, AssociatedNameStrategy_UsesKafkaClusterIdAsNamespace) {
-    // Create client configuration with mock URL
+TEST(AvroTest, AvroSerdeWithAssociatedNameStrategyCaching) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = SchemaRegistryClient::newClient(client_config);
 
-    // Create an association with a specific namespace (cluster ID)
-    schemaregistry::rest::model::AssociationCreateOrUpdateRequest request;
-    request.resource_name = "cluster-topic";
-    request.resource_namespace = "my-cluster-id";
-    request.resource_type = "topic";
+    // Register schema and create association
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(kDemoSchema));
+    client->registerSchema("my-cached-subject", schema, false);
 
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info;
-    assoc_info.subject = "cluster-subject";
-    assoc_info.association_type = "value";
-    request.associations = std::vector<schemaregistry::rest::model::AssociationCreateOrUpdateInfo>{assoc_info};
+    AssociationCreateOrUpdateRequest req;
+    req.resource_name = "topic1";
+    req.resource_namespace = "-";
+    req.resource_id = "lkc-123:topic1";
+    req.resource_type = "topic";
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.subject = "my-cached-subject";
+    assoc.association_type = "value";
+    req.associations = std::vector<AssociationCreateOrUpdateInfo>{assoc};
+    client->createAssociation(req);
 
-    client->createAssociation(request);
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
 
-    // Create the strategy with kafka cluster ID
-    std::unordered_map<std::string, std::string> config = {
-        {KAFKA_CLUSTER_ID_CONFIG, "my-cluster-id"},
-        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}
-    };
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
 
-    auto get_record_name = [](const std::optional<Schema> &) -> std::string {
-        return "TestRecord";
-    };
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    AvroDeserializer deserializer(client, rule_registry, deser_config);
+    SerializationContext ctx("topic1", SerdeType::Value, SerdeFormat::Avro);
 
-    AssociatedNameStrategy strategy(client, config, get_record_name);
-
-    // Get subject - should find the association with the cluster namespace
-    std::string subject = strategy.getSubject("cluster-topic", SerdeType::Value, std::nullopt);
-    EXPECT_EQ(subject, "cluster-subject");
-}
-
-TEST(AvroTest, AssociatedNameStrategy_DeleteAssociations) {
-    // Create client configuration with mock URL
-    std::vector<std::string> urls = {"mock://"};
-    auto client_config = std::make_shared<const ClientConfiguration>(urls);
-    auto client = SchemaRegistryClient::newClient(client_config);
-
-    // Create an association
-    schemaregistry::rest::model::AssociationCreateOrUpdateRequest request;
-    request.resource_name = "delete-topic";
-    request.resource_namespace = "-";
-    request.resource_type = "topic";
-
-    schemaregistry::rest::model::AssociationCreateOrUpdateInfo assoc_info;
-    assoc_info.subject = "delete-subject";
-    assoc_info.association_type = "value";
-    request.associations = std::vector<schemaregistry::rest::model::AssociationCreateOrUpdateInfo>{assoc_info};
-
-    auto response = client->createAssociation(request);
-    std::string resource_id = response.resource_id.value();
-
-    // Verify the association exists
-    auto associations = client->getAssociationsByResourceName(
-        "delete-topic", "-", "topic", {"value"}, "", 0, -1);
-    ASSERT_EQ(associations.size(), 1);
-
-    // Delete the associations
-    client->deleteAssociations(resource_id, std::nullopt, std::nullopt, false);
-
-    // Verify the association is gone
-    associations = client->getAssociationsByResourceName(
-        "delete-topic", "-", "topic", {"value"}, "", 0, -1);
-    EXPECT_EQ(associations.size(), 0);
+    // Serialize and deserialize 5 times — subject lookup is cached after first call
+    for (int i = 0; i < 5; ++i) {
+        auto bytes = serializer.serialize(ctx, makeDemoDatum());
+        auto result = deserializer.deserialize(ctx, bytes);
+        verifyDemoDatum(result.value);
+    }
 }

@@ -24,6 +24,7 @@ struct SerializerConfig {
     bool validate;
     std::unordered_map<std::string, std::string> rule_config;
     SubjectNameStrategyType subject_name_strategy_type;
+    std::unordered_map<std::string, std::string> subject_name_strategy_config;
     SchemaIdSerializer schema_id_serializer;
 
     // Constructors
@@ -52,6 +53,7 @@ struct DeserializerConfig {
     bool validate;
     std::unordered_map<std::string, std::string> rule_config;
     SubjectNameStrategyType subject_name_strategy_type;
+    std::unordered_map<std::string, std::string> subject_name_strategy_config;
     SchemaIdDeserializer schema_id_deserializer;
 
     // Constructors
