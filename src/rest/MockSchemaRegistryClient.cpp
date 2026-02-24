@@ -234,10 +234,10 @@ MockAssociationStore::createAssociation(
     const schemaregistry::rest::model::AssociationCreateOrUpdateRequest
         &request) {
     std::string resource_id =
-        request.resource_id.value_or(generateResourceId());
-    std::string resource_name = request.resource_name.value_or("");
-    std::string resource_namespace = request.resource_namespace.value_or("");
-    std::string resource_type = request.resource_type.value_or("");
+        request.getResourceId().value_or(generateResourceId());
+    std::string resource_name = request.getResourceName().value_or("");
+    std::string resource_namespace = request.getResourceNamespace().value_or("");
+    std::string resource_type = request.getResourceType().value_or("");
 
     // Get or create entry
     AssociationCacheEntry &entry = associations[resource_id];
@@ -247,35 +247,35 @@ MockAssociationStore::createAssociation(
     entry.resource_type = resource_type;
 
     // Process associations from request
-    if (request.associations.has_value()) {
-        for (const auto &info : request.associations.value()) {
+    if (request.getAssociations().has_value()) {
+        for (const auto &info : request.getAssociations().value()) {
             schemaregistry::rest::model::Association assoc;
-            assoc.subject = info.subject;
-            assoc.resource_id = resource_id;
-            assoc.resource_name = resource_name;
-            assoc.resource_namespace = resource_namespace;
-            assoc.resource_type = resource_type;
-            assoc.association_type = info.association_type;
+            assoc.setSubject(info.getSubject());
+            assoc.setResourceId(resource_id);
+            assoc.setResourceName(resource_name);
+            assoc.setResourceNamespace(resource_namespace);
+            assoc.setResourceType(resource_type);
+            assoc.setAssociationType(info.getAssociationType());
 
             // Parse lifecycle
-            if (info.lifecycle.has_value()) {
-                if (info.lifecycle.value() == "STRONG") {
-                    assoc.lifecycle =
-                        schemaregistry::rest::model::LifecyclePolicy::Strong;
-                } else if (info.lifecycle.value() == "WEAK") {
-                    assoc.lifecycle =
-                        schemaregistry::rest::model::LifecyclePolicy::Weak;
+            if (info.getLifecycle().has_value()) {
+                if (info.getLifecycle().value() == "STRONG") {
+                    assoc.setLifecycle(
+                        schemaregistry::rest::model::LifecyclePolicy::Strong);
+                } else if (info.getLifecycle().value() == "WEAK") {
+                    assoc.setLifecycle(
+                        schemaregistry::rest::model::LifecyclePolicy::Weak);
                 }
             }
-            assoc.frozen = info.frozen;
+            assoc.setFrozen(info.getFrozen());
             entry.associations.push_back(assoc);
         }
     }
 
     // Build response
     schemaregistry::rest::model::AssociationResponse response;
-    response.resource_id = resource_id;
-    response.associations = entry.associations;
+    response.setResourceId(resource_id);
+    response.setAssociations(entry.associations);
     return response;
 }
 
@@ -298,7 +298,7 @@ MockAssociationStore::getAssociationsByResourceName(
                 if (!association_types.empty()) {
                     bool found = false;
                     for (const auto &t : association_types) {
-                        if (assoc.association_type.value_or("") == t) {
+                        if (assoc.getAssociationType().value_or("") == t) {
                             found = true;
                             break;
                         }
@@ -308,9 +308,9 @@ MockAssociationStore::getAssociationsByResourceName(
                 // Filter by lifecycle if specified
                 if (!lifecycle.empty()) {
                     std::string assoc_lifecycle;
-                    if (assoc.lifecycle.has_value()) {
+                    if (assoc.getLifecycle().has_value()) {
                         assoc_lifecycle =
-                            assoc.lifecycle.value() ==
+                            assoc.getLifecycle().value() ==
                                     schemaregistry::rest::model::LifecyclePolicy::
                                         Strong
                                 ? "STRONG"
@@ -352,7 +352,7 @@ void MockAssociationStore::deleteAssociations(
                     entry.associations.begin(), entry.associations.end(),
                     [&](const schemaregistry::rest::model::Association &a) {
                         for (const auto &t : association_types.value()) {
-                            if (a.association_type.value_or("") == t) {
+                            if (a.getAssociationType().value_or("") == t) {
                                 return true;
                             }
                         }

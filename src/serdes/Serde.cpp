@@ -1060,7 +1060,7 @@ std::string AssociatedNameStrategy::loadAssociatedSubjectName(
         throw SerializationError(
             "multiple associated subjects found for topic " + topic);
     } else if (associations.size() == 1) {
-        auto subject = associations[0].subject;
+        auto subject = associations[0].getSubject();
         if (subject.has_value()) {
             return subject.value();
         } else {
