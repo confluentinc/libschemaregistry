@@ -107,31 +107,13 @@ inline ProtobufDeserializer<T>::ProtobufDeserializer(
     : base_(std::make_shared<BaseDeserializer>(
           Serde(std::move(client), rule_registry), config)),
       serde_(std::make_unique<ProtobufSerde>()),
-      subject_name_strategy_(
-          [this, &config]() -> SubjectNameStrategyFunc {
-              if (config.subject_name_strategy_type ==
-                  SubjectNameStrategyType::Associated) {
-                  auto strategy = std::make_shared<AssociatedNameStrategy>(
-                      base_->getSerde().getClient(),
-                      config.subject_name_strategy_config,
-                      [this](const std::optional<
-                                 schemaregistry::rest::model::Schema> &schema) {
-                          return getRecordName(schema);
-                      });
-                  return [strategy](
-                             const std::string &topic, SerdeType serde_type,
-                             const std::optional<
-                                 schemaregistry::rest::model::Schema> &schema) {
-                      return strategy->getSubject(topic, serde_type, schema);
-                  };
-              }
-              return configureSubjectNameStrategy(
-                  config.subject_name_strategy_type,
-                  [this](const std::optional<
-                             schemaregistry::rest::model::Schema> &s) {
-                      return getRecordName(s);
-                  });
-          }()) {
+      subject_name_strategy_(configureSubjectNameStrategy(
+          config.subject_name_strategy_type,
+          base_->getSerde().getClient(),
+          config.subject_name_strategy_config,
+          [this](const std::optional<schemaregistry::rest::model::Schema> &s) {
+              return getRecordName(s);
+          })) {
     std::vector<std::shared_ptr<RuleExecutor>> executors;
     if (rule_registry) {
         executors = rule_registry->getExecutors();
@@ -158,14 +140,15 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     // Get initial subject using configured strategy (without schema yet).
     // Topic strategy works immediately; Record/TopicRecord will be recomputed
     // once we have the writer schema with the actual message name.
-    std::string initial_subject =
+    auto initial_subject =
         subject_name_strategy_(ctx.topic, ctx.serde_type, std::nullopt);
     std::optional<schemaregistry::rest::model::RegisteredSchema> latest_schema;
 
-    if (!initial_subject.empty()) {
+    if (initial_subject.has_value()) {
         try {
             latest_schema = base_->getSerde().getReaderSchema(
-                initial_subject, "serialized", base_->getConfig().use_schema);
+                initial_subject.value(), "serialized",
+                base_->getConfig().use_schema);
         } catch (const std::exception &) {
             // Schema not found - will be determined from writer schema
         }
@@ -180,11 +163,7 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     std::vector<uint8_t> remaining_data(data.begin() + bytes_read, data.end());
 
     auto writer_schema_raw =
-        base_->getWriterSchema(schema_id,
-                               initial_subject.empty()
-                                   ? std::nullopt
-                                   : std::make_optional(initial_subject),
-                               "serialized");
+        base_->getWriterSchema(schema_id, initial_subject, "serialized");
     auto [writer_schema, pool_ptr] = serde_->getParsedSchema(
         writer_schema_raw, base_->getSerde().getClient());
     if (!writer_schema) {
@@ -198,21 +177,21 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     }
 
     // Recompute subject with writer schema for Record/TopicRecord strategies.
-    std::string subject = subject_name_strategy_(
+    auto subject_opt = subject_name_strategy_(
         ctx.topic, ctx.serde_type, std::make_optional(writer_schema_raw));
+    if (!subject_opt.has_value()) {
+        throw SerializationError("Subject name could not be determined");
+    }
+    const std::string &subject = subject_opt.value();
 
     // If subject changed, try to get reader schema again
-    if (subject != initial_subject && !subject.empty()) {
+    if (subject != initial_subject.value_or("") && !subject.empty()) {
         try {
             latest_schema = base_->getSerde().getReaderSchema(
                 subject, "serialized", base_->getConfig().use_schema);
         } catch (const std::exception &) {
             // Schema not found
         }
-    }
-
-    if (subject.empty()) {
-        throw ProtobufError("Subject name could not be determined");
     }
 
     std::vector<uint8_t> processed_data = remaining_data;

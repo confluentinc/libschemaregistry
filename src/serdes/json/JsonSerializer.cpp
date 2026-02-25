@@ -192,29 +192,11 @@ class JsonSerializer::Impl {
           base_(std::make_shared<BaseSerializer>(
               Serde(std::move(client), rule_registry), config)),
           serde_(std::make_unique<JsonSerde>()),
-          subject_name_strategy_(
-              [this, &config]() -> SubjectNameStrategyFunc {
-                  if (config.subject_name_strategy_type ==
-                      SubjectNameStrategyType::Associated) {
-                      auto strategy = std::make_shared<AssociatedNameStrategy>(
-                          base_->getSerde().getClient(),
-                          config.subject_name_strategy_config,
-                          [this](const std::optional<Schema> &schema) {
-                              return getRecordName(schema);
-                          });
-                      return [strategy](const std::string &topic,
-                                        SerdeType serde_type,
-                                        const std::optional<Schema> &schema) {
-                          return strategy->getSubject(topic, serde_type,
-                                                      schema);
-                      };
-                  }
-                  return configureSubjectNameStrategy(
-                      config.subject_name_strategy_type,
-                      [this](const std::optional<Schema> &s) {
-                          return getRecordName(s);
-                      });
-              }()) {
+          subject_name_strategy_(configureSubjectNameStrategy(
+              config.subject_name_strategy_type,
+              base_->getSerde().getClient(),
+              config.subject_name_strategy_config,
+              [this](const std::optional<Schema> &s) { return getRecordName(s); })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -237,8 +219,12 @@ class JsonSerializer::Impl {
         auto mutable_value = value;  // Copy for potential transformation
 
         // Get subject using configured subject name strategy
-        std::string subject =
+        auto subject_opt =
             subject_name_strategy_(ctx.topic, ctx.serde_type, schema_);
+        if (!subject_opt.has_value()) {
+            throw SerializationError("Could not determine subject for serialization");
+        }
+        const std::string &subject = subject_opt.value();
 
         // Get or register schema
         SchemaId schema_id(SerdeFormat::Json);

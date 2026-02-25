@@ -78,8 +78,9 @@ std::optional<SubjectNameStrategyFunc> strategyFunc(
     switch (strategy_type) {
         case SubjectNameStrategyType::Topic:
             return [](const std::string &topic, SerdeType serde_type,
-                      const std::optional<Schema> &schema) -> std::string {
-                return topicNameStrategy(topic, serde_type, schema).value();
+                      const std::optional<Schema> &schema)
+                       -> std::optional<std::string> {
+                return topicNameStrategy(topic, serde_type, schema);
             };
         case SubjectNameStrategyType::Record:
             return recordNameStrategy(get_record_name);
@@ -91,33 +92,51 @@ std::optional<SubjectNameStrategyFunc> strategyFunc(
             return std::nullopt;
         default:
             return [](const std::string &topic, SerdeType serde_type,
-                      const std::optional<Schema> &schema) -> std::string {
-                return topicNameStrategy(topic, serde_type, schema).value();
+                      const std::optional<Schema> &schema)
+                       -> std::optional<std::string> {
+                return topicNameStrategy(topic, serde_type, schema);
             };
     }
 }
 
 SubjectNameStrategyFunc recordNameStrategy(RecordNameFunc get_record_name) {
     return [get_record_name](const std::string &topic, SerdeType serde_type,
-                             const std::optional<Schema> &schema) -> std::string {
+                             const std::optional<Schema> &schema)
+               -> std::optional<std::string> {
+        if (!schema.has_value()) {
+            return std::nullopt;
+        }
         return get_record_name(schema);
     };
 }
 
 SubjectNameStrategyFunc topicRecordNameStrategy(RecordNameFunc get_record_name) {
     return [get_record_name](const std::string &topic, SerdeType serde_type,
-                             const std::optional<Schema> &schema) -> std::string {
-        std::string record_name = get_record_name(schema);
-        return topic + "-" + record_name;
+                             const std::optional<Schema> &schema)
+               -> std::optional<std::string> {
+        if (!schema.has_value()) {
+            return std::nullopt;
+        }
+        return topic + "-" + get_record_name(schema);
     };
 }
 
 SubjectNameStrategyFunc configureSubjectNameStrategy(
-    SubjectNameStrategyType strategy_type, RecordNameFunc get_record_name) {
+    SubjectNameStrategyType strategy_type,
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
+    const std::unordered_map<std::string, std::string> &strategy_config,
+    RecordNameFunc get_record_name) {
+    if (strategy_type == SubjectNameStrategyType::Associated) {
+        auto assoc = std::make_shared<AssociatedNameStrategy>(
+            std::move(client), strategy_config, get_record_name);
+        return [assoc](const std::string &topic, SerdeType serde_type,
+                       const std::optional<Schema> &schema)
+                   -> std::optional<std::string> {
+            return assoc->getSubject(topic, serde_type, schema);
+        };
+    }
     auto strategy = strategyFunc(strategy_type, get_record_name);
     if (!strategy.has_value()) {
-        // If the requested strategy type cannot be constructed here, treat this
-        // as a configuration error instead of silently falling back.
         throw SerializationError(
             "Unsupported or unconfigured subject name strategy type");
     }
