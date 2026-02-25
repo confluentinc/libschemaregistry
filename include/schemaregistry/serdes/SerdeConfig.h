@@ -1,11 +1,16 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 
 #include "schemaregistry/serdes/SerdeTypes.h"
+
+namespace schemaregistry::rest {
+class ISchemaRegistryClient;
+}  // namespace schemaregistry::rest
 
 namespace schemaregistry::serdes {
 
@@ -23,7 +28,8 @@ struct SerializerConfig {
     bool normalize_schemas;
     bool validate;
     std::unordered_map<std::string, std::string> rule_config;
-    SubjectNameStrategy subject_name_strategy;
+    SubjectNameStrategyType subject_name_strategy_type;
+    std::unordered_map<std::string, std::string> subject_name_strategy_config;
     SchemaIdSerializer schema_id_serializer;
 
     // Constructors
@@ -51,7 +57,8 @@ struct DeserializerConfig {
     std::optional<SchemaSelector> use_schema;
     bool validate;
     std::unordered_map<std::string, std::string> rule_config;
-    SubjectNameStrategy subject_name_strategy;
+    SubjectNameStrategyType subject_name_strategy_type;
+    std::unordered_map<std::string, std::string> subject_name_strategy_config;
     SchemaIdDeserializer schema_id_deserializer;
 
     // Constructors
@@ -82,6 +89,47 @@ struct DeserializerConfig {
 std::optional<std::string> topicNameStrategy(
     const std::string &topic, SerdeType serde_type,
     const std::optional<Schema> &schema);
+
+/**
+ * StrategyFunc returns the SubjectNameStrategyFunc for the given strategy type.
+ * Note: This does not handle Associated strategy as it requires additional
+ * parameters. Maps to strategy_func from serde.rs
+ * @param strategy_type The type of strategy to create
+ * @param get_record_name Function to extract the record name from a schema
+ * @return The subject name strategy function, or nullopt for None/Associated
+ */
+std::optional<SubjectNameStrategyFunc> strategyFunc(
+    SubjectNameStrategyType strategy_type, RecordNameFunc get_record_name);
+
+/**
+ * RecordNameStrategy creates a subject name from the record name.
+ * Maps to record_name_strategy from serde.rs
+ * @param get_record_name Function to extract the record name from a schema
+ * @return A SubjectNameStrategyFunc that uses the record name
+ */
+SubjectNameStrategyFunc recordNameStrategy(RecordNameFunc get_record_name);
+
+/**
+ * TopicRecordNameStrategy creates a subject name from the topic and record
+ * name. Maps to topic_record_name_strategy from serde.rs
+ * @param get_record_name Function to extract the record name from a schema
+ * @return A SubjectNameStrategyFunc that uses the topic and record name
+ */
+SubjectNameStrategyFunc topicRecordNameStrategy(RecordNameFunc get_record_name);
+
+/**
+ * ConfigureSubjectNameStrategy configures the subject name strategy based on
+ * the strategy type. Maps to configure_subject_name_strategy from serde.rs
+ * @param strategy_type The type of strategy to create
+ * @param get_record_name Function to extract the record name from a schema
+ * @return A SubjectNameStrategyFunc for subject name resolution
+ */
+SubjectNameStrategyFunc configureSubjectNameStrategy(
+    SubjectNameStrategyType strategy_type,
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client =
+        nullptr,
+    const std::unordered_map<std::string, std::string> &strategy_config = {},
+    RecordNameFunc get_record_name = nullptr);
 
 /**
  * Prefix schema ID serializer

@@ -2,11 +2,14 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <variant>
 #include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
 
 #include "schemaregistry/rest/ISchemaRegistryClient.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
@@ -397,6 +400,82 @@ class BaseDeserializer {
     BaseDeserializer(BaseDeserializer &&) = delete;
     BaseDeserializer &operator=(const BaseDeserializer &) = delete;
     BaseDeserializer &operator=(BaseDeserializer &&) = delete;
+};
+
+/**
+ * Cache key for subject lookups
+ */
+struct SubjectCacheKey {
+    std::string topic;
+    bool is_key;
+    std::string schema;
+
+    bool operator==(const SubjectCacheKey &other) const {
+        return topic == other.topic && is_key == other.is_key &&
+               schema == other.schema;
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H state, const SubjectCacheKey &key) {
+        return H::combine(std::move(state), key.topic, key.is_key, key.schema);
+    }
+};
+
+}  // namespace schemaregistry::serdes
+
+namespace schemaregistry::serdes {
+
+/**
+ * AssociatedNameStrategy retrieves the associated subject name from schema
+ * registry. Based on AssociatedNameStrategy from serde.rs
+ *
+ * The topic is passed as the resource name to schema registry. If there is a
+ * configuration property named "kafka.cluster.id", then its value will be
+ * passed as the resource namespace; otherwise the value "-" will be passed as
+ * the resource namespace.
+ *
+ * If more than one subject is returned from the query, an error will be thrown.
+ * If no subjects are returned from the query, then the behavior will fall back
+ * to TopicNameStrategy, unless the configuration property
+ * "fallback.subject.name.strategy.type" is set to "RECORD", "TOPIC_RECORD", or
+ * "NONE" (which throws an error if no associated subject is found).
+ */
+class AssociatedNameStrategy {
+  private:
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client_;
+    std::string kafka_cluster_id_;
+    std::optional<SubjectNameStrategyFunc> fallback_strategy_;
+    mutable absl::flat_hash_map<SubjectCacheKey, std::optional<std::string>>
+        subject_name_cache_;
+    mutable std::mutex cache_mutex_;
+
+  public:
+    /**
+     * Create a new AssociatedNameStrategy.
+     *
+     * @param client The schema registry client
+     * @param config Configuration map that may contain "kafka.cluster.id" and
+     * "fallback.subject.name.strategy.type"
+     * @param get_record_name Function to extract the record name from a schema
+     * (used for fallback strategies)
+     */
+    AssociatedNameStrategy(
+        std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
+        const std::unordered_map<std::string, std::string> &config,
+        RecordNameFunc get_record_name);
+
+    /**
+     * Get the subject name for the given topic, serde type, and schema.
+     * Returns nullopt when no association is found and there is no fallback.
+     */
+    std::optional<std::string> getSubject(const std::string &topic,
+                                          SerdeType serde_type,
+                                          const std::optional<Schema> &schema) const;
+
+  private:
+    std::optional<std::string> loadAssociatedSubjectName(
+        const std::string &topic, bool is_key,
+        const std::optional<Schema> &schema, SerdeType serde_type) const;
 };
 
 }  // namespace schemaregistry::serdes
