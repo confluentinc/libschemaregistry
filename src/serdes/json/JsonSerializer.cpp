@@ -165,8 +165,9 @@ void JsonSerde::resolveNamedSchema(
     const schemaregistry::rest::model::Schema &schema,
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
     std::unordered_map<std::string, std::string> references) {
-    if (schema.getReferences().has_value()) {
-        for (const auto &ref : schema.getReferences().value()) {
+    auto refs_opt = schema.getReferences();
+    if (refs_opt.has_value()) {
+        for (const auto &ref : refs_opt.value()) {
             if (!ref.getName().has_value() || !ref.getSubject().has_value()) {
                 continue;  // Skip invalid references
             }
@@ -191,11 +192,29 @@ class JsonSerializer::Impl {
           base_(std::make_shared<BaseSerializer>(
               Serde(std::move(client), rule_registry), config)),
           serde_(std::make_unique<JsonSerde>()),
-          subject_name_strategy_(configureSubjectNameStrategy(
-              config.subject_name_strategy_type,
-              [this](const std::optional<Schema> &s) {
-                  return getRecordName(s);
-              })) {
+          subject_name_strategy_(
+              [this, &config]() -> SubjectNameStrategyFunc {
+                  if (config.subject_name_strategy_type ==
+                      SubjectNameStrategyType::Associated) {
+                      auto strategy = std::make_shared<AssociatedNameStrategy>(
+                          base_->getSerde().getClient(),
+                          config.subject_name_strategy_config,
+                          [this](const std::optional<Schema> &schema) {
+                              return getRecordName(schema);
+                          });
+                      return [strategy](const std::string &topic,
+                                        SerdeType serde_type,
+                                        const std::optional<Schema> &schema) {
+                          return strategy->getSubject(topic, serde_type,
+                                                      schema);
+                      };
+                  }
+                  return configureSubjectNameStrategy(
+                      config.subject_name_strategy_type,
+                      [this](const std::optional<Schema> &s) {
+                          return getRecordName(s);
+                      });
+              }()) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();

@@ -58,7 +58,8 @@ void AvroSerde::resolveNamedSchema(
         return;
     }
 
-    for (const auto &ref : schema.getReferences().value()) {
+    auto refs_opt = schema.getReferences();
+    for (const auto &ref : refs_opt.value()) {
         std::string name = ref.getName().value_or("");
         if (visited.find(name) != visited.end()) {
             continue;
