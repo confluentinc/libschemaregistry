@@ -1,11 +1,16 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 
 #include "schemaregistry/serdes/SerdeTypes.h"
+
+namespace schemaregistry::rest {
+class ISchemaRegistryClient;
+}  // namespace schemaregistry::rest
 
 namespace schemaregistry::serdes {
 
@@ -120,7 +125,11 @@ SubjectNameStrategyFunc topicRecordNameStrategy(RecordNameFunc get_record_name);
  * @return A SubjectNameStrategyFunc for subject name resolution
  */
 SubjectNameStrategyFunc configureSubjectNameStrategy(
-    SubjectNameStrategyType strategy_type, RecordNameFunc get_record_name);
+    SubjectNameStrategyType strategy_type,
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client =
+        nullptr,
+    const std::unordered_map<std::string, std::string> &strategy_config = {},
+    RecordNameFunc get_record_name = nullptr);
 
 /**
  * Prefix schema ID serializer

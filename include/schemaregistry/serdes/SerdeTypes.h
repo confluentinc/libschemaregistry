@@ -245,19 +245,11 @@ constexpr uint64_t DEFAULT_STRATEGY_CACHE_CAPACITY = 1000;
 SubjectNameStrategyType parseSubjectNameStrategyType(const std::string &s);
 
 /**
- * Function type aliases for strategies and serializers (from config.rs and
- * serde.rs)
- */
-using SubjectNameStrategy = std::function<std::optional<std::string>(
-    const std::string &topic, SerdeType serde_type,
-    const std::optional<Schema> &schema)>;
-
-/**
  * SubjectNameStrategyFunc is a function that determines the subject for the
  * given parameters. This is used for strategies that need to capture state
  * (like RecordNameStrategy). Based on SubjectNameStrategyFunc from serde.rs
  */
-using SubjectNameStrategyFunc = std::function<std::string(
+using SubjectNameStrategyFunc = std::function<std::optional<std::string>(
     const std::string &topic, SerdeType serde_type,
     const std::optional<Schema> &schema)>;
 

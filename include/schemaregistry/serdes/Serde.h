@@ -452,7 +452,7 @@ class AssociatedNameStrategy {
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client_;
     std::string kafka_cluster_id_;
     std::optional<SubjectNameStrategyFunc> fallback_strategy_;
-    mutable std::unordered_map<AssociationCacheKey, std::string>
+    mutable std::unordered_map<AssociationCacheKey, std::optional<std::string>>
         subject_name_cache_;
     mutable std::mutex cache_mutex_;
 
@@ -473,14 +473,16 @@ class AssociatedNameStrategy {
 
     /**
      * Get the subject name for the given topic, serde type, and schema.
+     * Returns nullopt when no association is found and there is no fallback.
      */
-    std::string getSubject(const std::string &topic, SerdeType serde_type,
-                           const std::optional<Schema> &schema) const;
+    std::optional<std::string> getSubject(const std::string &topic,
+                                          SerdeType serde_type,
+                                          const std::optional<Schema> &schema) const;
 
   private:
-    std::string loadAssociatedSubjectName(const std::string &topic, bool is_key,
-                                          const std::optional<Schema> &schema,
-                                          SerdeType serde_type) const;
+    std::optional<std::string> loadAssociatedSubjectName(
+        const std::string &topic, bool is_key,
+        const std::optional<Schema> &schema, SerdeType serde_type) const;
 };
 
 }  // namespace schemaregistry::serdes
