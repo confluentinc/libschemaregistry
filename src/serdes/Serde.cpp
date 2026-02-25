@@ -1004,11 +1004,11 @@ AssociatedNameStrategy::AssociatedNameStrategy(
     fallback_strategy_ = strategyFunc(fallback_type, get_record_name);
 }
 
-std::string AssociatedNameStrategy::getSubject(
+std::optional<std::string> AssociatedNameStrategy::getSubject(
     const std::string &topic, SerdeType serde_type,
     const std::optional<Schema> &schema) const {
     if (topic.empty()) {
-        return "";
+        return std::nullopt;
     }
 
     bool is_key = (serde_type == SerdeType::Key);
@@ -1027,8 +1027,7 @@ std::string AssociatedNameStrategy::getSubject(
     }
 
     // Load from schema registry
-    std::string subject =
-        loadAssociatedSubjectName(topic, is_key, schema, serde_type);
+    auto subject = loadAssociatedSubjectName(topic, is_key, schema, serde_type);
 
     // Store in cache
     {
@@ -1039,7 +1038,7 @@ std::string AssociatedNameStrategy::getSubject(
     return subject;
 }
 
-std::string AssociatedNameStrategy::loadAssociatedSubjectName(
+std::optional<std::string> AssociatedNameStrategy::loadAssociatedSubjectName(
     const std::string &topic, bool is_key, const std::optional<Schema> &schema,
     SerdeType serde_type) const {
     std::string association_type = is_key ? "key" : "value";
@@ -1068,10 +1067,8 @@ std::string AssociatedNameStrategy::loadAssociatedSubjectName(
         }
     } else if (fallback_strategy_.has_value()) {
         return fallback_strategy_.value()(topic, serde_type, schema);
-    } else {
-        throw SerializationError("no associated subject found for topic " +
-                                 topic);
     }
+    return std::nullopt;
 }
 
 // Note: ErrorAction and NoneAction implementations are in RuleRegistry.cpp

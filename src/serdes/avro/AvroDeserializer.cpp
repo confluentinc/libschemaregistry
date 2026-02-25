@@ -17,29 +17,11 @@ class AvroDeserializer::Impl {
         : base_(std::make_shared<BaseDeserializer>(
               Serde(std::move(client), rule_registry), config)),
           serde_(std::make_shared<AvroSerde>()),
-          subject_name_strategy_(
-              [this, &config]() -> SubjectNameStrategyFunc {
-                  if (config.subject_name_strategy_type ==
-                      SubjectNameStrategyType::Associated) {
-                      auto strategy = std::make_shared<AssociatedNameStrategy>(
-                          base_->getSerde().getClient(),
-                          config.subject_name_strategy_config,
-                          [this](const std::optional<Schema> &schema) {
-                              return getRecordName(schema);
-                          });
-                      return [strategy](const std::string &topic,
-                                        SerdeType serde_type,
-                                        const std::optional<Schema> &schema) {
-                          return strategy->getSubject(topic, serde_type,
-                                                      schema);
-                      };
-                  }
-                  return configureSubjectNameStrategy(
-                      config.subject_name_strategy_type,
-                      [this](const std::optional<Schema> &s) {
-                          return getRecordName(s);
-                      });
-              }()) {
+          subject_name_strategy_(configureSubjectNameStrategy(
+              config.subject_name_strategy_type,
+              base_->getSerde().getClient(),
+              config.subject_name_strategy_config,
+              [this](const std::optional<Schema> &s) { return getRecordName(s); })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -60,16 +42,16 @@ class AvroDeserializer::Impl {
     NamedValue deserialize(const SerializationContext &ctx,
                            const std::vector<uint8_t> &data) {
         // Get initial subject using configured subject name strategy (without schema)
-        std::string initial_subject =
+        auto initial_subject =
             subject_name_strategy_(ctx.topic, ctx.serde_type, std::nullopt);
         std::optional<schemaregistry::rest::model::RegisteredSchema>
             latest_schema;
 
         // Try to get reader schema with initial subject
-        if (!initial_subject.empty()) {
+        if (initial_subject.has_value()) {
             try {
                 latest_schema = base_->getSerde().getReaderSchema(
-                    initial_subject, std::nullopt,
+                    initial_subject.value(), std::nullopt,
                     base_->getConfig().use_schema);
             } catch (const std::exception &e) {
                 // Schema not found - will be determined from writer schema
@@ -85,21 +67,20 @@ class AvroDeserializer::Impl {
 
         // Get writer schema (pass nullopt when initial subject is unknown)
         auto writer_schema_raw =
-            base_->getWriterSchema(schema_id,
-                                   initial_subject.empty()
-                                       ? std::nullopt
-                                       : std::make_optional(initial_subject),
-                                   std::nullopt);
+            base_->getWriterSchema(schema_id, initial_subject, std::nullopt);
         auto writer_parsed = serde_->getParsedSchema(
             writer_schema_raw, base_->getSerde().getClient());
 
         // Recompute subject with writer schema (needed for Record/TopicRecord strategies)
-        std::string subject =
-            subject_name_strategy_(ctx.topic, ctx.serde_type,
-                                   std::make_optional(writer_schema_raw));
+        auto subject_opt = subject_name_strategy_(
+            ctx.topic, ctx.serde_type, std::make_optional(writer_schema_raw));
+        if (!subject_opt.has_value()) {
+            throw SerializationError("Could not determine subject for deserialization");
+        }
+        const std::string &subject = subject_opt.value();
 
         // If subject changed, try to get reader schema again
-        if (subject != initial_subject && !subject.empty()) {
+        if (subject != initial_subject.value_or("") && !subject.empty()) {
             try {
                 latest_schema = base_->getSerde().getReaderSchema(
                     subject, std::nullopt,
@@ -107,10 +88,6 @@ class AvroDeserializer::Impl {
             } catch (const std::exception &e) {
                 // Schema not found
             }
-        }
-
-        if (subject.empty()) {
-            throw AvroError("Could not determine subject for deserialization");
         }
 
         // Apply encoding rules if present (pre-decode)
