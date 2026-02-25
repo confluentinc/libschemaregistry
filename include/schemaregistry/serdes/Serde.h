@@ -2,11 +2,14 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <variant>
 #include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
 
 #include "schemaregistry/rest/ISchemaRegistryClient.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
@@ -411,23 +414,14 @@ struct SubjectCacheKey {
         return topic == other.topic && is_key == other.is_key &&
                schema == other.schema;
     }
+
+    template <typename H>
+    friend H AbslHashValue(H state, const SubjectCacheKey &key) {
+        return H::combine(std::move(state), key.topic, key.is_key, key.schema);
+    }
 };
 
 }  // namespace schemaregistry::serdes
-
-// Hash function for SubjectCacheKey
-namespace std {
-template <>
-struct hash<schemaregistry::serdes::SubjectCacheKey> {
-    size_t operator()(
-        const schemaregistry::serdes::SubjectCacheKey &key) const {
-        size_t h1 = std::hash<std::string>{}(key.topic);
-        size_t h2 = std::hash<bool>{}(key.is_key);
-        size_t h3 = std::hash<std::string>{}(key.schema);
-        return h1 ^ (h2 << 1) ^ (h3 << 2);
-    }
-};
-}  // namespace std
 
 namespace schemaregistry::serdes {
 
@@ -451,7 +445,7 @@ class AssociatedNameStrategy {
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client_;
     std::string kafka_cluster_id_;
     std::optional<SubjectNameStrategyFunc> fallback_strategy_;
-    mutable std::unordered_map<SubjectCacheKey, std::optional<std::string>>
+    mutable absl::flat_hash_map<SubjectCacheKey, std::optional<std::string>>
         subject_name_cache_;
     mutable std::mutex cache_mutex_;
 
