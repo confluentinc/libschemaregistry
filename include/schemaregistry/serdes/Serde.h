@@ -400,15 +400,14 @@ class BaseDeserializer {
 };
 
 /**
- * Cache key for association lookups
- * Based on AssociationCacheKey from serde.rs
+ * Cache key for subject lookups
  */
-struct AssociationCacheKey {
+struct SubjectCacheKey {
     std::string topic;
     bool is_key;
     std::string schema;
 
-    bool operator==(const AssociationCacheKey &other) const {
+    bool operator==(const SubjectCacheKey &other) const {
         return topic == other.topic && is_key == other.is_key &&
                schema == other.schema;
     }
@@ -416,12 +415,12 @@ struct AssociationCacheKey {
 
 }  // namespace schemaregistry::serdes
 
-// Hash function for AssociationCacheKey
+// Hash function for SubjectCacheKey
 namespace std {
 template <>
-struct hash<schemaregistry::serdes::AssociationCacheKey> {
+struct hash<schemaregistry::serdes::SubjectCacheKey> {
     size_t operator()(
-        const schemaregistry::serdes::AssociationCacheKey &key) const {
+        const schemaregistry::serdes::SubjectCacheKey &key) const {
         size_t h1 = std::hash<std::string>{}(key.topic);
         size_t h2 = std::hash<bool>{}(key.is_key);
         size_t h3 = std::hash<std::string>{}(key.schema);
@@ -452,7 +451,7 @@ class AssociatedNameStrategy {
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client_;
     std::string kafka_cluster_id_;
     std::optional<SubjectNameStrategyFunc> fallback_strategy_;
-    mutable std::unordered_map<AssociationCacheKey, std::optional<std::string>>
+    mutable std::unordered_map<SubjectCacheKey, std::optional<std::string>>
         subject_name_cache_;
     mutable std::mutex cache_mutex_;
 

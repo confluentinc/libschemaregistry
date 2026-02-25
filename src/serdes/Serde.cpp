@@ -1015,7 +1015,7 @@ std::optional<std::string> AssociatedNameStrategy::getSubject(
     std::string schema_str =
         schema.has_value() ? schema->getSchema().value_or("") : "";
 
-    AssociationCacheKey cache_key{topic, is_key, schema_str};
+    SubjectCacheKey cache_key{topic, is_key, schema_str};
 
     // Check cache first
     {
