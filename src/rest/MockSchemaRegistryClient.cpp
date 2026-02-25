@@ -247,8 +247,9 @@ MockAssociationStore::createAssociation(
     entry.resource_type = resource_type;
 
     // Process associations from request
-    if (request.getAssociations().has_value()) {
-        for (const auto &info : request.getAssociations().value()) {
+    auto assocs_opt = request.getAssociations();
+    if (assocs_opt.has_value()) {
+        for (const auto &info : assocs_opt.value()) {
             schemaregistry::rest::model::Association assoc;
             assoc.setSubject(info.getSubject());
             assoc.setResourceId(resource_id);
