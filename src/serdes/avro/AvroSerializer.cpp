@@ -54,11 +54,12 @@ void AvroSerde::resolveNamedSchema(
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
     std::vector<std::string> &schemas,
     std::unordered_set<std::string> &visited) {
-    if (!schema.getReferences().has_value()) {
+    auto refs_opt = schema.getReferences();
+
+    if (!refs_opt.has_value()) {
         return;
     }
 
-    auto refs_opt = schema.getReferences();
     for (const auto &ref : refs_opt.value()) {
         std::string name = ref.getName().value_or("");
         if (visited.find(name) != visited.end()) {
