@@ -1230,4 +1230,256 @@ TEST(JsonTest, EncryptionWithReferences) {
     ASSERT_EQ(obj2, obj);
 }
 
-#endif   
+#endif
+
+// AssociatedNameStrategy Tests
+// Ported from TestJsonSerdeWithAssociated* in confluent-kafka-go
+
+namespace {
+const std::string kJsonDemoSchema = R"({
+    "title": "DemoSchema",
+    "type": "object",
+    "properties": {
+        "intField":    {"type": "integer"},
+        "doubleField": {"type": "number"},
+        "stringField": {"type": "string"},
+        "boolField":   {"type": "boolean"}
+    }
+})";
+
+nlohmann::json makeJsonDemoDatum() {
+    return {{"intField", 123}, {"doubleField", 45.67},
+            {"stringField", "hi"}, {"boolField", true}};
+}
+
+void verifyJsonDemoDatum(const nlohmann::json &datum) {
+    EXPECT_EQ(datum["intField"].get<int>(), 123);
+    EXPECT_DOUBLE_EQ(datum["doubleField"].get<double>(), 45.67);
+    EXPECT_EQ(datum["stringField"].get<std::string>(), "hi");
+    EXPECT_EQ(datum["boolField"].get<bool>(), true);
+}
+}  // namespace
+
+TEST(JsonTest, JsonSerdeWithAssociatedNameStrategy) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kJsonDemoSchema));
+    client->registerSchema("my-custom-subject", schema, false);
+
+    AssociationCreateOrUpdateRequest req;
+    req.setResourceName("topic1");
+    req.setResourceNamespace("-");
+    req.setResourceId("lkc-123:topic1");
+    req.setResourceType("topic");
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.setSubject("my-custom-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
+    client->createAssociation(req);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+    auto bytes = serializer.serialize(ser_ctx, makeJsonDemoDatum());
+
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    JsonDeserializer deserializer(client, rule_registry, deser_config);
+    verifyJsonDemoDatum(deserializer.deserialize(ser_ctx, bytes));
+}
+
+TEST(JsonTest, JsonSerdeWithAssociatedNameStrategyFallbackToTopic) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kJsonDemoSchema));
+    client->registerSchema("topic1-value", schema, false);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+    auto bytes = serializer.serialize(ser_ctx, makeJsonDemoDatum());
+
+    auto deser_config = DeserializerConfig::createDefault();
+    JsonDeserializer deserializer(client, rule_registry, deser_config);
+    verifyJsonDemoDatum(deserializer.deserialize(ser_ctx, bytes));
+}
+
+TEST(JsonTest, JsonSerdeWithAssociatedNameStrategyFallbackNone) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kJsonDemoSchema));
+    client->registerSchema("topic1-value", schema, false);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ser_config.subject_name_strategy_config = {
+        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}};
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+    EXPECT_THROW(serializer.serialize(ser_ctx, makeJsonDemoDatum()),
+                 SerializationError);
+}
+
+TEST(JsonTest, JsonSerdeWithAssociatedNameStrategyMultipleAssociations) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kJsonDemoSchema));
+    client->registerSchema("subject1", schema, false);
+    client->registerSchema("subject2", schema, false);
+
+    auto makeReq = [](const std::string &resource_id,
+                      const std::string &subject_name) {
+        AssociationCreateOrUpdateRequest r;
+        r.setResourceName("topic1");
+        r.setResourceNamespace("-");
+        r.setResourceId(resource_id);
+        r.setResourceType("topic");
+        AssociationCreateOrUpdateInfo a;
+        a.setSubject(subject_name);
+        a.setAssociationType("value");
+        r.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{a});
+        return r;
+    };
+    client->createAssociation(makeReq("lkc-123:topic1", "subject1"));
+    client->createAssociation(makeReq("lkc-456:topic1", "subject2"));
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+    EXPECT_THROW(serializer.serialize(ser_ctx, makeJsonDemoDatum()),
+                 SerializationError);
+}
+
+TEST(JsonTest, JsonSerdeWithAssociatedNameStrategyWithKafkaClusterID) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kJsonDemoSchema));
+    client->registerSchema("my-custom-subject", schema, false);
+
+    AssociationCreateOrUpdateRequest req;
+    req.setResourceName("topic1");
+    req.setResourceNamespace("lkc-my-cluster");
+    req.setResourceId("lkc-my-cluster:topic1");
+    req.setResourceType("topic");
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.setSubject("my-custom-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
+    client->createAssociation(req);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ser_config.subject_name_strategy_config = {
+        {KAFKA_CLUSTER_ID_CONFIG, "lkc-my-cluster"}};
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+    auto bytes = serializer.serialize(ser_ctx, makeJsonDemoDatum());
+
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    deser_config.subject_name_strategy_config = {
+        {KAFKA_CLUSTER_ID_CONFIG, "lkc-my-cluster"}};
+    JsonDeserializer deserializer(client, rule_registry, deser_config);
+    verifyJsonDemoDatum(deserializer.deserialize(ser_ctx, bytes));
+}
+
+TEST(JsonTest, JsonSerdeWithAssociatedNameStrategyCaching) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kJsonDemoSchema));
+    client->registerSchema("my-cached-subject", schema, false);
+
+    AssociationCreateOrUpdateRequest req;
+    req.setResourceName("topic1");
+    req.setResourceNamespace("-");
+    req.setResourceId("lkc-123:topic1");
+    req.setResourceType("topic");
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.setSubject("my-cached-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
+    client->createAssociation(req);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    JsonDeserializer deserializer(client, rule_registry, deser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+
+    for (int i = 0; i < 5; ++i) {
+        auto bytes = serializer.serialize(ser_ctx, makeJsonDemoDatum());
+        verifyJsonDemoDatum(deserializer.deserialize(ser_ctx, bytes));
+    }
+}

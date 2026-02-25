@@ -14,11 +14,29 @@ class JsonDeserializer::Impl {
         : base_(std::make_shared<BaseDeserializer>(
               Serde(std::move(client), rule_registry), config)),
           serde_(std::make_unique<JsonSerde>()),
-          subject_name_strategy_(configureSubjectNameStrategy(
-              config.subject_name_strategy_type,
-              [this](const std::optional<Schema> &s) {
-                  return getRecordName(s);
-              })) {
+          subject_name_strategy_(
+              [this, &config]() -> SubjectNameStrategyFunc {
+                  if (config.subject_name_strategy_type ==
+                      SubjectNameStrategyType::Associated) {
+                      auto strategy = std::make_shared<AssociatedNameStrategy>(
+                          base_->getSerde().getClient(),
+                          config.subject_name_strategy_config,
+                          [this](const std::optional<Schema> &schema) {
+                              return getRecordName(schema);
+                          });
+                      return [strategy](const std::string &topic,
+                                        SerdeType serde_type,
+                                        const std::optional<Schema> &schema) {
+                          return strategy->getSubject(topic, serde_type,
+                                                      schema);
+                      };
+                  }
+                  return configureSubjectNameStrategy(
+                      config.subject_name_strategy_type,
+                      [this](const std::optional<Schema> &s) {
+                          return getRecordName(s);
+                      });
+              }()) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
