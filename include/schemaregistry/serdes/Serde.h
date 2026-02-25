@@ -445,7 +445,7 @@ namespace schemaregistry::serdes {
  * If no subjects are returned from the query, then the behavior will fall back
  * to TopicNameStrategy, unless the configuration property
  * "fallback.subject.name.strategy.type" is set to "RECORD", "TOPIC_RECORD", or
- * "NONE".
+ * "NONE" (which throws an error if no associated subject is found).
  */
 class AssociatedNameStrategy {
   private:
