@@ -190,7 +190,7 @@ class JsonDeserializer::Impl {
     }
 
     std::string getRecordName(const std::optional<Schema> &schema) {
-        if (!schema.has_value() || !schema->getSchema().has_value()) return "";
+        if (!schema.has_value()) return "";
         auto json = nlohmann::json::parse(schema->getSchema().value());
         if (json.is_object()) {
             if (json.contains("title") && json["title"].is_string()) {
