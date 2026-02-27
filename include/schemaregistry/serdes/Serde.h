@@ -430,14 +430,14 @@ namespace schemaregistry::serdes {
  * registry. Based on AssociatedNameStrategy from serde.rs
  *
  * The topic is passed as the resource name to schema registry. If there is a
- * configuration property named "kafka.cluster.id", then its value will be
- * passed as the resource namespace; otherwise the value "-" will be passed as
- * the resource namespace.
+ * configuration property named "subject.name.strategy.kafka.cluster.id",
+ * then its value will be passed as the resource namespace; otherwise the
+ * value "-" will be passed as the resource namespace.
  *
  * If more than one subject is returned from the query, an error will be thrown.
  * If no subjects are returned from the query, then the behavior will fall back
  * to TopicNameStrategy, unless the configuration property
- * "fallback.subject.name.strategy.type" is set to "RECORD", "TOPIC_RECORD", or
+ * "subject.name.strategy.fallback.type" is set to "RECORD", "TOPIC_RECORD", or
  * "NONE" (which throws an error if no associated subject is found).
  */
 class AssociatedNameStrategy {
@@ -454,8 +454,8 @@ class AssociatedNameStrategy {
      * Create a new AssociatedNameStrategy.
      *
      * @param client The schema registry client
-     * @param config Configuration map that may contain "kafka.cluster.id" and
-     * "fallback.subject.name.strategy.type"
+     * @param config Configuration map that may contain "subject.name.strategy.kafka.cluster.id" and
+     * "subject.name.strategy.fallback.type"
      * @param get_record_name Function to extract the record name from a schema
      * (used for fallback strategies)
      */

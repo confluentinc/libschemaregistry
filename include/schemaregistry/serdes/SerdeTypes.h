@@ -234,10 +234,9 @@ enum class SubjectNameStrategyType {
 /**
  * Configuration keys for subject name strategies (from serde.rs)
  */
-constexpr const char *KAFKA_CLUSTER_ID_CONFIG = "kafka.cluster.id";
+constexpr const char *KAFKA_CLUSTER_ID_CONFIG = "subject.name.strategy.kafka.cluster.id";
 constexpr const char *NAMESPACE_WILDCARD = "-";
-constexpr const char *FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG =
-    "fallback.subject.name.strategy.type";
+constexpr const char *FALLBACK_TYPE_CONFIG = "subject.name.strategy.fallback.type";
 constexpr uint64_t DEFAULT_STRATEGY_CACHE_CAPACITY = 1000;
 
 /**
