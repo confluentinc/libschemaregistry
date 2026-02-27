@@ -165,8 +165,9 @@ void JsonSerde::resolveNamedSchema(
     const schemaregistry::rest::model::Schema &schema,
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
     std::unordered_map<std::string, std::string> references) {
-    if (schema.getReferences().has_value()) {
-        for (const auto &ref : schema.getReferences().value()) {
+    auto refs_opt = schema.getReferences();
+    if (refs_opt.has_value()) {
+        for (const auto &ref : refs_opt.value()) {
             if (!ref.getName().has_value() || !ref.getSubject().has_value()) {
                 continue;  // Skip invalid references
             }
@@ -190,7 +191,12 @@ class JsonSerializer::Impl {
         : schema_(std::move(schema)),
           base_(std::make_shared<BaseSerializer>(
               Serde(std::move(client), rule_registry), config)),
-          serde_(std::make_unique<JsonSerde>()) {
+          serde_(std::make_unique<JsonSerde>()),
+          subject_name_strategy_(configureSubjectNameStrategy(
+              config.subject_name_strategy_type,
+              base_->getSerde().getClient(),
+              config.subject_name_strategy_config,
+              [this](const std::optional<Schema> &s) { return getRecordName(s); })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -212,13 +218,13 @@ class JsonSerializer::Impl {
                                    const nlohmann::json &value) {
         auto mutable_value = value;  // Copy for potential transformation
 
-        // Get subject using strategy
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt = strategy(ctx.topic, ctx.serde_type, schema_);
+        // Get subject using configured subject name strategy
+        auto subject_opt =
+            subject_name_strategy_(ctx.topic, ctx.serde_type, schema_);
         if (!subject_opt.has_value()) {
-            throw JsonError("Subject name strategy returned no subject");
+            throw SerializationError("Could not determine subject for serialization");
         }
-        std::string subject = subject_opt.value();
+        const std::string &subject = subject_opt.value();
 
         // Get or register schema
         SchemaId schema_id(SerdeFormat::Json);
@@ -358,10 +364,22 @@ class JsonSerializer::Impl {
         return serde_->getParsedSchema(schema, base_->getSerde().getClient());
     }
 
+    std::string getRecordName(const std::optional<Schema> &schema) {
+        if (!schema.has_value()) return "";
+        auto json = nlohmann::json::parse(schema->getSchema().value());
+        if (json.is_object()) {
+            if (json.contains("title") && json["title"].is_string()) {
+                return json["title"].get<std::string>();
+            }
+        }
+        throw JsonError("Could not determine record name from schema");
+    }
+
   private:
     std::optional<schemaregistry::rest::model::Schema> schema_;
     std::shared_ptr<BaseSerializer> base_;
     std::unique_ptr<JsonSerde> serde_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 };
 
 JsonSerializer::JsonSerializer(
