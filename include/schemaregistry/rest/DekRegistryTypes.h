@@ -6,8 +6,10 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <string>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
 
 #include "schemaregistry/rest/model/Dek.h"
 
@@ -22,6 +24,11 @@ struct KekId {
 
     bool operator==(const KekId &other) const {
         return name == other.name && deleted == other.deleted;
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H state, const KekId &key) {
+        return H::combine(std::move(state), key.name, key.deleted);
     }
 };
 
@@ -40,20 +47,13 @@ struct DekId {
                version == other.version && algorithm == other.algorithm &&
                deleted == other.deleted;
     }
+
+    template <typename H>
+    friend H AbslHashValue(H state, const DekId &key) {
+        return H::combine(std::move(state), key.kek_name, key.subject,
+                          key.version, key.algorithm, key.deleted);
+    }
 };
 
 }  // namespace schemaregistry::rest
 
-// Hash specializations for std::unordered_map (implementations in
-// DekRegistryTypes.cpp)
-namespace std {
-template <>
-struct hash<schemaregistry::rest::KekId> {
-    std::size_t operator()(const schemaregistry::rest::KekId &k) const;
-};
-
-template <>
-struct hash<schemaregistry::rest::DekId> {
-    std::size_t operator()(const schemaregistry::rest::DekId &k) const;
-};
-}  // namespace std

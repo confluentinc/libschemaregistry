@@ -4,8 +4,9 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
+
+#include "absl/container/flat_hash_map.h"
 
 #include "schemaregistry/serdes/SerdeError.h"
 #include "schemaregistry/serdes/SerdeTypes.h"
@@ -22,10 +23,10 @@ class RuleAction;
  */
 class RuleRegistry {
   private:
-    std::unordered_map<std::string, std::shared_ptr<RuleExecutor>>
+    absl::flat_hash_map<std::string, std::shared_ptr<RuleExecutor>>
         rule_executors_;
-    std::unordered_map<std::string, std::shared_ptr<RuleAction>> rule_actions_;
-    std::unordered_map<std::string, RuleOverride> rule_overrides_;
+    absl::flat_hash_map<std::string, std::shared_ptr<RuleAction>> rule_actions_;
+    absl::flat_hash_map<std::string, RuleOverride> rule_overrides_;
     mutable std::shared_mutex mutex_;
 
   public:

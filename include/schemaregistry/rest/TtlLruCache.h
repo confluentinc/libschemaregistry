@@ -9,7 +9,9 @@
 #include <list>
 #include <mutex>
 #include <optional>
-#include <unordered_map>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
 
 namespace schemaregistry::rest {
 
@@ -27,7 +29,7 @@ class TtlLruCache {
     };
 
     mutable std::mutex mutex_;
-    std::unordered_map<K, CacheEntry> cache_;
+    absl::flat_hash_map<K, CacheEntry> cache_;
     std::list<K>
         lru_list_;  // Most recently used at front, least recently used at back
     size_t capacity_;
@@ -35,17 +37,19 @@ class TtlLruCache {
 
     // Remove expired entries (must be called with mutex held)
     void cleanup_expired_unsafe() {
+        if (ttl_ == std::chrono::seconds::max()) {
+            return;  // No TTL configured, skip cleanup
+        }
         auto now = std::chrono::steady_clock::now();
-        auto it = cache_.begin();
-        while (it != cache_.end()) {
-            if (now - it->second.timestamp > ttl_) {
-                // Remove from LRU list
-                lru_list_.erase(it->second.lru_iterator);
-                // Remove from cache
-                it = cache_.erase(it);
-            } else {
-                ++it;
+        std::vector<K> expired_keys;
+        for (auto &pair : cache_) {
+            if (now - pair.second.timestamp > ttl_) {
+                lru_list_.erase(pair.second.lru_iterator);
+                expired_keys.push_back(pair.first);
             }
+        }
+        for (const auto &key : expired_keys) {
+            cache_.erase(key);
         }
     }
 
@@ -70,6 +74,13 @@ class TtlLruCache {
     }
 
   public:
+    /**
+     * Constructor with no TTL (entries never expire, eviction by LRU only)
+     * @param capacity Maximum number of entries to store
+     */
+    explicit TtlLruCache(size_t capacity)
+        : TtlLruCache(capacity, std::chrono::seconds::max()) {}
+
     /**
      * Constructor
      * @param capacity Maximum number of entries to store
@@ -100,19 +111,20 @@ class TtlLruCache {
         }
 
         // Check if entry is expired
-        auto now = std::chrono::steady_clock::now();
-        if (now - it->second.timestamp > ttl_) {
-            // Remove expired entry
-            lru_list_.erase(it->second.lru_iterator);
-            cache_.erase(it);
-            return std::nullopt;
+        if (ttl_ != std::chrono::seconds::max()) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - it->second.timestamp > ttl_) {
+                // Remove expired entry
+                lru_list_.erase(it->second.lru_iterator);
+                cache_.erase(it);
+                return std::nullopt;
+            }
+            // Update timestamp to extend TTL
+            it->second.timestamp = now;
         }
 
         // Move to front of LRU list (mark as recently used)
         move_to_front_unsafe(key);
-
-        // Update timestamp to extend TTL
-        it->second.timestamp = now;
 
         return it->second.value;
     }
