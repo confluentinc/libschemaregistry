@@ -9,8 +9,9 @@
 #include <string>
 #include <type_traits>
 #include <typeinfo>
-#include <unordered_map>
 #include <unordered_set>
+
+#include "absl/container/flat_hash_map.h"
 #include <variant>
 #include <vector>
 
@@ -278,7 +279,7 @@ using FieldTransformer = std::function<std::unique_ptr<SerdeValue>(
 template <typename T>
 class ParsedSchemaCache {
   private:
-    std::unordered_map<std::string, T> cache_;
+    absl::flat_hash_map<std::string, T> cache_;
     mutable std::mutex mutex_;
 
   public:

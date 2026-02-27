@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
@@ -23,7 +22,7 @@ class CelExecutor::Impl {
     std::unique_ptr<const google::api::expr::runtime::CelExpressionBuilder>
         runtime_;
 
-    std::unordered_map<
+    absl::flat_hash_map<
         std::string, std::shared_ptr<google::api::expr::runtime::CelExpression>>
         expression_cache_;
     mutable std::mutex cache_mutex_;
