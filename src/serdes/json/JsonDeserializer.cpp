@@ -13,7 +13,12 @@ class JsonDeserializer::Impl {
          const DeserializerConfig &config)
         : base_(std::make_shared<BaseDeserializer>(
               Serde(std::move(client), rule_registry), config)),
-          serde_(std::make_unique<JsonSerde>()) {
+          serde_(std::make_unique<JsonSerde>()),
+          subject_name_strategy_(configureSubjectNameStrategy(
+              config.subject_name_strategy_type,
+              base_->getSerde().getClient(),
+              config.subject_name_strategy_config,
+              [this](const std::optional<Schema> &s) { return getRecordName(s); })) {
         std::vector<std::shared_ptr<RuleExecutor>> executors;
         if (rule_registry) {
             executors = rule_registry->getExecutors();
@@ -33,17 +38,21 @@ class JsonDeserializer::Impl {
 
     nlohmann::json deserialize(const SerializationContext &ctx,
                                const std::vector<uint8_t> &data) {
-        // Determine subject
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt = strategy(ctx.topic, ctx.serde_type, std::nullopt);
+        // Get initial subject using configured subject name strategy (without schema)
+        auto initial_subject =
+            subject_name_strategy_(ctx.topic, ctx.serde_type, std::nullopt);
         std::optional<schemaregistry::rest::model::RegisteredSchema>
             latest_schema;
-        bool has_subject = subject_opt.has_value();
 
-        if (has_subject) {
-            latest_schema = base_->getSerde().getReaderSchema(
-                subject_opt.value(), std::nullopt,
-                base_->getConfig().use_schema);
+        // Try to get reader schema with initial subject
+        if (initial_subject.has_value()) {
+            try {
+                latest_schema = base_->getSerde().getReaderSchema(
+                    initial_subject.value(), std::nullopt,
+                    base_->getConfig().use_schema);
+            } catch (const std::exception &e) {
+                // Schema not found - will be determined from writer schema
+            }
         }
 
         // Parse schema ID from data
@@ -54,26 +63,29 @@ class JsonDeserializer::Impl {
         const uint8_t *message_data = data.data() + bytes_read;
         size_t message_size = data.size() - bytes_read;
 
-        // Get writer schema
+        // Get writer schema (pass nullopt when initial subject is unknown)
         auto writer_schema_raw =
-            base_->getWriterSchema(schema_id, subject_opt, std::nullopt);
+            base_->getWriterSchema(schema_id, initial_subject, std::nullopt);
         auto writer_schema = getParsedSchema(writer_schema_raw);
 
-        // Re-determine subject if needed
-        if (!has_subject) {
-            subject_opt = strategy(ctx.topic, ctx.serde_type,
-                                   std::make_optional(writer_schema_raw));
-            if (subject_opt.has_value()) {
+        // Recompute subject with writer schema (needed for Record/TopicRecord strategies)
+        auto subject_opt = subject_name_strategy_(
+            ctx.topic, ctx.serde_type, std::make_optional(writer_schema_raw));
+        if (!subject_opt.has_value()) {
+            throw SerializationError("Could not determine subject name");
+        }
+        const std::string &subject = subject_opt.value();
+
+        // If subject changed, try to get reader schema again
+        if (subject != initial_subject.value_or("") && !subject.empty()) {
+            try {
                 latest_schema = base_->getSerde().getReaderSchema(
-                    subject_opt.value(), std::nullopt,
+                    subject, std::nullopt,
                     base_->getConfig().use_schema);
+            } catch (const std::exception &e) {
+                // Schema not found
             }
         }
-
-        if (!subject_opt.has_value()) {
-            throw JsonError("Could not determine subject name");
-        }
-        std::string subject = subject_opt.value();
 
         // Handle encoding rules
         std::vector<uint8_t> decoded_data;
@@ -177,6 +189,17 @@ class JsonDeserializer::Impl {
         return serde_->getParsedSchema(schema, base_->getSerde().getClient());
     }
 
+    std::string getRecordName(const std::optional<Schema> &schema) {
+        if (!schema.has_value() || !schema->getSchema().has_value()) return "";
+        auto json = nlohmann::json::parse(schema->getSchema().value());
+        if (json.is_object()) {
+            if (json.contains("title") && json["title"].is_string()) {
+                return json["title"].get<std::string>();
+            }
+        }
+        throw JsonError("Could not determine record name from schema");
+    }
+
     nlohmann::json executeMigrations(const SerializationContext &ctx,
                                      const std::string &subject,
                                      const std::vector<Migration> &migrations,
@@ -190,6 +213,7 @@ class JsonDeserializer::Impl {
   private:
     std::shared_ptr<BaseDeserializer> base_;
     std::unique_ptr<JsonSerde> serde_;
+    SubjectNameStrategyFunc subject_name_strategy_;
 };
 
 JsonDeserializer::JsonDeserializer(
