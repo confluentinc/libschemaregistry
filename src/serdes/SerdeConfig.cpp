@@ -83,8 +83,16 @@ std::optional<SubjectNameStrategyFunc> strategyFunc(
                 return topicNameStrategy(topic, serde_type, schema);
             };
         case SubjectNameStrategyType::Record:
+            if (!get_record_name) {
+                throw SerializationError(
+                    "Record strategy requires a get_record_name function");
+            }
             return recordNameStrategy(get_record_name);
         case SubjectNameStrategyType::TopicRecord:
+            if (!get_record_name) {
+                throw SerializationError(
+                    "TopicRecord strategy requires a get_record_name function");
+            }
             return topicRecordNameStrategy(get_record_name);
         case SubjectNameStrategyType::None:
         case SubjectNameStrategyType::Associated:
