@@ -1,5 +1,6 @@
 #include "schemaregistry/serdes/json/JsonSerializer.h"
 
+#include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/serdes/json/JsonUtils.h"
 #include <cctype>
 #include <cstdio>
@@ -234,7 +235,10 @@ class JsonSerializer::Impl {
         try {
             latest_schema = base_->getSerde().getReaderSchema(
                 subject, std::nullopt, base_->getConfig().use_schema);
-        } catch (const std::exception &e) {
+        } catch (const schemaregistry::rest::RestException &e) {
+            if (e.getStatus() != 404) {
+                throw;
+            }
             // Schema not found - will use provided schema
         }
 

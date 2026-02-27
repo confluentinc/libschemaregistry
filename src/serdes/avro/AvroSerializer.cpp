@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <sstream>
 
+#include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/serdes/avro/AvroUtils.h"
 
 namespace schemaregistry::serdes::avro {
@@ -151,7 +152,10 @@ class AvroSerializer::Impl {
         try {
             latest_schema = base_->getSerde().getReaderSchema(
                 subject, std::nullopt, base_->getConfig().use_schema);
-        } catch (const std::exception &e) {
+        } catch (const schemaregistry::rest::RestException &e) {
+            if (e.getStatus() != 404) {
+                throw;
+            }
             // Schema not found - will use provided schema
         }
 

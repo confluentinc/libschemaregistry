@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/serdes/Serde.h"
 #include "schemaregistry/serdes/SerdeConfig.h"
 #include "schemaregistry/serdes/SerdeError.h"
@@ -271,7 +272,10 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
     try {
         latest_schema = base_->getSerde().getReaderSchema(
             subject, "serialized", base_->getConfig().use_schema);
-    } catch (const std::exception &) {
+    } catch (const schemaregistry::rest::RestException &e) {
+        if (e.getStatus() != 404) {
+            throw;
+        }
         // Not found – handled below.
     }
 
