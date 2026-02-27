@@ -9,9 +9,9 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "schemaregistry/rest/ClientConfiguration.h"
 #include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/rest/SchemaRegistryClient.h"
@@ -25,22 +25,22 @@ namespace schemaregistry::rest {
 class MockSchemaStore {
   private:
     // Maps subject -> list of registered schemas
-    std::unordered_map<
+    absl::flat_hash_map<
         std::string, std::vector<schemaregistry::rest::model::RegisteredSchema>>
         schemas;
 
     // Maps schema id -> registered schema
-    std::unordered_map<int32_t, schemaregistry::rest::model::RegisteredSchema>
+    absl::flat_hash_map<int32_t, schemaregistry::rest::model::RegisteredSchema>
         schemaIdIndex;
 
     // Maps guid -> registered schema
-    std::unordered_map<std::string,
-                       schemaregistry::rest::model::RegisteredSchema>
+    absl::flat_hash_map<std::string,
+                        schemaregistry::rest::model::RegisteredSchema>
         schemaGuidIndex;
 
     // Maps schema content -> registered schema
-    std::unordered_map<std::string,
-                       schemaregistry::rest::model::RegisteredSchema>
+    absl::flat_hash_map<std::string,
+                        schemaregistry::rest::model::RegisteredSchema>
         schemaIndex;
 
     int32_t nextSchemaId = 1;
@@ -113,7 +113,7 @@ struct AssociationCacheEntry {
 class MockAssociationStore {
   private:
     // Maps resource_id -> association cache entry
-    std::unordered_map<std::string, AssociationCacheEntry> associations;
+    absl::flat_hash_map<std::string, AssociationCacheEntry> associations;
     int64_t next_resource_id = 1;
 
   public:
