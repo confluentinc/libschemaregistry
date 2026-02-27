@@ -8,8 +8,8 @@
 #include <variant>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/hash/hash.h"
+#include "schemaregistry/rest/TtlLruCache.h"
 
 #include "schemaregistry/rest/ISchemaRegistryClient.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
@@ -445,9 +445,9 @@ class AssociatedNameStrategy {
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client_;
     std::string kafka_cluster_id_;
     std::optional<SubjectNameStrategyFunc> fallback_strategy_;
-    mutable absl::flat_hash_map<SubjectCacheKey, std::optional<std::string>>
+    mutable schemaregistry::rest::TtlLruCache<SubjectCacheKey,
+                                              std::optional<std::string>>
         subject_name_cache_;
-    mutable std::mutex cache_mutex_;
 
   public:
     /**

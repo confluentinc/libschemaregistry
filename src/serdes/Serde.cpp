@@ -985,7 +985,8 @@ AssociatedNameStrategy::AssociatedNameStrategy(
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
     const std::unordered_map<std::string, std::string> &config,
     RecordNameFunc get_record_name)
-    : client_(client) {
+    : client_(client),
+      subject_name_cache_(DEFAULT_STRATEGY_CACHE_CAPACITY) {
     // Get kafka cluster ID from config, default to wildcard
     auto it = config.find(KAFKA_CLUSTER_ID_CONFIG);
     if (it != config.end() && !it->second.empty()) {
@@ -1018,22 +1019,16 @@ std::optional<std::string> AssociatedNameStrategy::getSubject(
     SubjectCacheKey cache_key{topic, is_key, schema_str};
 
     // Check cache first
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        auto it = subject_name_cache_.find(cache_key);
-        if (it != subject_name_cache_.end()) {
-            return it->second;
-        }
+    auto cached = subject_name_cache_.get(cache_key);
+    if (cached.has_value()) {
+        return cached.value();
     }
 
     // Load from schema registry
     auto subject = loadAssociatedSubjectName(topic, is_key, schema, serde_type);
 
     // Store in cache
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        subject_name_cache_[cache_key] = subject;
-    }
+    subject_name_cache_.put(cache_key, subject);
 
     return subject;
 }
