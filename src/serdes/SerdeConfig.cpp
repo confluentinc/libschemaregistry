@@ -135,6 +135,10 @@ SubjectNameStrategyFunc configureSubjectNameStrategy(
     const std::unordered_map<std::string, std::string> &strategy_config,
     RecordNameFunc get_record_name) {
     if (strategy_type == SubjectNameStrategyType::Associated) {
+        if (!client) {
+            throw SerializationError(
+                "Associated strategy requires a schema registry client");
+        }
         auto assoc = std::make_shared<AssociatedNameStrategy>(
             std::move(client), strategy_config, get_record_name);
         return [assoc](const std::string &topic, SerdeType serde_type,

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "schemaregistry/rest/ISchemaRegistryClient.h"
+#include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/serdes/Serde.h"
 #include "schemaregistry/serdes/SerdeConfig.h"
 #include "schemaregistry/serdes/SerdeError.h"
@@ -147,7 +148,10 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
             latest_schema = base_->getSerde().getReaderSchema(
                 initial_subject.value(), "serialized",
                 base_->getConfig().use_schema);
-        } catch (const std::exception &) {
+        } catch (const schemaregistry::rest::RestException &e) {
+            if (e.getStatus() != 404) {
+                throw;
+            }
             // Schema not found - will be determined from writer schema
         }
     }
@@ -187,7 +191,10 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
         try {
             latest_schema = base_->getSerde().getReaderSchema(
                 subject, "serialized", base_->getConfig().use_schema);
-        } catch (const std::exception &) {
+        } catch (const schemaregistry::rest::RestException &e) {
+            if (e.getStatus() != 404) {
+                throw;
+            }
             // Schema not found
         }
     }

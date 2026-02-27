@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <sstream>
 
+#include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/serdes/SerdeTypes.h"
 #include "schemaregistry/serdes/avro/AvroUtils.h"
 
@@ -53,7 +54,10 @@ class AvroDeserializer::Impl {
                 latest_schema = base_->getSerde().getReaderSchema(
                     initial_subject.value(), std::nullopt,
                     base_->getConfig().use_schema);
-            } catch (const std::exception &e) {
+            } catch (const schemaregistry::rest::RestException &e) {
+                if (e.getStatus() != 404) {
+                    throw;
+                }
                 // Schema not found - will be determined from writer schema
             }
         }
@@ -85,7 +89,10 @@ class AvroDeserializer::Impl {
                 latest_schema = base_->getSerde().getReaderSchema(
                     subject, std::nullopt,
                     base_->getConfig().use_schema);
-            } catch (const std::exception &e) {
+            } catch (const schemaregistry::rest::RestException &e) {
+                if (e.getStatus() != 404) {
+                    throw;
+                }
                 // Schema not found
             }
         }
