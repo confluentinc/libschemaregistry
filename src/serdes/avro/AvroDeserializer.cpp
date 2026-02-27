@@ -211,12 +211,12 @@ class AvroDeserializer::Impl {
 
     std::string getRecordName(const std::optional<Schema> &schema) {
         if (!schema.has_value()) return "";
-        try {
-            auto [valid_schema, refs] = getParsedSchema(*schema);
-            return utils::getSchemaName(valid_schema).value_or("");
-        } catch (...) {
-            return "";
+        auto [valid_schema, refs] = getParsedSchema(*schema);
+        auto name = utils::getSchemaName(valid_schema);
+        if (!name.has_value()) {
+            throw AvroError("Could not determine record name from schema");
         }
+        return name.value();
     }
 
     std::pair<size_t, ::avro::ValidSchema> resolveUnion(

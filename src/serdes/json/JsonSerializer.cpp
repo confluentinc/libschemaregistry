@@ -366,15 +366,13 @@ class JsonSerializer::Impl {
 
     std::string getRecordName(const std::optional<Schema> &schema) {
         if (!schema.has_value() || !schema->getSchema().has_value()) return "";
-        try {
-            auto json = nlohmann::json::parse(schema->getSchema().value());
-            if (json.is_object()) {
-                if (json.contains("title") && json["title"].is_string()) {
-                    return json["title"].get<std::string>();
-                }
+        auto json = nlohmann::json::parse(schema->getSchema().value());
+        if (json.is_object()) {
+            if (json.contains("title") && json["title"].is_string()) {
+                return json["title"].get<std::string>();
             }
-        } catch (...) {}
-        return "";
+        }
+        throw JsonError("Could not determine record name from schema");
     }
 
   private:

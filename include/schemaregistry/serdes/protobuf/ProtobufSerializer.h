@@ -229,14 +229,12 @@ template <typename T>
 inline std::string ProtobufSerializer<T>::getRecordName(
     const std::optional<schemaregistry::rest::model::Schema> &schema) {
     if (!schema.has_value()) return "";
-    try {
-        auto [file_desc, pool] =
-            serde_->getParsedSchema(*schema, base_->getSerde().getClient());
-        if (file_desc && file_desc->message_type_count() > 0) {
-            return file_desc->message_type(0)->full_name();
-        }
-    } catch (...) {}
-    return "";
+    auto [file_desc, pool] =
+        serde_->getParsedSchema(*schema, base_->getSerde().getClient());
+    if (file_desc && file_desc->message_type_count() > 0) {
+        return file_desc->message_type(0)->full_name();
+    }
+    throw ProtobufError("Could not determine record name from schema");
 }
 
 // Forward declaration for transformFields helper that lives in
