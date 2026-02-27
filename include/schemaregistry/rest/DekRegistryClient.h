@@ -9,7 +9,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
 #include "schemaregistry/rest/DekRegistryTypes.h"
@@ -46,8 +45,8 @@ class DekStore {
     void clear();
 
   private:
-    std::unordered_map<KekId, schemaregistry::rest::model::Kek> keks;
-    std::unordered_map<DekId, schemaregistry::rest::model::Dek> deks;
+    absl::flat_hash_map<KekId, schemaregistry::rest::model::Kek> keks;
+    absl::flat_hash_map<DekId, schemaregistry::rest::model::Dek> deks;
 };
 
 /**
