@@ -764,7 +764,7 @@ TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategyFallbackNone) {
     ser_config.use_schema = SchemaSelector::useLatestVersion();
     ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
     ser_config.subject_name_strategy_config = {
-        {FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG, "NONE"}};
+        {FALLBACK_TYPE_CONFIG, "NONE"}};
 
     auto rule_registry = std::make_shared<RuleRegistry>();
     ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);

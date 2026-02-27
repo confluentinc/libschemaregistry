@@ -997,7 +997,7 @@ AssociatedNameStrategy::AssociatedNameStrategy(
 
     // Get fallback strategy type from config, default to Topic
     SubjectNameStrategyType fallback_type = SubjectNameStrategyType::Topic;
-    auto fallback_it = config.find(FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG);
+    auto fallback_it = config.find(FALLBACK_TYPE_CONFIG);
     if (fallback_it != config.end()) {
         fallback_type = parseSubjectNameStrategyType(fallback_it->second);
     }
