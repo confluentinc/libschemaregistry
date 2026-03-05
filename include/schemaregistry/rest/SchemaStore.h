@@ -8,7 +8,8 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
+
+#include "absl/container/flat_hash_map.h"
 
 #include "schemaregistry/rest/model/RegisteredSchema.h"
 #include "schemaregistry/rest/model/Schema.h"
@@ -21,40 +22,40 @@ namespace schemaregistry::rest {
 class SchemaStore {
   private:
     // Maps subject -> schema_id -> (guid, schema)
-    std::unordered_map<
+    absl::flat_hash_map<
         std::string,
-        std::unordered_map<int32_t,
-                           std::pair<std::optional<std::string>,
-                                     schemaregistry::rest::model::Schema>>>
+        absl::flat_hash_map<int32_t,
+                            std::pair<std::optional<std::string>,
+                                      schemaregistry::rest::model::Schema>>>
         schemaIdIndex;
 
     // Maps guid -> schema
-    std::unordered_map<std::string, schemaregistry::rest::model::Schema>
+    absl::flat_hash_map<std::string, schemaregistry::rest::model::Schema>
         schemaGuidIndex;
 
     // Maps subject -> schema -> schema_id
-    std::unordered_map<std::string, std::unordered_map<std::string, int32_t>>
+    absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, int32_t>>
         schemaIndex;
 
     // Maps subject -> schema_id -> registered_schema
-    std::unordered_map<
+    absl::flat_hash_map<
         std::string,
-        std::unordered_map<int32_t,
-                           schemaregistry::rest::model::RegisteredSchema>>
+        absl::flat_hash_map<int32_t,
+                            schemaregistry::rest::model::RegisteredSchema>>
         rsIdIndex;
 
     // Maps subject -> version -> registered_schema
-    std::unordered_map<
+    absl::flat_hash_map<
         std::string,
-        std::unordered_map<int32_t,
-                           schemaregistry::rest::model::RegisteredSchema>>
+        absl::flat_hash_map<int32_t,
+                            schemaregistry::rest::model::RegisteredSchema>>
         rsVersionIndex;
 
     // Maps subject -> schema -> registered_schema
-    std::unordered_map<
+    absl::flat_hash_map<
         std::string,
-        std::unordered_map<std::string,
-                           schemaregistry::rest::model::RegisteredSchema>>
+        absl::flat_hash_map<std::string,
+                            schemaregistry::rest::model::RegisteredSchema>>
         rsSchemaIndex;
 
   public:

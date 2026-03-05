@@ -10,7 +10,8 @@
 #include <type_traits>
 #include <typeinfo>
 #include <unordered_map>
-#include <unordered_set>
+
+#include "absl/container/flat_hash_map.h"
 #include <variant>
 #include <vector>
 
@@ -219,12 +220,45 @@ struct Migration {
 };
 
 /**
- * Function type aliases for strategies and serializers (from config.rs and
- * serde.rs)
+ * Subject name strategy type enumeration
+ * Based on SubjectNameStrategyType from serde.rs
  */
-using SubjectNameStrategy = std::function<std::optional<std::string>(
+enum class SubjectNameStrategyType {
+    None,         // No explicit subject name strategy
+    Topic,        // Creates a subject name by appending -[key|value] to the topic
+    Record,       // Creates a subject name from the record name
+    TopicRecord,  // Creates a subject name from the topic and record name
+    Associated    // Retrieves the associated subject name from schema registry
+};
+
+/**
+ * Configuration keys for subject name strategies (from serde.rs)
+ */
+constexpr const char *KAFKA_CLUSTER_ID_CONFIG = "subject.name.strategy.kafka.cluster.id";
+constexpr const char *NAMESPACE_WILDCARD = "-";
+constexpr const char *FALLBACK_TYPE_CONFIG = "subject.name.strategy.fallback.type";
+constexpr uint64_t DEFAULT_STRATEGY_CACHE_CAPACITY = 1000;
+
+/**
+ * Parse a string to SubjectNameStrategyType
+ */
+SubjectNameStrategyType parseSubjectNameStrategyType(const std::string &s);
+
+/**
+ * SubjectNameStrategyFunc is a function that determines the subject for the
+ * given parameters. This is used for strategies that need to capture state
+ * (like RecordNameStrategy). Based on SubjectNameStrategyFunc from serde.rs
+ */
+using SubjectNameStrategyFunc = std::function<std::optional<std::string>(
     const std::string &topic, SerdeType serde_type,
     const std::optional<Schema> &schema)>;
+
+/**
+ * RecordNameFunc extracts the record name from a schema.
+ * Based on RecordNameFunc from serde.rs
+ */
+using RecordNameFunc =
+    std::function<std::string(const std::optional<Schema> &schema)>;
 
 using SchemaIdSerializer = std::function<std::vector<uint8_t>(
     const std::vector<uint8_t> &payload,
@@ -244,7 +278,7 @@ using FieldTransformer = std::function<std::unique_ptr<SerdeValue>(
 template <typename T>
 class ParsedSchemaCache {
   private:
-    std::unordered_map<std::string, T> cache_;
+    absl::flat_hash_map<std::string, T> cache_;
     mutable std::mutex mutex_;
 
   public:
