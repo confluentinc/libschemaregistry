@@ -79,7 +79,9 @@ std::tuple<std::string, std::string, std::string> AzureKmsDriver::getKeyInfo(
     // https://vault-name.vault.azure.net/keys/key-name/key-version
     // or without version:
     // https://vault-name.vault.azure.net/keys/key-name
-    std::regex urlRegex(R"(^(https://[^/]+)/keys/([^/]+)(?:/([^/]+))?$)");
+    // or with trailing slash:
+    // https://vault-name.vault.azure.net/keys/key-name/
+    std::regex urlRegex(R"(^(https://[^/]+)/keys/([^/]+)(?:/([^/]*))?/?$)");
     std::smatch matches;
 
     if (!std::regex_match(url, matches, urlRegex)) {
