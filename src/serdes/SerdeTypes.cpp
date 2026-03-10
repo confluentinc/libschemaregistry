@@ -1,9 +1,13 @@
 #include "schemaregistry/serdes/SerdeTypes.h"
 
+#ifdef SCHEMAREGISTRY_USE_PROTOBUF
 #include <google/protobuf/message.h>
+#endif
 
+#ifdef SCHEMAREGISTRY_USE_AVRO
 #include <avro/Compiler.hh>
 #include <avro/ValidSchema.hh>
+#endif
 #include <sstream>
 
 #include "absl/strings/escaping.h"
