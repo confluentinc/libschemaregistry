@@ -1,8 +1,13 @@
 # 0.1.2
 
-## Fices
+## Enhancements
+
+* Add OAuth 2.0 support to SR C++ client (#13)
+
+## Fixes
 
 * Handle Azure versionless keys with trailing slash (#21)
+* Make identity pool id header optional (#18)
 
 # 0.1.1
 
