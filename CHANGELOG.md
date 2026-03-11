@@ -1,3 +1,9 @@
+# 0.1.2
+
+## Fices
+
+* Handle Azure versionless keys with trailing slash (#21)
+
 # 0.1.1
 
 ## Enhancements
