@@ -193,6 +193,7 @@ class FieldContext {
  */
 class RuleContext {
   private:
+    std::optional<std::string> enabled_env_;
     SerializationContext ser_ctx_;
     std::optional<Schema> source_;
     std::optional<Schema> target_;
@@ -208,7 +209,8 @@ class RuleContext {
     std::shared_ptr<RuleRegistry> rule_registry_;
 
   public:
-    RuleContext(const SerializationContext &ser_ctx,
+    RuleContext(std::optional<std::string> enabled_env,
+                const SerializationContext &ser_ctx,
                 std::optional<Schema> source, std::optional<Schema> target,
                 const std::string &subject, Mode rule_mode, const Rule &rule,
                 size_t index, const std::vector<Rule> &rules,
@@ -218,6 +220,9 @@ class RuleContext {
                 std::shared_ptr<RuleRegistry> rule_registry = nullptr);
 
     // Accessors
+    const std::optional<std::string> &getEnabledEnv() const {
+        return enabled_env_;
+    }
     const SerializationContext &getSerializationContext() const {
         return ser_ctx_;
     }
@@ -327,7 +332,7 @@ class Serde {
 
     std::optional<std::string> getOnSuccess(const Rule &rule) const;
     std::optional<std::string> getOnFailure(const Rule &rule) const;
-    bool isDisabled(const Rule &rule) const;
+    bool isDisabled(const RuleContext &ctx, const Rule &rule) const;
 
     void runAction(const RuleContext &ctx, Mode rule_mode, const Rule &rule,
                    std::optional<std::string> action, const SerdeValue &msg,
