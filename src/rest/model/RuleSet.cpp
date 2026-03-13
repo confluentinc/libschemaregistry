@@ -24,7 +24,8 @@ RuleSet::RuleSet() {
 bool RuleSet::operator==(const RuleSet &rhs) const {
     return migrationRules_ == rhs.migrationRules_ &&
            domainRules_ == rhs.domainRules_ &&
-           encodingRules_ == rhs.encodingRules_;
+           encodingRules_ == rhs.encodingRules_ &&
+           enableAt_ == rhs.enableAt_;
 }
 
 bool RuleSet::operator!=(const RuleSet &rhs) const { return !(*this == rhs); }
@@ -36,6 +37,8 @@ void to_json(nlohmann::json &j, const RuleSet &o) {
     if (o.domainRules_.has_value()) j["domainRules"] = o.domainRules_.value();
     if (o.encodingRules_.has_value())
         j["encodingRules"] = o.encodingRules_.value();
+    if (o.enableAt_.has_value())
+        j["enableAt"] = o.enableAt_.value();
 }
 
 void from_json(const nlohmann::json &j, RuleSet &o) {
@@ -53,6 +56,9 @@ void from_json(const nlohmann::json &j, RuleSet &o) {
         std::vector<schemaregistry::rest::model::Rule> temp;
         j.at("encodingRules").get_to(temp);
         o.encodingRules_ = temp;
+    }
+    if (j.find("enableAt") != j.end()) {
+        o.enableAt_ = j.at("enableAt").get<std::string>();
     }
 }
 
@@ -87,6 +93,14 @@ void RuleSet::setEncodingRules(
     const std::optional<std::vector<schemaregistry::rest::model::Rule>>
         &value) {
     encodingRules_ = value;
+}
+
+std::optional<std::string> RuleSet::getEnableAt() const {
+    return enableAt_;
+}
+
+void RuleSet::setEnableAt(const std::optional<std::string> &value) {
+    enableAt_ = value;
 }
 
 }  // namespace schemaregistry::rest::model
