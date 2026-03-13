@@ -33,9 +33,9 @@ class JsonDeserializer::Impl {
 
     nlohmann::json deserialize(const SerializationContext &ctx,
                                const std::vector<uint8_t> &data) {
-        // Determine subject
-        auto strategy = base_->getConfig().subject_name_strategy;
-        auto subject_opt = strategy(ctx.topic, ctx.serde_type, std::nullopt);
+        // Determine subject using topic name strategy
+        auto subject_opt =
+            topicNameStrategy(ctx.topic, ctx.serde_type, std::nullopt);
         std::optional<schemaregistry::rest::model::RegisteredSchema>
             latest_schema;
         bool has_subject = subject_opt.has_value();
@@ -61,8 +61,8 @@ class JsonDeserializer::Impl {
 
         // Re-determine subject if needed
         if (!has_subject) {
-            subject_opt = strategy(ctx.topic, ctx.serde_type,
-                                   std::make_optional(writer_schema_raw));
+            subject_opt = topicNameStrategy(ctx.topic, ctx.serde_type,
+                                            std::make_optional(writer_schema_raw));
             if (subject_opt.has_value()) {
                 latest_schema = base_->getSerde().getReaderSchema(
                     subject_opt.value(), std::nullopt,

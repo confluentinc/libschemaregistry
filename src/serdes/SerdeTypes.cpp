@@ -3,7 +3,7 @@
 #ifdef SCHEMAREGISTRY_USE_PROTOBUF
 #include <google/protobuf/message.h>
 #endif
-
+#include <algorithm>
 #ifdef SCHEMAREGISTRY_USE_AVRO
 #include <avro/Compiler.hh>
 #include <avro/ValidSchema.hh>
@@ -83,6 +83,26 @@ std::string fieldTypeToString(FieldType type) {
             return "NULL";
         default:
             return "UNKNOWN";
+    }
+}
+
+// Parse a string to SubjectNameStrategyType
+SubjectNameStrategyType parseSubjectNameStrategyType(const std::string &s) {
+    std::string upper = s;
+    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+
+    if (upper == "TOPIC") {
+        return SubjectNameStrategyType::Topic;
+    } else if (upper == "RECORD") {
+        return SubjectNameStrategyType::Record;
+    } else if (upper == "TOPIC_RECORD") {
+        return SubjectNameStrategyType::TopicRecord;
+    } else if (upper == "ASSOCIATED") {
+        return SubjectNameStrategyType::Associated;
+    } else if (upper == "NONE") {
+        return SubjectNameStrategyType::None;
+    } else {
+        return SubjectNameStrategyType::Topic;
     }
 }
 

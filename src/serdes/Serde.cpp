@@ -978,6 +978,92 @@ Schema BaseDeserializer::getWriterSchema(
     }
 }
 
+// AssociatedNameStrategy implementation
+
+AssociatedNameStrategy::AssociatedNameStrategy(
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client,
+    const std::unordered_map<std::string, std::string> &config,
+    RecordNameFunc get_record_name)
+    : client_(client) {
+    // Get kafka cluster ID from config, default to wildcard
+    auto it = config.find(KAFKA_CLUSTER_ID_CONFIG);
+    if (it != config.end() && !it->second.empty()) {
+        kafka_cluster_id_ = it->second;
+    } else {
+        kafka_cluster_id_ = NAMESPACE_WILDCARD;
+    }
+
+    // Get fallback strategy type from config, default to Topic
+    SubjectNameStrategyType fallback_type = SubjectNameStrategyType::Topic;
+    auto fallback_it = config.find(FALLBACK_SUBJECT_NAME_STRATEGY_TYPE_CONFIG);
+    if (fallback_it != config.end()) {
+        fallback_type = parseSubjectNameStrategyType(fallback_it->second);
+    }
+
+    fallback_strategy_ = strategyFunc(fallback_type, get_record_name);
+}
+
+std::string AssociatedNameStrategy::getSubject(
+    const std::string &topic, SerdeType serde_type,
+    const std::optional<Schema> &schema) const {
+    if (topic.empty()) {
+        return "";
+    }
+
+    bool is_key = (serde_type == SerdeType::Key);
+    std::string schema_str =
+        schema.has_value() ? schema->getSchema().value_or("") : "";
+
+    AssociationCacheKey cache_key{topic, is_key, schema_str};
+
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        auto it = subject_name_cache_.find(cache_key);
+        if (it != subject_name_cache_.end()) {
+            return it->second;
+        }
+    }
+
+    // Load from schema registry
+    std::string subject =
+        loadAssociatedSubjectName(topic, is_key, schema, serde_type);
+
+    // Store in cache
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        subject_name_cache_[cache_key] = subject;
+    }
+
+    return subject;
+}
+
+std::string AssociatedNameStrategy::loadAssociatedSubjectName(
+    const std::string &topic, bool is_key, const std::optional<Schema> &schema,
+    SerdeType serde_type) const {
+    std::string association_type = is_key ? "key" : "value";
+
+    auto associations = client_->getAssociationsByResourceName(
+        topic, kafka_cluster_id_, "topic", {association_type}, "", 0, -1);
+
+    if (associations.size() > 1) {
+        throw SerializationError(
+            "multiple associated subjects found for topic " + topic);
+    } else if (associations.size() == 1) {
+        auto subject = associations[0].subject;
+        if (subject.has_value()) {
+            return subject.value();
+        } else {
+            throw SerializationError("association has no subject");
+        }
+    } else if (fallback_strategy_.has_value()) {
+        return fallback_strategy_.value()(topic, serde_type, schema);
+    } else {
+        throw SerializationError("no associated subject found for topic " +
+                                 topic);
+    }
+}
+
 // Note: ErrorAction and NoneAction implementations are in RuleRegistry.cpp
 
 }  // namespace schemaregistry::serdes

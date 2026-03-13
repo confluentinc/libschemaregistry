@@ -225,9 +225,8 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
     using namespace schemaregistry::serdes::protobuf;
     using schemaregistry::rest::model::RegisteredSchema;
 
-    // Resolve the subject name.
-    auto strategy = base_->getConfig().subject_name_strategy;
-    auto subject_opt = strategy(ctx.topic, ctx.serde_type, schema_);
+    // Resolve the subject name using topic name strategy.
+    auto subject_opt = topicNameStrategy(ctx.topic, ctx.serde_type, schema_);
     if (!subject_opt.has_value()) {
         throw ProtobufError("Subject name strategy returned no subject");
     }
