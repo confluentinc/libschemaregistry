@@ -641,3 +641,276 @@ TEST(ProtobufTest, FieldEncryption) {
 }
 
 #endif
+
+// AssociatedNameStrategy Tests
+// Ported from TestProtobufSerdeWithAssociated* in confluent-kafka-go
+
+namespace {
+test::Author makeProtoAuthor() {
+    test::Author obj;
+    obj.set_name("Kafka");
+    obj.set_id(123);
+    obj.set_picture(std::string("\x01\x02\x03", 3));
+    obj.add_works("Metamorphosis");
+    obj.add_works("The Trial");
+    obj.set_oneof_string("oneof");
+    return obj;
+}
+
+void verifyProtoAuthor(const test::Author &result, const test::Author &expected) {
+    EXPECT_EQ(result.name(), expected.name());
+    EXPECT_EQ(result.id(), expected.id());
+    EXPECT_EQ(result.picture(), expected.picture());
+    EXPECT_EQ(result.works_size(), expected.works_size());
+    for (int i = 0; i < expected.works_size(); ++i) {
+        EXPECT_EQ(result.works(i), expected.works(i));
+    }
+    EXPECT_EQ(result.oneof_string(), expected.oneof_string());
+}
+}  // namespace
+
+TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategy) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto obj = makeProtoAuthor();
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("PROTOBUF"));
+    schema.setSchema(std::make_optional<std::string>(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file())));
+    client->registerSchema("my-custom-subject", schema, false);
+
+    AssociationCreateOrUpdateRequest req;
+    req.setResourceName("topic1");
+    req.setResourceNamespace("-");
+    req.setResourceId("lkc-123:topic1");
+    req.setResourceType("topic");
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.setSubject("my-custom-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
+    client->createAssociation(req);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    auto bytes = ser.serialize(ser_ctx, obj);
+
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ProtobufDeserializer<test::Author> deser(client, rule_registry, deser_config);
+    auto result_ptr = deser.deserialize(ser_ctx, bytes);
+    auto *result = dynamic_cast<const test::Author *>(result_ptr.get());
+    ASSERT_NE(result, nullptr);
+    verifyProtoAuthor(*result, obj);
+}
+
+TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategyFallbackToTopic) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto obj = makeProtoAuthor();
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("PROTOBUF"));
+    schema.setSchema(std::make_optional<std::string>(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file())));
+    client->registerSchema("topic1-value", schema, false);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    auto bytes = ser.serialize(ser_ctx, obj);
+
+    auto deser_config = DeserializerConfig::createDefault();
+    ProtobufDeserializer<test::Author> deser(client, rule_registry, deser_config);
+    auto result_ptr = deser.deserialize(ser_ctx, bytes);
+    auto *result = dynamic_cast<const test::Author *>(result_ptr.get());
+    ASSERT_NE(result, nullptr);
+    verifyProtoAuthor(*result, obj);
+}
+
+TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategyFallbackNone) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto obj = makeProtoAuthor();
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("PROTOBUF"));
+    schema.setSchema(std::make_optional<std::string>(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file())));
+    client->registerSchema("topic1-value", schema, false);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ser_config.subject_name_strategy_config = {
+        {FALLBACK_TYPE_CONFIG, "NONE"}};
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    EXPECT_THROW(ser.serialize(ser_ctx, obj), SerializationError);
+}
+
+TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategyMultipleAssociations) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto obj = makeProtoAuthor();
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("PROTOBUF"));
+    schema.setSchema(std::make_optional<std::string>(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file())));
+    client->registerSchema("subject1", schema, false);
+    client->registerSchema("subject2", schema, false);
+
+    auto makeReq = [](const std::string &resource_id,
+                      const std::string &subject_name) {
+        AssociationCreateOrUpdateRequest r;
+        r.setResourceName("topic1");
+        r.setResourceNamespace("-");
+        r.setResourceId(resource_id);
+        r.setResourceType("topic");
+        AssociationCreateOrUpdateInfo a;
+        a.setSubject(subject_name);
+        a.setAssociationType("value");
+        r.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{a});
+        return r;
+    };
+    client->createAssociation(makeReq("lkc-123:topic1", "subject1"));
+    client->createAssociation(makeReq("lkc-456:topic1", "subject2"));
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    EXPECT_THROW(ser.serialize(ser_ctx, obj), SerializationError);
+}
+
+TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategyWithKafkaClusterID) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto obj = makeProtoAuthor();
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("PROTOBUF"));
+    schema.setSchema(std::make_optional<std::string>(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file())));
+    client->registerSchema("my-custom-subject", schema, false);
+
+    AssociationCreateOrUpdateRequest req;
+    req.setResourceName("topic1");
+    req.setResourceNamespace("lkc-my-cluster");
+    req.setResourceId("lkc-my-cluster:topic1");
+    req.setResourceType("topic");
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.setSubject("my-custom-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
+    client->createAssociation(req);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    ser_config.subject_name_strategy_config = {
+        {KAFKA_CLUSTER_ID_CONFIG, "lkc-my-cluster"}};
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    auto bytes = ser.serialize(ser_ctx, obj);
+
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+    deser_config.subject_name_strategy_config = {
+        {KAFKA_CLUSTER_ID_CONFIG, "lkc-my-cluster"}};
+    ProtobufDeserializer<test::Author> deser(client, rule_registry, deser_config);
+    auto result_ptr = deser.deserialize(ser_ctx, bytes);
+    auto *result = dynamic_cast<const test::Author *>(result_ptr.get());
+    ASSERT_NE(result, nullptr);
+    verifyProtoAuthor(*result, obj);
+}
+
+TEST(ProtobufTest, ProtoSerdeWithAssociatedNameStrategyCaching) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto obj = makeProtoAuthor();
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("PROTOBUF"));
+    schema.setSchema(std::make_optional<std::string>(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file())));
+    client->registerSchema("my-cached-subject", schema, false);
+
+    AssociationCreateOrUpdateRequest req;
+    req.setResourceName("topic1");
+    req.setResourceNamespace("-");
+    req.setResourceId("lkc-123:topic1");
+    req.setResourceType("topic");
+    AssociationCreateOrUpdateInfo assoc;
+    assoc.setSubject("my-cached-subject");
+    assoc.setAssociationType("value");
+    req.setAssociations(std::vector<AssociationCreateOrUpdateInfo>{assoc});
+    client->createAssociation(req);
+
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto deser_config = DeserializerConfig::createDefault();
+    deser_config.subject_name_strategy_type = SubjectNameStrategyType::Associated;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<test::Author> ser(client, std::nullopt, rule_registry, ser_config);
+    ProtobufDeserializer<test::Author> deser(client, rule_registry, deser_config);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "topic1";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+
+    for (int i = 0; i < 5; ++i) {
+        auto bytes = ser.serialize(ser_ctx, obj);
+        auto result_ptr = deser.deserialize(ser_ctx, bytes);
+        auto *result = dynamic_cast<const test::Author *>(result_ptr.get());
+        ASSERT_NE(result, nullptr);
+        verifyProtoAuthor(*result, obj);
+    }
+}
