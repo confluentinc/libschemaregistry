@@ -115,6 +115,12 @@ endif()
 
 # Protobuf compilation and dependencies are handled in add_example_executable function
 
+# UAMI OAuth example (no rdkafka/protobuf/serde dependencies)
+add_executable(uami_oauth_example UamiOAuthExample.cpp)
+target_link_libraries(uami_oauth_example schemaregistry)
+add_dependencies(example uami_oauth_example)
+list(APPEND EXAMPLE_TARGETS uami_oauth_example)
+
 # Set output directory for examples (only if examples were built)
 if(EXAMPLE_TARGETS)
     set_target_properties(${EXAMPLE_TARGETS}
