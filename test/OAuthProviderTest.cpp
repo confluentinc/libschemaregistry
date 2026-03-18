@@ -247,6 +247,96 @@ TEST(BearerFieldsTest, ParameterizedConstructor) {
 }
 
 // =============================================================================
+// UamiOAuthProvider::Config Tests
+// =============================================================================
+
+TEST(UamiConfigTest, ValidConfigPasses) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01&resource=https://confluent.cloud&client_id=test-id";
+  config.logical_cluster = "lsrc-123";
+  config.identity_pool_id = "pool-456";
+
+  EXPECT_NO_THROW(config.validate());
+}
+
+TEST(UamiConfigTest, DefaultUamiUrl) {
+  UamiOAuthProvider::Config config;
+  EXPECT_EQ(config.uami_url, "http://169.254.169.254/metadata/identity/oauth2/token");
+}
+
+TEST(UamiConfigTest, ThrowsOnMissingQueryUrl) {
+  UamiOAuthProvider::Config config;
+  // uami_endpoint_query is empty
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(UamiConfigTest, ThrowsOnNegativeRetries) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+  config.max_retries = -1;
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(UamiConfigTest, ThrowsOnInvalidThreshold) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+  config.token_refresh_threshold = 1.5;
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(UamiConfigTest, ThrowsOnBaseDelayExceedsMaxDelay) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+  config.retry_base_delay_ms = 5000;
+  config.retry_max_delay_ms = 1000;
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(UamiConfigTest, ThrowsOnInvalidBaseDelay) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+  config.retry_base_delay_ms = 0;
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(UamiConfigTest, ThrowsOnInvalidHttpTimeout) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+  config.http_timeout_seconds = 0;
+
+  EXPECT_THROW(config.validate(), std::invalid_argument);
+}
+
+TEST(UamiConfigTest, DefaultValuesMatch) {
+  UamiOAuthProvider::Config config;
+
+  EXPECT_EQ(config.max_retries, 3);
+  EXPECT_EQ(config.retry_base_delay_ms, 1000);
+  EXPECT_EQ(config.retry_max_delay_ms, 20000);
+  EXPECT_DOUBLE_EQ(config.token_refresh_threshold, 0.8);
+  EXPECT_EQ(config.http_timeout_seconds, 30);
+}
+
+TEST(UamiConfigTest, ConstructionValidatesConfig) {
+  UamiOAuthProvider::Config config;
+  // uami_endpoint_query is empty - should throw on construction
+
+  EXPECT_THROW({ UamiOAuthProvider provider(config); }, std::invalid_argument);
+}
+
+TEST(UamiConfigTest, ConstructionSucceedsWithValidConfig) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+
+  EXPECT_NO_THROW({ UamiOAuthProvider provider(config); });
+}
+
+// =============================================================================
 // Polymorphism Tests (verifies all providers work through base interface)
 // =============================================================================
 
@@ -265,4 +355,18 @@ TEST(PolymorphismTest, AllProvidersWorkThroughBaseInterface) {
   EXPECT_EQ(fields.access_token, "custom-token");
   EXPECT_EQ(fields.logical_cluster, "lsrc-222");
   EXPECT_EQ(fields.identity_pool_id, "pool-222");
+}
+
+TEST(PolymorphismTest, UamiProviderWorksAsOAuthProvider) {
+  UamiOAuthProvider::Config config;
+  config.uami_endpoint_query = "?api-version=2018-02-01";
+  config.logical_cluster = "lsrc-333";
+  config.identity_pool_id = "pool-333";
+
+  std::shared_ptr<OAuthProvider> provider =
+      std::make_shared<UamiOAuthProvider>(config);
+
+  // Can't call get_bearer_fields() without a real IMDS endpoint,
+  // but verify it compiles and constructs through the base interface
+  EXPECT_NE(provider, nullptr);
 }

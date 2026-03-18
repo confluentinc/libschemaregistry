@@ -228,4 +228,49 @@ class CustomOAuthProvider : public OAuthProvider {
   const std::string identity_pool_id_;
 };
 
+/**
+ * Azure User-Assigned Managed Identity (UAMI) OAuth provider.
+ *
+ * Fetches tokens from the Azure Instance Metadata Service (IMDS) using
+ * a managed identity's client ID. Includes automatic token caching and
+ * refresh with the same double-checked locking pattern as OAuthClientProvider.
+ */
+class UamiOAuthProvider : public OAuthProvider {
+ public:
+  struct Config {
+    // Azure IMDS base URL (default: standard Azure IMDS endpoint)
+    std::string uami_url = "http://169.254.169.254/metadata/identity/oauth2/token";
+
+    // Required: query string appended to uami_url (contains resource, client_id, api-version, etc.)
+    std::string uami_endpoint_query;
+
+    // Confluent Cloud parameters
+    std::string logical_cluster;
+    std::string identity_pool_id;
+
+    // Retry configuration
+    int max_retries{3};
+    int retry_base_delay_ms{1000};
+    int retry_max_delay_ms{20000};
+    double token_refresh_threshold{0.8};
+    int http_timeout_seconds{30};
+
+    void validate() const;
+    void set_identity_pool_ids(const std::vector<std::string>& pool_ids);
+  };
+
+  explicit UamiOAuthProvider(const Config& config);
+
+  BearerFields get_bearer_fields() override;
+
+  void invalidate_token();
+
+ private:
+  OAuthToken fetch_token();
+
+  const Config config_;
+  mutable std::shared_mutex mutex_;
+  OAuthToken token_;
+};
+
 }  // namespace schemaregistry::rest

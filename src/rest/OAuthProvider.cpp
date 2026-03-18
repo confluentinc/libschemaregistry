@@ -190,4 +190,159 @@ BearerFields CustomOAuthProvider::get_bearer_fields() {
   return BearerFields{std::move(access_token), logical_cluster_, identity_pool_id_};
 }
 
+// ============================================================================
+// UamiOAuthProvider::Config Implementation
+// ============================================================================
+
+void UamiOAuthProvider::Config::validate() const {
+  if (uami_endpoint_query.empty()) {
+    throw std::invalid_argument("uami_endpoint_query is required");
+  }
+  if (max_retries < 0) {
+    throw std::invalid_argument("max_retries must be non-negative");
+  }
+  if (retry_base_delay_ms <= 0) {
+    throw std::invalid_argument("retry_base_delay_ms must be positive");
+  }
+  if (retry_max_delay_ms <= 0) {
+    throw std::invalid_argument("retry_max_delay_ms must be positive");
+  }
+  if (retry_base_delay_ms > retry_max_delay_ms) {
+    throw std::invalid_argument(
+        "retry_base_delay_ms must not exceed retry_max_delay_ms");
+  }
+  if (token_refresh_threshold < 0.0 || token_refresh_threshold > 1.0) {
+    throw std::invalid_argument(
+        "token_refresh_threshold must be between 0.0 and 1.0");
+  }
+  if (http_timeout_seconds <= 0) {
+    throw std::invalid_argument("http_timeout_seconds must be positive");
+  }
+}
+
+void UamiOAuthProvider::Config::set_identity_pool_ids(
+    const std::vector<std::string>& pool_ids) {
+  if (pool_ids.empty()) {
+    identity_pool_id.clear();
+    return;
+  }
+
+  size_t total_size = 0;
+  for (const auto& s : pool_ids) total_size += s.size();
+  total_size += pool_ids.size() - 1;
+
+  std::string joined;
+  joined.reserve(total_size);
+
+  for (size_t i = 0; i < pool_ids.size(); ++i) {
+    if (i > 0) joined += ",";
+    joined += pool_ids[i];
+  }
+  identity_pool_id = std::move(joined);
+}
+
+// ============================================================================
+// UamiOAuthProvider Implementation
+// ============================================================================
+
+UamiOAuthProvider::UamiOAuthProvider(const Config& config)
+    : config_(config) {
+  config_.validate();
+}
+
+BearerFields UamiOAuthProvider::get_bearer_fields() {
+  {
+    std::shared_lock<std::shared_mutex> read_lock(mutex_);
+    if (token_.is_valid() &&
+        !token_.is_expired(config_.token_refresh_threshold)) {
+      return BearerFields{token_.access_token, config_.logical_cluster,
+                          config_.identity_pool_id};
+    }
+  }
+
+  std::unique_lock<std::shared_mutex> write_lock(mutex_);
+  if (token_.is_valid() &&
+      !token_.is_expired(config_.token_refresh_threshold)) {
+    return BearerFields{token_.access_token, config_.logical_cluster,
+                        config_.identity_pool_id};
+  }
+
+  OAuthToken new_token = fetch_token();
+  token_ = std::move(new_token);
+
+  return BearerFields{token_.access_token, config_.logical_cluster,
+                      config_.identity_pool_id};
+}
+
+void UamiOAuthProvider::invalidate_token() {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  token_ = OAuthToken{};
+}
+
+OAuthToken UamiOAuthProvider::fetch_token() {
+  std::string url = config_.uami_url + config_.uami_endpoint_query;
+
+  int attempt = 0;
+  while (true) {
+    auto response = cpr::Get(
+        cpr::Url{url},
+        cpr::Header{{"Metadata", "true"}},
+        cpr::Timeout{std::chrono::seconds(config_.http_timeout_seconds)});
+
+    if (response.status_code >= 200 && response.status_code < 300) {
+      try {
+        auto json_response = json::parse(response.text);
+
+        if (!json_response.contains("access_token")) {
+          throw std::runtime_error(
+              "UAMI token response missing 'access_token' field");
+        }
+
+        OAuthToken token;
+        token.access_token = json_response["access_token"].get<std::string>();
+        // Azure IMDS returns expires_in as a string (e.g., "3599")
+        if (json_response.contains("expires_in")) {
+          auto& val = json_response["expires_in"];
+          if (val.is_string()) {
+            token.expires_in_seconds = std::stoi(val.get<std::string>());
+          } else {
+            token.expires_in_seconds = val.get<int>();
+          }
+        } else {
+          token.expires_in_seconds = 3600;
+        }
+        token.expires_at = std::chrono::system_clock::now() +
+                           std::chrono::seconds(token.expires_in_seconds);
+        return token;
+      } catch (const json::exception& e) {
+        throw std::runtime_error(
+            "Failed to parse UAMI token response: " + std::string(e.what()));
+      }
+    }
+
+    bool should_retry = false;
+    if (response.status_code == 0) {
+      should_retry = true;
+    } else if (response.status_code >= 400) {
+      should_retry = utils::isRetriable(response.status_code);
+    }
+
+    if (!should_retry || attempt >= config_.max_retries) {
+      std::ostringstream error_msg;
+      error_msg << "UAMI token request failed with status "
+                << response.status_code;
+      if (!response.text.empty()) {
+        error_msg << ": " << response.text;
+      }
+      throw std::runtime_error(error_msg.str());
+    }
+
+    auto delay = utils::calculateExponentialBackoff(
+        config_.retry_base_delay_ms, attempt,
+        std::chrono::milliseconds(config_.retry_max_delay_ms));
+    std::this_thread::sleep_for(delay);
+    attempt++;
+  }
+}
+
 }  // namespace schemaregistry::rest
