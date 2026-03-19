@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
-#include "schemaregistry/rest/OAuthProvider.h"
+#include "schemaregistry/rest/UamiOAuthProvider.h"
 #include "schemaregistry/rest/SchemaRegistryClient.h"
 
 using namespace schemaregistry::rest;
