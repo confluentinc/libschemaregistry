@@ -1,39 +1,46 @@
 /**
- * OAuth 2.0 Provider Implementation
+ * OAuth 2.0 Base Provider Implementation
  */
 
 #include "schemaregistry/rest/OAuthProvider.h"
 
-#include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 
 #include "schemaregistry/rest/BackoffUtils.h"
 
-using json = nlohmann::json;
-
 namespace schemaregistry::rest {
 
+namespace {
+
+std::string join_with_commas(const std::vector<std::string>& values) {
+  if (values.empty()) return "";
+
+  size_t total_size = 0;
+  for (const auto& s : values) total_size += s.size();
+  total_size += values.size() - 1;
+
+  std::string joined;
+  joined.reserve(total_size);
+
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) joined += ",";
+    joined += values[i];
+  }
+  return joined;
+}
+
+}  // namespace
+
 // ============================================================================
-// OAuthClientProvider::Config Implementation
+// CachingOAuthProvider::CacheConfig Implementation
 // ============================================================================
 
-void OAuthClientProvider::Config::validate() const {
-  if (client_id.empty()) {
-    throw std::invalid_argument("client_id is required");
-  }
-  if (client_secret.empty()) {
-    throw std::invalid_argument("client_secret is required");
-  }
-  if (scope.empty()) {
-    throw std::invalid_argument("scope is required");
-  }
-  if (token_endpoint_url.empty()) {
-    throw std::invalid_argument("token_endpoint_url is required");
-  }
+void CachingOAuthProvider::CacheConfig::validate() const {
   if (max_retries < 0) {
     throw std::invalid_argument("max_retries must be non-negative");
   }
@@ -56,118 +63,68 @@ void OAuthClientProvider::Config::validate() const {
   }
 }
 
-void OAuthClientProvider::Config::set_identity_pool_ids(
+void CachingOAuthProvider::CacheConfig::set_identity_pool_ids(
     const std::vector<std::string>& pool_ids) {
-  if (pool_ids.empty()) {
-    identity_pool_id.clear();
-    return;
-  }
-
-  size_t total_size = 0;
-  for (const auto& s : pool_ids) total_size += s.size();
-  total_size += pool_ids.size() - 1; // for commas
-
-  std::string joined;
-  joined.reserve(total_size);
-
-  for (size_t i = 0; i < pool_ids.size(); ++i) {
-    if (i > 0) joined += ",";
-    joined += pool_ids[i];
-  }
-  identity_pool_id = std::move(joined);
+  identity_pool_id = join_with_commas(pool_ids);
 }
 
 // ============================================================================
-// OAuthClientProvider Implementation
+// CachingOAuthProvider Implementation
 // ============================================================================
 
-OAuthClientProvider::OAuthClientProvider(const Config& config)
-    : config_(config) {
-  config_.validate();
-}
+CachingOAuthProvider::CachingOAuthProvider(const CacheConfig& cache_config)
+    : cache_config_(cache_config) {}
 
-BearerFields OAuthClientProvider::get_bearer_fields() {
-  // Check if existing lock is valid
-  // Use shared lock for concurrent reads
+BearerFields CachingOAuthProvider::get_bearer_fields() {
   {
     std::shared_lock<std::shared_mutex> read_lock(mutex_);
     if (token_.is_valid() &&
-        !token_.is_expired(config_.token_refresh_threshold)) {
-      return BearerFields{token_.access_token, config_.logical_cluster,
-                          config_.identity_pool_id};
+        !token_.is_expired(cache_config_.token_refresh_threshold)) {
+      return BearerFields{token_.access_token, cache_config_.logical_cluster,
+                          cache_config_.identity_pool_id};
     }
   }
 
-  // Refresh token if expired or not present
-  // Use exclusive lock to prevent multiple threads fetching new token simultaneously
   std::unique_lock<std::shared_mutex> write_lock(mutex_);
   if (token_.is_valid() &&
-      !token_.is_expired(config_.token_refresh_threshold)) {
-    return BearerFields{token_.access_token, config_.logical_cluster,
-                        config_.identity_pool_id};
+      !token_.is_expired(cache_config_.token_refresh_threshold)) {
+    return BearerFields{token_.access_token, cache_config_.logical_cluster,
+                        cache_config_.identity_pool_id};
   }
 
   OAuthToken new_token = fetch_token();
   token_ = std::move(new_token);
 
-  return BearerFields{token_.access_token, config_.logical_cluster,
-                      config_.identity_pool_id};
+  return BearerFields{token_.access_token, cache_config_.logical_cluster,
+                      cache_config_.identity_pool_id};
 }
 
-void OAuthClientProvider::invalidate_token() {
+void CachingOAuthProvider::invalidate_token() {
   std::unique_lock<std::shared_mutex> lock(mutex_);
   token_ = OAuthToken{};
 }
 
-OAuthToken OAuthClientProvider::fetch_token() {
-  // Build form-encoded body for OAuth client credentials grant
-  cpr::Payload payload{{"grant_type", "client_credentials"},
-                       {"client_id", config_.client_id},
-                       {"client_secret", config_.client_secret},
-                       {"scope", config_.scope}};
-
+std::string CachingOAuthProvider::fetch_with_retry(
+    const std::string& provider_name,
+    const std::function<TokenResponse()>& make_request) {
   int attempt = 0;
   while (true) {
-    auto response = cpr::Post(
-        cpr::Url{config_.token_endpoint_url}, payload,
-        cpr::Header{{"Content-Type", "application/x-www-form-urlencoded"}},
-        cpr::Timeout{std::chrono::seconds(config_.http_timeout_seconds)});
+    auto response = make_request();
 
-    // Success: parse and return token
     if (response.status_code >= 200 && response.status_code < 300) {
-      try {
-        auto json_response = json::parse(response.text);
-
-        if (!json_response.contains("access_token")) {
-          throw std::runtime_error(
-              "OAuth token response missing 'access_token' field");
-        }
-
-        OAuthToken token;
-        token.access_token = json_response["access_token"].get<std::string>();
-        token.expires_in_seconds = json_response.value("expires_in", 3600);
-        token.expires_at = std::chrono::system_clock::now() +
-                           std::chrono::seconds(token.expires_in_seconds);
-        return token;
-      } catch (const json::exception& e) {
-        // JSON parsing error on 2xx - not retriable
-        throw std::runtime_error(
-            "Failed to parse OAuth token response: " + std::string(e.what()));
-      }
+      return response.text;
     }
 
-    // Check if we should retry
     bool should_retry = false;
     if (response.status_code == 0) {
-      // Network error - always retriable
       should_retry = true;
     } else if (response.status_code >= 400) {
       should_retry = utils::isRetriable(response.status_code);
     }
 
-    if (!should_retry || attempt >= config_.max_retries) {
+    if (!should_retry || attempt >= cache_config_.max_retries) {
       std::ostringstream error_msg;
-      error_msg << "OAuth token request failed with status "
+      error_msg << provider_name << " token request failed with status "
                 << response.status_code;
       if (!response.text.empty()) {
         error_msg << ": " << response.text;
@@ -175,39 +132,30 @@ OAuthToken OAuthClientProvider::fetch_token() {
       throw std::runtime_error(error_msg.str());
     }
 
-    // Retry with backoff
     auto delay = utils::calculateExponentialBackoff(
-        config_.retry_base_delay_ms, attempt,
-        std::chrono::milliseconds(config_.retry_max_delay_ms));
+        cache_config_.retry_base_delay_ms, attempt,
+        std::chrono::milliseconds(cache_config_.retry_max_delay_ms));
     std::this_thread::sleep_for(delay);
     attempt++;
   }
 }
 
-// ============================================================================
-// CustomOAuthProvider Implementation
-// ============================================================================
+OAuthToken CachingOAuthProvider::parse_standard_token_response(
+    const std::string& json_text, const std::string& provider_name) {
+  using json = nlohmann::json;
+  auto json_response = json::parse(json_text);
 
-CustomOAuthProvider::CustomOAuthProvider(TokenFetchFunction fetch_fn,
-                                         std::string logical_cluster,
-                                         std::string identity_pool_id)
-    : fetch_fn_(std::move(fetch_fn)),
-      logical_cluster_(std::move(logical_cluster)),
-      identity_pool_id_(std::move(identity_pool_id)) {
-  if (!fetch_fn_) {
-    throw std::invalid_argument("fetch_fn cannot be empty");
-  }
-}
-
-BearerFields CustomOAuthProvider::get_bearer_fields() {
-  // Call the custom function to get access token
-  std::string access_token = fetch_fn_();
-
-  if (access_token.empty()) {
-    throw std::runtime_error("Custom token fetch function returned empty token");
+  if (!json_response.contains("access_token")) {
+    throw std::runtime_error(
+        provider_name + " token response missing 'access_token' field");
   }
 
-  return BearerFields{std::move(access_token), logical_cluster_, identity_pool_id_};
+  OAuthToken token;
+  token.access_token = json_response["access_token"].get<std::string>();
+  token.expires_in_seconds = json_response.value("expires_in", 3600);
+  token.expires_at = std::chrono::system_clock::now() +
+                     std::chrono::seconds(token.expires_in_seconds);
+  return token;
 }
 
 }  // namespace schemaregistry::rest

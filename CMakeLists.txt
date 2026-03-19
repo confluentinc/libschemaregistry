@@ -305,6 +305,8 @@ target_link_libraries(schemaregistry
         OpenSSL::Crypto
         cpr::cpr
         absl::strings # for base64_decode in JsonValue
+        absl::hash
+        absl::raw_hash_set # for flat_hash_map used in SchemaStore, TtlLruCache, etc.
 )
 
 # Conditionally link Avro

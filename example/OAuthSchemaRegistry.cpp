@@ -9,7 +9,9 @@
 #include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
-#include "schemaregistry/rest/OAuthProvider.h"
+#include "schemaregistry/rest/CustomOAuthProvider.h"
+#include "schemaregistry/rest/OAuthClientProvider.h"
+#include "schemaregistry/rest/UamiOAuthProvider.h"
 #include "schemaregistry/rest/SchemaRegistryClient.h"
 
 using namespace schemaregistry::rest;
@@ -114,6 +116,25 @@ int main() {
     auto client = SchemaRegistryClient::newClient(config);
     auto subjects = client->getAllSubjects();
     std::cout << "Factory (config map): Found " << subjects.size() << " subjects" << std::endl;
+  }
+
+  // Example 6: Azure User-Assigned Managed Identity (UAMI)
+  // See UamiOAuthExample.cpp for a runnable version with CLI args.
+  {
+    UamiOAuthProvider::Config uami_config;
+    uami_config.uami_endpoint_query = "?api-version=2018-02-01&resource=https://confluent.cloud&client_id=<managed-identity-client-id>";
+    uami_config.logical_cluster = "lsrc-12345";
+    uami_config.identity_pool_id = "pool-abcd";
+
+    auto provider = std::make_shared<UamiOAuthProvider>(uami_config);
+
+    auto config = std::make_shared<ClientConfiguration>(
+        std::vector<std::string>{"https://psrc-123456.us-east-1.aws.confluent.cloud"});
+    config->setOAuthProvider(provider);
+
+    auto client = SchemaRegistryClient::newClient(config);
+    auto subjects = client->getAllSubjects();
+    std::cout << "UAMI: Found " << subjects.size() << " subjects" << std::endl;
   }
 
   return 0;

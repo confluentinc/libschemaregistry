@@ -1,8 +1,10 @@
 /**
  * OAuth 2.0 Provider for Schema Registry Client
  *
- * Implements OAuth 2.0 Client Credentials grant (RFC 6749 Section 4.4)
- * with automatic token caching and refresh.
+ * Base classes for OAuth bearer authentication. For concrete providers see:
+ * - OAuthClientProvider.h (Client Credentials grant)
+ * - CustomOAuthProvider.h (user-provided token function)
+ * - UamiOAuthProvider.h (Azure UAMI via IMDS)
  *
  * Authentication Methods (Mutually Exclusive):
  * ClientConfiguration supports three authentication methods:
@@ -18,7 +20,6 @@
 
 #include <chrono>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -99,67 +100,27 @@ struct OAuthToken {
 };
 
 /**
- * OAuth 2.0 Client Credentials provider.
+ * Base class for OAuth providers with automatic token caching and refresh.
  *
- * Implements automatic token fetching using OAuth 2.0 Client Credentials
- * grant flow.
+ * Provides thread-safe token caching using double-checked locking with
+ * shared_mutex. Subclasses implement fetch_token() for the actual token
+ * retrieval (HTTP call + parsing + retry).
  */
-class OAuthClientProvider : public OAuthProvider {
+class CachingOAuthProvider : public OAuthProvider {
  public:
-  /**
-   * Configuration for OAuth Client Credentials flow.
-   */
-  struct Config {
-    // Required OAuth parameters
-    std::string client_id;
-    std::string client_secret;
-    std::string scope;
-    std::string token_endpoint_url;
-
-    // Confluent Cloud parameters
-    std::string logical_cluster;      // Schema Registry logical cluster ID (e.g., "lsrc-12345")
-
-    // Identity pool ID(s) are optional. May contain a single
-    // pool ID, a comma-separated list, or a vector of pool IDs.
+  struct CacheConfig {
+    std::string logical_cluster;
     std::string identity_pool_id;
 
-    // Optional retry configuration
     int max_retries{3};
     int retry_base_delay_ms{1000};
     int retry_max_delay_ms{20000};
-
-    // Optional token refresh behavior
-    // Token is refreshed when elapsed time > threshold * total_lifetime
-    // Default: 0.8 (refreshes when 80% of token lifetime has elapsed)
     double token_refresh_threshold{0.8};
-
-    // Optional HTTP timeout
     int http_timeout_seconds{30};
 
-    /**
-     * Validate configuration has all required fields.
-     *
-     * @throws std::invalid_argument if configuration is invalid
-     */
     void validate() const;
-
-    /**
-     * Set identity pool ID(s) from a vector of pool IDs.
-     *
-     * Joins the entries with commas and stores the result in identity_pool_id.
-     *
-     * @param pool_ids Vector of identity pool ID strings
-     */
     void set_identity_pool_ids(const std::vector<std::string>& pool_ids);
   };
-
-  /**
-   * Construct OAuth provider with configuration.
-   *
-   * @param config OAuth configuration (validated on construction)
-   * @throws std::invalid_argument if configuration is invalid
-   */
-  explicit OAuthClientProvider(const Config& config);
 
   BearerFields get_bearer_fields() override;
 
@@ -168,74 +129,57 @@ class OAuthClientProvider : public OAuthProvider {
    */
   void invalidate_token();
 
- private:
+ protected:
+  explicit CachingOAuthProvider(const CacheConfig& cache_config);
+
   /**
-   * Fetch new token from OAuth provider using Client Credentials grant.
+   * Fetch a new token from the token endpoint.
    *
-   * Performs exponential backoff with jitter on failures.
+   * Subclasses implement the HTTP request and response parsing.
    *
-   * @return Newly fetched OAuth token
+   * @return Newly fetched OAuthToken
    * @throws std::runtime_error if unable to fetch token after retries
    */
-  OAuthToken fetch_token();
-
-  const Config config_;
-
-  mutable std::shared_mutex mutex_;  // Shared mutex for thread-safe token access
-  OAuthToken token_;
-};
-
-/**
- * Custom OAuth provider that delegates token fetching to a user-provided function.
- *
- * This allows users to implement custom token fetching logic without implementing
- * a full provider class.
- *
- * Example usage:
- * @code
- * auto provider = std::make_shared<CustomOAuthProvider>(
- *     []() { return fetch_token_from_my_idp(); },
- *     "lsrc-12345",
- *     "pool-67890"
- * );
- * @endcode
- *
- * Note: The function is called on every get_bearer_fields() call.
- * Users should implement their own caching and thread safety if needed.
- */
-class CustomOAuthProvider : public OAuthProvider {
- public:
-  /**
-   * Function type that returns an access token string.
-   * The function should handle all token fetching logic including:
-   * - Fetching from custom OAuth endpoints
-   * - Caching (if desired)
-   * - Thread safety (if needed)
-   * - Error handling
-   *
-   * @return Access token string
-   * @throws std::runtime_error if unable to fetch token
-   */
-  using TokenFetchFunction = std::function<std::string()>;
+  virtual OAuthToken fetch_token() = 0;
 
   /**
-   * Construct custom OAuth provider with user-provided token fetch function.
-   *
-   * @param fetch_fn Function that returns access token (required)
-   * @param logical_cluster Schema Registry logical cluster ID (optional, required for Confluent Cloud)
-   * @param identity_pool_id Identity pool ID(s) as comma-separated string (optional)
-   * @throws std::invalid_argument if fetch_fn is empty
+   * Token response from an HTTP request, used by fetch_with_retry.
    */
-  CustomOAuthProvider(TokenFetchFunction fetch_fn,
-                     std::string logical_cluster = "",
-                     std::string identity_pool_id = "");
+  struct TokenResponse {
+    int status_code{0};
+    std::string text;
+  };
 
-  BearerFields get_bearer_fields() override;
+  /**
+   * Execute an HTTP request with retry and exponential backoff.
+   *
+   * Retries on network errors and retriable HTTP status codes.
+   * Returns the successful response body for the caller to parse.
+   *
+   * @param provider_name Name for error messages (e.g., "OAuth", "UAMI")
+   * @param make_request Function that performs the HTTP request
+   * @return Response body text on success (2xx)
+   * @throws std::runtime_error if unable to get a successful response after retries
+   */
+  std::string fetch_with_retry(
+      const std::string& provider_name,
+      const std::function<TokenResponse()>& make_request);
+
+  /**
+   * Parse a standard OAuth token response (access_token string, expires_in int).
+   *
+   * @param json_text Raw JSON response body
+   * @param provider_name Name for error messages
+   * @return Parsed OAuthToken
+   */
+  static OAuthToken parse_standard_token_response(
+      const std::string& json_text, const std::string& provider_name);
+
+  const CacheConfig cache_config_;
 
  private:
-  const TokenFetchFunction fetch_fn_;
-  const std::string logical_cluster_;
-  const std::string identity_pool_id_;
+  mutable std::shared_mutex mutex_;
+  OAuthToken token_;
 };
 
 }  // namespace schemaregistry::rest
