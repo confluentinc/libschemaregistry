@@ -9,7 +9,9 @@
 #include <string>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
-#include "schemaregistry/rest/OAuthProvider.h"
+#include "schemaregistry/rest/CustomOAuthProvider.h"
+#include "schemaregistry/rest/OAuthClientProvider.h"
+#include "schemaregistry/rest/UamiOAuthProvider.h"
 #include "schemaregistry/rest/SchemaRegistryClient.h"
 
 using namespace schemaregistry::rest;

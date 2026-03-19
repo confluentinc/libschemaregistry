@@ -7,6 +7,9 @@
 #include <chrono>
 #include <thread>
 #include "schemaregistry/rest/OAuthProvider.h"
+#include "schemaregistry/rest/OAuthClientProvider.h"
+#include "schemaregistry/rest/CustomOAuthProvider.h"
+#include "schemaregistry/rest/UamiOAuthProvider.h"
 
 using namespace schemaregistry::rest;
 
