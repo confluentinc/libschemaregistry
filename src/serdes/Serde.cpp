@@ -338,6 +338,7 @@ std::string FieldContext::typeName() const {
 // RuleContext implementation
 
 RuleContext::RuleContext(
+    std::optional<std::string> enabled_env,
     const SerializationContext &ser_ctx, std::optional<Schema> source,
     std::optional<Schema> target, const std::string &subject, Mode rule_mode,
     const Rule &rule, size_t index, const std::vector<Rule> &rules,
@@ -345,7 +346,8 @@ RuleContext::RuleContext(
         inline_tags,
     std::shared_ptr<FieldTransformer> field_transformer,
     std::shared_ptr<RuleRegistry> rule_registry)
-    : ser_ctx_(ser_ctx),
+    : enabled_env_(enabled_env),
+      ser_ctx_(ser_ctx),
       source_(source),
       target_(target),
       subject_(subject),
@@ -515,17 +517,27 @@ std::unique_ptr<SerdeValue> Serde::executeRulesWithPhase(
     std::unordered_map<std::string, std::unordered_set<std::string>>
         inline_tags,
     std::shared_ptr<FieldTransformer> field_transformer) const {
+    std::optional<std::string> enabled_env;
     std::vector<Rule> rules;
 
     switch (rule_mode) {
         case Mode::Upgrade:
+            if (target.has_value() && target->getRuleSet().has_value()) {
+                enabled_env = target->getRuleSet()->getEnableAt();
+            }
             rules = getMigrationRules(target);
             break;
         case Mode::Downgrade:
+            if (source.has_value() && source->getRuleSet().has_value()) {
+                enabled_env = source->getRuleSet()->getEnableAt();
+            }
             rules = getMigrationRules(source);
             std::reverse(rules.begin(), rules.end());
             break;
         default:
+            if (target.has_value() && target->getRuleSet().has_value()) {
+                enabled_env = target->getRuleSet()->getEnableAt();
+            }
             if (rule_phase == Phase::Encoding) {
                 rules = getEncodingRules(target);
             } else {
@@ -547,7 +559,11 @@ std::unique_ptr<SerdeValue> Serde::executeRulesWithPhase(
     for (size_t index = 0; index < rules.size(); ++index) {
         const auto &rule = rules[index];
 
-        if (isDisabled(rule)) {
+        RuleContext ctx(enabled_env, ser_ctx, source, target, subject,
+                        rule_mode, rule, index, rules, inline_tags,
+                        field_transformer, rule_registry_);
+
+        if (isDisabled(ctx, rule)) {
             continue;
         }
 
@@ -570,10 +586,6 @@ std::unique_ptr<SerdeValue> Serde::executeRulesWithPhase(
                 }
                 break;
         }
-
-        RuleContext ctx(ser_ctx, source, target, subject, rule_mode, rule,
-                        index, rules, inline_tags, field_transformer,
-                        rule_registry_);
 
         // Fix: Check if rule type is available before using it
         if (!rule.getType().has_value()) {
@@ -818,7 +830,7 @@ std::optional<std::string> Serde::getOnFailure(const Rule &rule) const {
     return rule.getOnFailure();
 }
 
-bool Serde::isDisabled(const Rule &rule) const {
+bool Serde::isDisabled(const RuleContext &ctx, const Rule &rule) const {
     if (!rule.getType().has_value()) {
         return false;
     }
@@ -836,6 +848,11 @@ bool Serde::isDisabled(const Rule &rule) const {
         if (override_opt.has_value() && override_opt->disabled.has_value()) {
             return override_opt->disabled.value();
         }
+    }
+
+    std::string enabled_env = ctx.getEnabledEnv().value_or("ALL");
+    if (enabled_env != "ALL" && enabled_env != "CLIENT") {
+        return true;
     }
 
     return false;

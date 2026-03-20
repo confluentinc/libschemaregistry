@@ -64,6 +64,11 @@ class RuleSet {
     void setEncodingRules(
         const std::optional<std::vector<schemaregistry::rest::model::Rule>>
             &value);
+    /// <summary>
+    ///
+    /// </summary>
+    std::optional<std::string> getEnableAt() const;
+    void setEnableAt(const std::optional<std::string> &value);
 
     friend void to_json(nlohmann::json &j, const RuleSet &o);
     friend void from_json(const nlohmann::json &j, RuleSet &o);
@@ -74,6 +79,7 @@ class RuleSet {
     std::optional<std::vector<schemaregistry::rest::model::Rule>> domainRules_;
     std::optional<std::vector<schemaregistry::rest::model::Rule>>
         encodingRules_;
+    std::optional<std::string> enableAt_;
 };
 
 }  // namespace schemaregistry::rest::model
