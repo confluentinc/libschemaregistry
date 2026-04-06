@@ -1,3 +1,16 @@
+# 0.1.3
+
+## Enhancements
+
+* Add UamiOAuthProvider for Azure UAMI token fetching (#25)
+* Add enableAt to RuleSet (#24)
+* Add AssociatedNameStrategy (#19)
+
+## Fixes
+
+* Guard Avro/Protobuf includes in SerdeTypes.cpp with ifdef (#22)
+* Revert making identity pool id header optional (#26)
+
 # 0.1.2
 
 ## Enhancements
