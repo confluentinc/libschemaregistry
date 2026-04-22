@@ -691,8 +691,280 @@ TEST(JsonTest, CelFieldWithUnionOfRefs) {
     
     // Deserialize back to JSON object
     nlohmann::json obj2 = deserializer.deserialize(ser_ctx, bytes);
-    
+
     // Assert that the deserialized object matches the expected object (with suffix)
+    ASSERT_EQ(obj2, expected_obj);
+}
+
+TEST(JsonTest, CelFieldTransformAllOf) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto ser_conf = SerializerConfig(
+        false,
+        std::make_optional(SchemaSelector::useLatestVersion()),
+        false,
+        true,
+        {}
+    );
+
+    std::string schema_str = R"(
+    {
+        "type": "object",
+        "properties": {
+            "pins": {
+                "type": "object",
+                "allOf": [
+                    {
+                        "properties": {
+                            "pin": {
+                                "confluent:tags": ["PII"],
+                                "type": ["string", "null"]
+                            }
+                        }
+                    },
+                    {
+                        "properties": {
+                            "npin": {
+                                "confluent:tags": ["PII"],
+                                "type": ["string", "null"]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    )";
+
+    Rule rule;
+    rule.setName(std::make_optional<std::string>("test-cel"));
+    rule.setKind(std::make_optional<Kind>(Kind::Transform));
+    rule.setMode(std::make_optional<Mode>(Mode::Write));
+    rule.setType(std::make_optional<std::string>("CEL_FIELD"));
+    std::vector<std::string> tags = {"PII"};
+    rule.setTags(std::make_optional<std::vector<std::string>>(tags));
+    rule.setExpr(std::make_optional<std::string>("value + '-suffix'"));
+
+    RuleSet rule_set;
+    std::vector<Rule> domain_rules = {rule};
+    rule_set.setDomainRules(std::make_optional<std::vector<Rule>>(domain_rules));
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(schema_str));
+    schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+
+    auto registered_schema = client->registerSchema("test-value", schema, false);
+
+    std::string obj_str = R"(
+    { "pins": { "pin": "P123456789", "npin": "NP00012345678" } }
+    )";
+    nlohmann::json obj = nlohmann::json::parse(obj_str);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    auto cel_field_executor = std::make_shared<CelFieldExecutor>();
+    rule_registry->registerExecutor(cel_field_executor);
+
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_conf);
+
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+
+    std::vector<uint8_t> bytes = serializer.serialize(ser_ctx, obj);
+
+    auto deser_conf = DeserializerConfig::createDefault();
+    JsonDeserializer deserializer(client, rule_registry, deser_conf);
+
+    std::string expected_obj_str = R"(
+    { "pins": { "pin": "P123456789-suffix", "npin": "NP00012345678-suffix" } }
+    )";
+    nlohmann::json expected_obj = nlohmann::json::parse(expected_obj_str);
+
+    nlohmann::json obj2 = deserializer.deserialize(ser_ctx, bytes);
+    ASSERT_EQ(obj2, expected_obj);
+}
+
+TEST(JsonTest, CelFieldTransformNestedAnyOf) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto ser_conf = SerializerConfig(
+        false,
+        std::make_optional(SchemaSelector::useLatestVersion()),
+        false,
+        true,
+        {}
+    );
+
+    std::string schema_str = R"(
+    {
+        "type": "object",
+        "properties": {
+            "pins": {
+                "type": "object",
+                "anyOf": [
+                    {
+                        "properties": {
+                            "pin": {
+                                "confluent:tags": ["PII"],
+                                "type": ["string", "null"]
+                            }
+                        }
+                    },
+                    {
+                        "properties": {
+                            "npin": {
+                                "confluent:tags": ["PII"],
+                                "type": ["string", "null"]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    )";
+
+    Rule rule;
+    rule.setName(std::make_optional<std::string>("test-cel"));
+    rule.setKind(std::make_optional<Kind>(Kind::Transform));
+    rule.setMode(std::make_optional<Mode>(Mode::Write));
+    rule.setType(std::make_optional<std::string>("CEL_FIELD"));
+    std::vector<std::string> tags = {"PII"};
+    rule.setTags(std::make_optional<std::vector<std::string>>(tags));
+    rule.setExpr(std::make_optional<std::string>("value + '-suffix'"));
+
+    RuleSet rule_set;
+    std::vector<Rule> domain_rules = {rule};
+    rule_set.setDomainRules(std::make_optional<std::vector<Rule>>(domain_rules));
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(schema_str));
+    schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+
+    auto registered_schema = client->registerSchema("test-value", schema, false);
+
+    std::string obj_str = R"(
+    { "pins": { "pin": "P123456789", "npin": "NP00012345678" } }
+    )";
+    nlohmann::json obj = nlohmann::json::parse(obj_str);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    auto cel_field_executor = std::make_shared<CelFieldExecutor>();
+    rule_registry->registerExecutor(cel_field_executor);
+
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_conf);
+
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+
+    std::vector<uint8_t> bytes = serializer.serialize(ser_ctx, obj);
+
+    auto deser_conf = DeserializerConfig::createDefault();
+    JsonDeserializer deserializer(client, rule_registry, deser_conf);
+
+    std::string expected_obj_str = R"(
+    { "pins": { "pin": "P123456789-suffix", "npin": "NP00012345678-suffix" } }
+    )";
+    nlohmann::json expected_obj = nlohmann::json::parse(expected_obj_str);
+
+    nlohmann::json obj2 = deserializer.deserialize(ser_ctx, bytes);
+    ASSERT_EQ(obj2, expected_obj);
+}
+
+TEST(JsonTest, CelFieldTransformSiblingAnyOf) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto ser_conf = SerializerConfig(
+        false,
+        std::make_optional(SchemaSelector::useLatestVersion()),
+        false,
+        true,
+        {}
+    );
+
+    std::string schema_str = R"(
+    {
+        "type": "object",
+        "properties": {
+            "pins": {
+                "type": "object",
+                "anyOf": [
+                    { "required": ["pin"] },
+                    { "required": ["npin"] }
+                ],
+                "properties": {
+                    "pin": {
+                        "confluent:tags": ["PII"],
+                        "type": ["string", "null"]
+                    },
+                    "npin": {
+                        "confluent:tags": ["PII"],
+                        "type": ["string", "null"]
+                    }
+                }
+            }
+        }
+    }
+    )";
+
+    Rule rule;
+    rule.setName(std::make_optional<std::string>("test-cel"));
+    rule.setKind(std::make_optional<Kind>(Kind::Transform));
+    rule.setMode(std::make_optional<Mode>(Mode::Write));
+    rule.setType(std::make_optional<std::string>("CEL_FIELD"));
+    std::vector<std::string> tags = {"PII"};
+    rule.setTags(std::make_optional<std::vector<std::string>>(tags));
+    rule.setExpr(std::make_optional<std::string>("value + '-suffix'"));
+
+    RuleSet rule_set;
+    std::vector<Rule> domain_rules = {rule};
+    rule_set.setDomainRules(std::make_optional<std::vector<Rule>>(domain_rules));
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(schema_str));
+    schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+
+    auto registered_schema = client->registerSchema("test-value", schema, false);
+
+    std::string obj_str = R"(
+    { "pins": { "pin": "P123456789", "npin": "NP00012345678" } }
+    )";
+    nlohmann::json obj = nlohmann::json::parse(obj_str);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    auto cel_field_executor = std::make_shared<CelFieldExecutor>();
+    rule_registry->registerExecutor(cel_field_executor);
+
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_conf);
+
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Json;
+
+    std::vector<uint8_t> bytes = serializer.serialize(ser_ctx, obj);
+
+    auto deser_conf = DeserializerConfig::createDefault();
+    JsonDeserializer deserializer(client, rule_registry, deser_conf);
+
+    std::string expected_obj_str = R"(
+    { "pins": { "pin": "P123456789-suffix", "npin": "NP00012345678-suffix" } }
+    )";
+    nlohmann::json expected_obj = nlohmann::json::parse(expected_obj_str);
+
+    nlohmann::json obj2 = deserializer.deserialize(ser_ctx, bytes);
     ASSERT_EQ(obj2, expected_obj);
 }
 
