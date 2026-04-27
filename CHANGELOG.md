@@ -1,3 +1,10 @@
+# 0.x.x
+
+## Fixes
+
+* Handle anyOf/allOf in JSON transforms (#28)
+
+
 # 0.1.3
 
 ## Enhancements
