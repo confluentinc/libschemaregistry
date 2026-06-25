@@ -2,7 +2,7 @@
 
 ## Enhancements
 
-* Make identity pool id header optional, with union-of-pools support (#29)
+* Make identity pool id header optional, with union-of-pools support (#30)
 
 ## Fixes
 
