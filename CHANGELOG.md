@@ -1,5 +1,9 @@
 # 0.x.x
 
+## Enhancements
+
+* Make identity pool id header optional, with union-of-pools support (#30)
+
 ## Fixes
 
 * Handle anyOf/allOf in JSON transforms (#28)
