@@ -23,16 +23,17 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <vector>
 
 namespace schemaregistry::rest {
 
 /**
  * Bearer authentication fields required for Confluent Cloud Schema Registry.
  *
- * Confluent Cloud requires three fields:
+ * Fields:
  * - access_token: OAuth bearer token
  * - logical_cluster: Schema Registry logical cluster ID (e.g., "lsrc-12345"). Required for Confluent Cloud
- * - identity_pool_id: Identity pool ID (e.g., "pool-abcd"). Required for Confluent Cloud
+ * - identity_pool_id: Identity pool ID (e.g., "pool-abcd"). Optional; when omitted the header is not sent and the server uses auto pool mapping.
  */
 struct BearerFields {
   std::string access_token;
@@ -110,6 +111,10 @@ class CachingOAuthProvider : public OAuthProvider {
  public:
   struct CacheConfig {
     std::string logical_cluster;
+    // Identity pool ID(s) are optional. May contain a single pool ID, a
+    // comma-separated list (union of pools), or be set from a vector via
+    // set_identity_pool_ids(). When empty, the Confluent-Identity-Pool-Id
+    // header is omitted and the server uses auto pool mapping.
     std::string identity_pool_id;
 
     int max_retries{3};
@@ -119,6 +124,15 @@ class CachingOAuthProvider : public OAuthProvider {
     int http_timeout_seconds{30};
 
     void validate() const;
+
+    /**
+     * Set identity pool ID(s) from a vector of pool IDs.
+     *
+     * Joins the entries with commas and stores the result in identity_pool_id.
+     *
+     * @param pool_ids Vector of identity pool ID strings
+     */
+    void set_identity_pool_ids(const std::vector<std::string>& pool_ids);
   };
 
   BearerFields get_bearer_fields() override;
