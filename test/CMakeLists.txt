@@ -19,6 +19,10 @@ set(TEST_SOURCES
     OAuthProviderTest.cpp  # OAuth provider tests
 )  # Always include base tests
 
+if(SCHEMAREGISTRY_WITH_RULES)
+    list(APPEND TEST_SOURCES AzureKmsAeadTest.cpp)  # Azure KMS AEAD wire-format tests
+endif()
+
 if(SCHEMAREGISTRY_WITH_AVRO)
     list(APPEND TEST_SOURCES AvroTest.cpp)
 endif()
