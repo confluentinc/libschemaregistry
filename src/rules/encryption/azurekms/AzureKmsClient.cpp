@@ -69,7 +69,9 @@ AzureKmsClient::GetAead(absl::string_view key_uri) const {
         if (saveVersionIt != conf_.end()) {
             std::string value = saveVersionIt->second;
             std::transform(value.begin(), value.end(), value.begin(),
-                           ::tolower);
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
             saveVersion = value == "true";
         }
 

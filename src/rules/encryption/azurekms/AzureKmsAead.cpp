@@ -123,6 +123,20 @@ crypto::tink::util::StatusOr<std::string> AzureAead::Decrypt(
         std::string version = ExtractVersion(ciphertextStr);
 
         if (version.empty()) {
+            // A ciphertext that starts with the azure:v1: prefix but fails
+            // ExtractVersion's full header check (too short, or missing the
+            // ':' separator at the expected position) is corrupted or
+            // tampered, not legacy input -- a genuine legacy DEK's raw
+            // ciphertext bytes coincidentally starting with this exact
+            // 9-byte ASCII sequence is astronomically unlikely. Reject it
+            // explicitly rather than silently falling through to legacy
+            // decrypt with a confusing failure.
+            if (ciphertextStr.compare(0, kVersionPrefix.size(),
+                                      kVersionPrefix) == 0) {
+                return crypto::tink::util::Status(
+                    absl::StatusCode::kInternal,
+                    "ciphertext carries a malformed azure:v1: header");
+            }
             std::vector<uint8_t> wrappedBytes(ciphertextStr.begin(),
                                               ciphertextStr.end());
             auto params = Azure::Security::KeyVault::Keys::Cryptography::
