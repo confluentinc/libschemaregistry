@@ -72,19 +72,28 @@ crypto::tink::util::StatusOr<std::string> AzureAead::Encrypt(
             return std::string(result.begin(), result.end());
         }
 
-        // Resolve the currently latest key version and use it to build a
-        // version-specific client for this encrypt call.
-        auto keyResponse = keyClient_->GetKey(keyName_);
-        const std::string &resolvedId = keyResponse.Value.Id();
-        auto lastSlash = resolvedId.find_last_of('/');
-        if (lastSlash == std::string::npos) {
-            return crypto::tink::util::Status(
-                absl::StatusCode::kInternal,
-                "Resolved Azure Key Vault key id is missing a version "
-                "segment: " +
-                    resolvedId);
+        // If the kek's key URI already pins an explicit version, respect it
+        // as-is and don't resolve "current" -- resolving "latest" here would
+        // silently substitute a different key version than the one the user
+        // explicitly configured, and would only matter for a versionless
+        // key URI in the first place (a pinned version never "rotates"
+        // from this caller's perspective).
+        std::string version;
+        if (!keyVersion_.empty()) {
+            version = keyVersion_;
+        } else {
+            auto keyResponse = keyClient_->GetKey(keyName_);
+            const std::string &resolvedId = keyResponse.Value.Id();
+            auto lastSlash = resolvedId.find_last_of('/');
+            if (lastSlash == std::string::npos) {
+                return crypto::tink::util::Status(
+                    absl::StatusCode::kInternal,
+                    "Resolved Azure Key Vault key id is missing a version "
+                    "segment: " +
+                        resolvedId);
+            }
+            version = resolvedId.substr(lastSlash + 1);
         }
-        std::string version = resolvedId.substr(lastSlash + 1);
         if (!IsValidVersion(version)) {
             // Mirrors Decrypt's own validation: a DEK this method wraps must
             // always be one this same class can later unwrap.
