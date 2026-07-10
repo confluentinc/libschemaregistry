@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 
 #include "absl/strings/string_view.h"
 #include "azure/core/credentials/credentials.hpp"
@@ -32,10 +33,13 @@ class AzureKmsClient : public crypto::tink::KmsClient {
      *
      * @param keyUriPrefix The key URI prefix this client supports
      * @param credential Azure credentials for authentication
+     * @param conf Configuration parameters, consulted by GetAead to resolve
+     *             AzureKmsDriver::ENCRYPT_AZURE_KEY_VERSION_SAVE
      */
     AzureKmsClient(
         const std::string &keyUriPrefix,
-        std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential);
+        std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential,
+        std::unordered_map<std::string, std::string> conf = {});
 
     /**
      * Checks if this client supports the given key URI
@@ -57,6 +61,7 @@ class AzureKmsClient : public crypto::tink::KmsClient {
   private:
     std::string keyUriPrefix_;
     std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential_;
+    std::unordered_map<std::string, std::string> conf_;
 
     /**
      * Parses an Azure Key Vault URL to extract key information
