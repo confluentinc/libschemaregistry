@@ -50,7 +50,7 @@ std::shared_ptr<crypto::tink::KmsClient> AzureKmsDriver::newKmsClient(
         }
 
         // Create and return the Azure KMS client
-        return std::make_shared<AzureKmsClient>(keyUrl, credential);
+        return std::make_shared<AzureKmsClient>(keyUrl, credential, conf);
 
     } catch (const std::exception &e) {
         throw TinkError("Error creating Azure KMS client: " +

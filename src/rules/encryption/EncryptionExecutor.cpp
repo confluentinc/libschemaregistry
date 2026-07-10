@@ -830,7 +830,19 @@ std::unique_ptr<crypto::tink::Aead> EncryptionExecutorTransform::getAead(
     const std::unordered_map<std::string, std::string> &config,
     const schemaregistry::rest::model::Kek &kek) {
     std::string kek_url = kek.getKmsType() + "://" + kek.getKmsKeyId();
-    auto kms_client = getKmsClient(config, kek_url);
+
+    // Merge the kek's KmsProps (e.g. encrypt.azure.key.version.save) into a
+    // copy of the executor-level config, so KMS-specific per-kek settings
+    // reach newKmsClient/GetAead.
+    std::unordered_map<std::string, std::string> aead_config(config);
+    auto kms_props = kek.getKmsProps();
+    if (kms_props.has_value()) {
+        for (const auto &entry : kms_props.value()) {
+            aead_config[entry.first] = entry.second;
+        }
+    }
+
+    auto kms_client = getKmsClient(aead_config, kek_url);
 
     if (!kms_client) {
         throw SerdeError("KMS client not available for URL: " + kek_url);

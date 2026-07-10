@@ -33,6 +33,16 @@ class AzureKmsDriver : public KmsDriver {
     static constexpr const char *CLIENT_SECRET = "client.secret";
 
     /**
+     * Enables making a DEK's encrypted key material self-describing with
+     * respect to which exact Azure Key Vault key version wrapped it (see
+     * AzureAead::Encrypt), matching the same self-description property AWS
+     * KMS and GCP KMS ciphertext already provide natively. Set as a kek
+     * kmsProps entry.
+     */
+    static constexpr const char *ENCRYPT_AZURE_KEY_VERSION_SAVE =
+        "encrypt.azure.key.version.save";
+
+    /**
      * Default constructor
      */
     AzureKmsDriver();
