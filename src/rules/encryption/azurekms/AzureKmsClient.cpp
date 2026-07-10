@@ -5,6 +5,8 @@
 
 #include "schemaregistry/rules/encryption/azurekms/AzureKmsClient.h"
 
+#include <algorithm>
+#include <cctype>
 #include <regex>
 #include <stdexcept>
 
@@ -18,8 +20,11 @@ namespace schemaregistry::rules::encryption::azurekms {
 
 AzureKmsClient::AzureKmsClient(
     const std::string &keyUriPrefix,
-    std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential)
-    : keyUriPrefix_(keyUriPrefix), credential_(std::move(credential)) {}
+    std::shared_ptr<Azure::Core::Credentials::TokenCredential> credential,
+    std::unordered_map<std::string, std::string> conf)
+    : keyUriPrefix_(keyUriPrefix),
+      credential_(std::move(credential)),
+      conf_(std::move(conf)) {}
 
 bool AzureKmsClient::DoesSupport(absl::string_view key_uri) const {
     std::string uri(key_uri);
@@ -50,13 +55,29 @@ AzureKmsClient::GetAead(absl::string_view key_uri) const {
             std::make_shared<Azure::Security::KeyVault::Keys::KeyClient>(
                 vaultUrl, credential_);
 
-        // Get the cryptography client for this specific key
-        auto cryptoClient = std::make_shared<
+        // Built from the raw (possibly versionless) keyVersion, exactly as
+        // before this feature existed: used directly whenever the toggle is
+        // off, and as Decrypt's fallback for legacy ciphertext with no
+        // embedded version.
+        auto defaultCryptoClient = std::make_shared<
             Azure::Security::KeyVault::Keys::Cryptography::CryptographyClient>(
             keyClient->GetCryptographyClient(keyName, keyVersion));
 
+        bool saveVersion = false;
+        auto saveVersionIt =
+            conf_.find(AzureKmsDriver::ENCRYPT_AZURE_KEY_VERSION_SAVE);
+        if (saveVersionIt != conf_.end()) {
+            std::string value = saveVersionIt->second;
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            saveVersion = value == "true";
+        }
+
         // Return the Azure AEAD implementation
-        return std::make_unique<AzureAead>(cryptoClient);
+        return std::make_unique<AzureAead>(keyClient, keyName, keyVersion,
+                                           defaultCryptoClient, saveVersion);
 
     } catch (const std::exception &e) {
         return crypto::tink::util::Status(
