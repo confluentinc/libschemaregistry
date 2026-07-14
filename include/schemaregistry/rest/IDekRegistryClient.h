@@ -35,7 +35,8 @@ class IDekRegistryClient {
      * Register a new Key Encryption Key (KEK)
      */
     virtual schemaregistry::rest::model::Kek registerKek(
-        const schemaregistry::rest::model::CreateKekRequest &request) = 0;
+        const schemaregistry::rest::model::CreateKekRequest &request,
+        const std::optional<std::string> &context = std::nullopt) = 0;
 
     /**
      * Register a new Data Encryption Key (DEK)
@@ -47,8 +48,9 @@ class IDekRegistryClient {
     /**
      * Get a KEK by name
      */
-    virtual schemaregistry::rest::model::Kek getKek(const std::string &name,
-                                                    bool deleted = false) = 0;
+    virtual schemaregistry::rest::model::Kek getKek(
+        const std::string &name, bool deleted = false,
+        const std::optional<std::string> &context = std::nullopt) = 0;
 
     /**
      * Get a DEK by KEK name, subject, algorithm, and version
