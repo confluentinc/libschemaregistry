@@ -74,14 +74,16 @@ class DekRegistryClient : public IDekRegistryClient {
 
     // IDekRegistryClient implementation
     virtual schemaregistry::rest::model::Kek registerKek(
-        const schemaregistry::rest::model::CreateKekRequest &request) override;
+        const schemaregistry::rest::model::CreateKekRequest &request,
+        const std::optional<std::string> &context = std::nullopt) override;
 
     virtual schemaregistry::rest::model::Dek registerDek(
         const std::string &kek_name,
         const schemaregistry::rest::model::CreateDekRequest &request) override;
 
     virtual schemaregistry::rest::model::Kek getKek(
-        const std::string &name, bool deleted = false) override;
+        const std::string &name, bool deleted = false,
+        const std::optional<std::string> &context = std::nullopt) override;
 
     virtual schemaregistry::rest::model::Dek getDek(
         const std::string &kek_name, const std::string &subject,

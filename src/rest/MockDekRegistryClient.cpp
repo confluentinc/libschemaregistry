@@ -76,10 +76,11 @@ int64_t MockDekRegistryClient::getCurrentTimestamp() const {
 }
 
 schemaregistry::rest::model::Kek MockDekRegistryClient::registerKek(
-    const schemaregistry::rest::model::CreateKekRequest &request) {
+    const schemaregistry::rest::model::CreateKekRequest &request,
+    const std::optional<std::string> &context) {
     std::lock_guard<std::mutex> lock(*storeMutex);
 
-    KekId cacheKey = {request.getName(), false};
+    KekId cacheKey = {request.getName(), false, context};
 
     // Check if KEK already exists
     auto existingKek = store->getKek(cacheKey);
@@ -128,10 +129,11 @@ schemaregistry::rest::model::Dek MockDekRegistryClient::registerDek(
 }
 
 schemaregistry::rest::model::Kek MockDekRegistryClient::getKek(
-    const std::string &name, bool deleted) {
+    const std::string &name, bool deleted,
+    const std::optional<std::string> &context) {
     std::lock_guard<std::mutex> lock(*storeMutex);
 
-    KekId kekId = {name, deleted};
+    KekId kekId = {name, deleted, context};
 
     auto kek = store->getKek(kekId);
     if (kek.has_value()) {

@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
@@ -21,14 +22,19 @@ namespace schemaregistry::rest {
 struct KekId {
     std::string name;
     bool deleted;
+    // The Schema Registry context the KEK belongs to, or nullopt for the
+    // default context.
+    std::optional<std::string> context;
 
     bool operator==(const KekId &other) const {
-        return name == other.name && deleted == other.deleted;
+        return name == other.name && deleted == other.deleted &&
+               context == other.context;
     }
 
     template <typename H>
     friend H AbslHashValue(H state, const KekId &key) {
-        return H::combine(std::move(state), key.name, key.deleted);
+        return H::combine(std::move(state), key.name, key.deleted,
+                          key.context);
     }
 };
 
