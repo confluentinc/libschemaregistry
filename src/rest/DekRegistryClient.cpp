@@ -177,8 +177,9 @@ std::string DekRegistryClient::algorithmToString(
 }
 
 schemaregistry::rest::model::Kek DekRegistryClient::registerKek(
-    const schemaregistry::rest::model::CreateKekRequest &request) {
-    KekId cacheKey{request.getName(), false};
+    const schemaregistry::rest::model::CreateKekRequest &request,
+    const std::optional<std::string> &context) {
+    KekId cacheKey{request.getName(), false, context};
 
     // Check cache first
     {
@@ -195,8 +196,13 @@ schemaregistry::rest::model::Kek DekRegistryClient::registerKek(
     to_json(j, request);
     std::string body = j.dump();
 
+    std::map<std::string, std::string> query;
+    if (context.has_value()) {
+        query.insert(std::make_pair("context", *context));
+    }
+
     // Send request
-    std::string responseBody = sendHttpRequest(path, "POST", {}, body);
+    std::string responseBody = sendHttpRequest(path, "POST", query, body);
 
     // Parse response
     schemaregistry::rest::model::Kek kek = parseKekFromJson(responseBody);
@@ -277,8 +283,9 @@ schemaregistry::rest::model::Dek DekRegistryClient::registerDek(
 }
 
 schemaregistry::rest::model::Kek DekRegistryClient::getKek(
-    const std::string &name, bool deleted) {
-    KekId kekId{name, deleted};
+    const std::string &name, bool deleted,
+    const std::optional<std::string> &context) {
+    KekId kekId{name, deleted, context};
 
     // Check cache first
     {
@@ -293,6 +300,9 @@ schemaregistry::rest::model::Kek DekRegistryClient::getKek(
     std::string path = "/dek-registry/v1/keks/" + urlEncode(name);
     std::map<std::string, std::string> query;
     query.insert(std::make_pair("deleted", deleted ? "true" : "false"));
+    if (context.has_value()) {
+        query.insert(std::make_pair("context", *context));
+    }
 
     // Send request
     std::string responseBody = sendHttpRequest(path, "GET", query);
