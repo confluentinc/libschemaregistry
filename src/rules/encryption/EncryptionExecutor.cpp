@@ -6,6 +6,7 @@
 #include <random>
 
 #include "absl/strings/escaping.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/rules/encryption/EncryptionRegistry.h"
@@ -39,6 +40,32 @@ namespace schemaregistry::rules::encryption {
 
 using namespace schemaregistry::serdes;
 using namespace schemaregistry::rest;
+
+namespace {
+
+const std::string kContextDelimiter = ":";
+const std::string kContextPrefix = ":.";
+
+// Returns the context parsed from the given qualified subject (of the form
+// ":.context:subject"), or nullopt if the subject has no context prefix or
+// is explicitly qualified with the default (".") context.
+// Tenant is not handled here as it is a server-side-only concept.
+std::optional<std::string> contextFor(const std::string &subject) {
+    if (absl::StartsWith(subject, kContextPrefix)) {
+        std::string rest = subject.substr(kContextPrefix.length());
+        auto ix = rest.find(kContextDelimiter);
+        std::string context = ix != std::string::npos
+                                  ? subject.substr(1, ix + kContextPrefix.length() - 1)
+                                  : subject.substr(1);
+        if (context == ".") {
+            return std::nullopt;
+        }
+        return context;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
 
 // SystemClock implementation
 int64_t SystemClock::now() const {
@@ -459,6 +486,7 @@ schemaregistry::rest::model::Kek EncryptionExecutorTransform::getOrCreateKek(
     KekId kek_id;
     kek_id.name = kek_name_;
     kek_id.deleted = false;
+    kek_id.context = contextFor(ctx.getSubject());
 
     auto kek = retrieveKekFromRegistry(kek_id);
     if (kek.has_value()) {
@@ -511,7 +539,7 @@ EncryptionExecutorTransform::retrieveKekFromRegistry(const KekId &kek_id) {
             throw SerdeError("Client not configured");
         }
 
-        auto kek = client->getKek(kek_id.name, kek_id.deleted);
+        auto kek = client->getKek(kek_id.name, kek_id.deleted, kek_id.context);
         return kek;
     } catch (const schemaregistry::rest::RestException &e) {
         if (e.getStatus() == 404) {
@@ -540,7 +568,7 @@ EncryptionExecutorTransform::storeKekToRegistry(const KekId &kek_id,
         request.setKmsKeyId(kms_key_id);
         request.setShared(shared);
 
-        auto kek = client->registerKek(request);
+        auto kek = client->registerKek(request, kek_id.context);
         return kek;
     } catch (const schemaregistry::rest::RestException &e) {
         if (e.getStatus() == 409) {
