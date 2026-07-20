@@ -1352,6 +1352,130 @@ TEST(JsonTest, PayloadEncryption) {
     ASSERT_EQ(obj2, obj);
 }
 
+TEST(JsonTest, PayloadEncryptionUsesContextFromSubject) {
+    // Register LocalKmsDriver
+    LocalKmsDriver::registerDriver();
+
+    // Create client configuration with mock URL
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    // Create rule configuration with secret
+    std::unordered_map<std::string, std::string> rule_config;
+    rule_config["secret"] = "mysecret";
+
+    auto ser_conf = SerializerConfig(
+        false,  // auto_register_schemas
+        std::make_optional(SchemaSelector::useLatestVersion()),  // use_schema
+        false,  // normalize_schemas
+        false,  // validate
+        rule_config  // rule_config
+    );
+
+    std::string schema_str = R"(
+    {
+        "type": "object",
+        "properties": {
+            "stringField": {
+                "type": "string",
+                "confluent:tags": ["PII"]
+            }
+        }
+    }
+    )";
+
+    Rule rule;
+    rule.setName(std::make_optional<std::string>("test-encrypt"));
+    rule.setKind(std::make_optional<Kind>(Kind::Transform));
+    rule.setMode(std::make_optional<Mode>(Mode::WriteRead));
+    rule.setType(std::make_optional<std::string>("ENCRYPT_PAYLOAD"));
+    std::vector<std::string> tags = {"PII"};
+    rule.setTags(std::make_optional<std::vector<std::string>>(tags));
+    // Deliberately omit encrypt.kms.type/encrypt.kms.key.id: both keks below
+    // are pre-registered, so getOrCreateKek always takes the "found" path,
+    // and omitting these params skips the kms type/key id validation that
+    // would otherwise reject whichever kek doesn't match a hardcoded value.
+    std::map<std::string, std::string> params;
+    params["encrypt.kek.name"] = "kek1";
+    rule.setParams(std::make_optional<std::map<std::string, std::string>>(params));
+    rule.setOnFailure(std::make_optional<std::string>("ERROR,NONE"));
+
+    RuleSet rule_set;
+    std::vector<Rule> encoding_rules = {rule};
+    rule_set.setEncodingRules(std::make_optional<std::vector<Rule>>(encoding_rules));
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(schema_str));
+    schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+
+    std::string obj_str = R"({"stringField": "hi"})";
+    nlohmann::json obj = nlohmann::json::parse(obj_str);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    auto encryption_executor = std::make_shared<EncryptionExecutor>();
+    rule_registry->registerExecutor(encryption_executor);
+
+    JsonSerializer serializer(client, std::nullopt, rule_registry, ser_conf);
+    auto deser_conf = DeserializerConfig::createDefault();
+    JsonDeserializer deserializer(client, rule_registry, deser_conf);
+
+    // Constructing the serializer/deserializer configures the executor with
+    // the mock:// client; retrieve that same client to pre-register keks.
+    auto *dek_client = encryption_executor->getClient();
+    ASSERT_NE(dek_client, nullptr);
+
+    // Pre-register the same kek name under two different contexts, with a
+    // different kmsKeyId each, so a wrong (or dropped) context shows up as a
+    // mismatched kmsKeyId rather than just "it didn't throw".
+    CreateKekRequest ctx_kek_req("kek1", "local-kms", "myctxkey", std::nullopt,
+                                std::nullopt, false);
+    dek_client->registerKek(ctx_kek_req, std::make_optional<std::string>(".myctx"));
+    CreateKekRequest default_kek_req("kek1", "local-kms", "defaultkey",
+                                     std::nullopt, std::nullopt, false);
+    dek_client->registerKek(default_kek_req, std::nullopt);
+
+    auto roundTrip = [&](const std::string &topic,
+                        const std::optional<std::string> &context,
+                        const std::string &expected_kms_key_id) {
+        std::string subject = topic + "-value";
+        client->registerSchema(subject, schema, false);
+
+        SerializationContext ser_ctx;
+        ser_ctx.topic = topic;
+        ser_ctx.serde_type = SerdeType::Value;
+        ser_ctx.serde_format = SerdeFormat::Json;
+
+        std::vector<uint8_t> bytes = serializer.serialize(ser_ctx, obj);
+        nlohmann::json obj2 = deserializer.deserialize(ser_ctx, bytes);
+        ASSERT_EQ(obj2, obj);
+
+        // Confirm the kek actually used for this context matches expectation
+        // (not just that the round trip happened to succeed).
+        auto kek = dek_client->getKek("kek1", false, context);
+        ASSERT_EQ(kek.getKmsKeyId(), expected_kms_key_id);
+    };
+
+    // Context-qualified subject: the context should be parsed out of the
+    // subject and threaded through to the dek registry client, not dropped,
+    // so the "myctxkey" kek is the one actually used.
+    roundTrip(":.myctx:test", std::make_optional<std::string>(".myctx"), "myctxkey");
+
+    // Unqualified subject (default context): should use the "defaultkey" kek.
+    roundTrip("test2", std::nullopt, "defaultkey");
+
+    // Explicitly-qualified default context (":.:subject"): should behave
+    // identically to an unqualified subject, using the "defaultkey" kek
+    // rather than creating a new one under the literal "." context.
+    roundTrip(":.:test3", std::nullopt, "defaultkey");
+
+    // No kek should ever have been created under the literal "." context --
+    // that would indicate the "." normalization was skipped.
+    ASSERT_THROW(dek_client->getKek("kek1", false, std::make_optional<std::string>(".")),
+                schemaregistry::rest::RestException);
+}
+
 TEST(JsonTest, EncryptionWithReferences) {
     // Register LocalKmsDriver
     LocalKmsDriver::registerDriver();
