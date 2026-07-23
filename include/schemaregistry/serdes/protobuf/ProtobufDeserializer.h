@@ -9,6 +9,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -314,21 +315,32 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     if (proto_variant.type != ProtobufVariant::ValueType::Message) {
         throw ProtobufError("Expected message variant but got different type");
     }
-    google::protobuf::Message &final_msg =
-        *proto_variant
-             .template get<std::unique_ptr<google::protobuf::Message>>();
-    auto out_msg = std::make_unique<T>();
 
-    // Don't use CopyFrom, as the descriptors are from different pools
-    std::string serialized_data;
-    if (final_msg.SerializeToString(&serialized_data)) {
-        // Deserialize into the specific message type
-        if (!out_msg->ParseFromString(serialized_data)) {
-            throw ProtobufError("Failed to parse protobuf message");
+    if constexpr (std::is_same_v<T, google::protobuf::Message>) {
+        // Generic/dynamic mode (T is the default, abstract google::protobuf::Message):
+        // there is no concrete message type to bridge into, so hand back the
+        // already fully-resolved dynamic message as-is.
+        auto &result_msg =
+            proto_variant
+                .template get<std::unique_ptr<google::protobuf::Message>>();
+        return std::move(result_msg);
+    } else {
+        google::protobuf::Message &final_msg =
+            *proto_variant
+                 .template get<std::unique_ptr<google::protobuf::Message>>();
+        auto out_msg = std::make_unique<T>();
+
+        // Don't use CopyFrom, as the descriptors are from different pools
+        std::string serialized_data;
+        if (final_msg.SerializeToString(&serialized_data)) {
+            // Deserialize into the specific message type
+            if (!out_msg->ParseFromString(serialized_data)) {
+                throw ProtobufError("Failed to parse protobuf message");
+            }
         }
-    }
 
-    return out_msg;
+        return out_msg;
+    }
 }
 
 template <typename T>
