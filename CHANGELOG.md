@@ -9,6 +9,7 @@
 ## Fixes
 
 * Handle anyOf/allOf in JSON transforms (#28)
+* Fix Protobuf deserializer's use of default template parameter (#33)
 
 
 # 0.1.3
