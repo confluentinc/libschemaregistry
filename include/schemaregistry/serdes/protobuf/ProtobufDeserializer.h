@@ -9,6 +9,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -45,6 +46,19 @@ class ProtobufDeserializer {
     std::shared_ptr<BaseDeserializer> base_;
     std::unique_ptr<ProtobufSerde> serde_;
     SubjectNameStrategyFunc subject_name_strategy_;
+
+    // Keyed by the DescriptorPool used to build each factory. A
+    // DynamicMessageFactory owns the reflection "support data" that the
+    // messages it creates depend on for their entire lifetime (per
+    // dynamic_message.h), so it must not be a call-local temporary: it needs
+    // to outlive any message returned to the caller, e.g. via the generic
+    // T = google::protobuf::Message deserialization mode.
+    std::unordered_map<const google::protobuf::DescriptorPool *,
+                       std::unique_ptr<google::protobuf::DynamicMessageFactory>>
+        message_factories_;
+
+    google::protobuf::DynamicMessageFactory &getMessageFactory(
+        const google::protobuf::DescriptorPool *pool);
 
     std::unique_ptr<google::protobuf::Message> createMessageFromDescriptor(
         const google::protobuf::Descriptor *descriptor);
@@ -83,6 +97,21 @@ inline std::string ProtobufDeserializer<T>::getRecordName(
         return file_desc->message_type(0)->full_name();
     }
     throw ProtobufError("Could not determine record name from schema");
+}
+
+template <typename T>
+inline google::protobuf::DynamicMessageFactory &
+ProtobufDeserializer<T>::getMessageFactory(
+    const google::protobuf::DescriptorPool *pool) {
+    auto iter = message_factories_.find(pool);
+    if (iter == message_factories_.end()) {
+        iter = message_factories_
+                   .emplace(pool, std::make_unique<
+                                      google::protobuf::DynamicMessageFactory>(
+                                      pool))
+                   .first;
+    }
+    return *iter->second;
 }
 
 template <typename T>
@@ -237,7 +266,8 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
         reader_desc = same_name;
     }
 
-    google::protobuf::DynamicMessageFactory factory(pool_ptr);
+    google::protobuf::DynamicMessageFactory &factory =
+        getMessageFactory(pool_ptr);
     std::unique_ptr<google::protobuf::Message> msg;
 
     if (!migrations.empty()) {
@@ -314,21 +344,32 @@ inline std::unique_ptr<T> ProtobufDeserializer<T>::deserialize(
     if (proto_variant.type != ProtobufVariant::ValueType::Message) {
         throw ProtobufError("Expected message variant but got different type");
     }
-    google::protobuf::Message &final_msg =
-        *proto_variant
-             .template get<std::unique_ptr<google::protobuf::Message>>();
-    auto out_msg = std::make_unique<T>();
 
-    // Don't use CopyFrom, as the descriptors are from different pools
-    std::string serialized_data;
-    if (final_msg.SerializeToString(&serialized_data)) {
-        // Deserialize into the specific message type
-        if (!out_msg->ParseFromString(serialized_data)) {
-            throw ProtobufError("Failed to parse protobuf message");
+    if constexpr (std::is_same_v<T, google::protobuf::Message>) {
+        // Generic/dynamic mode (T is the default, abstract google::protobuf::Message):
+        // there is no concrete message type to bridge into, so hand back the
+        // already fully-resolved dynamic message as-is.
+        auto &result_msg =
+            proto_variant
+                .template get<std::unique_ptr<google::protobuf::Message>>();
+        return std::move(result_msg);
+    } else {
+        google::protobuf::Message &final_msg =
+            *proto_variant
+                 .template get<std::unique_ptr<google::protobuf::Message>>();
+        auto out_msg = std::make_unique<T>();
+
+        // Don't use CopyFrom, as the descriptors are from different pools
+        std::string serialized_data;
+        if (final_msg.SerializeToString(&serialized_data)) {
+            // Deserialize into the specific message type
+            if (!out_msg->ParseFromString(serialized_data)) {
+                throw ProtobufError("Failed to parse protobuf message");
+            }
         }
-    }
 
-    return out_msg;
+        return out_msg;
+    }
 }
 
 template <typename T>

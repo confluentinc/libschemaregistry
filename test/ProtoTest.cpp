@@ -115,6 +115,63 @@ TEST(ProtobufTest, BasicSerialization) {
     EXPECT_EQ(obj2->oneof_string(), obj.oneof_string());
 }
 
+TEST(ProtobufTest, DynamicDeserialization) {
+    // Create client configuration with mock URL
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
+
+    // Create serializer configuration
+    auto ser_conf = SerializerConfig::createDefault();
+
+    // Create Author object with test data
+    test::Author obj;
+    obj.set_name("Kafka");
+    obj.set_id(123);
+
+    // Create rule registry
+    auto rule_registry = std::make_shared<RuleRegistry>();
+
+    // Create protobuf serializer with default reference subject name strategy
+    ProtobufSerializer<test::Author> ser(
+        client,
+        std::nullopt, // schema
+        rule_registry,
+        ser_conf,
+        defaultReferenceSubjectNameStrategy
+    );
+
+    // Create serialization context
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    ser_ctx.headers = std::nullopt;
+
+    // Serialize the Author object
+    auto bytes = ser.serialize(ser_ctx, obj);
+
+    // Create a generic/dynamic protobuf deserializer: no concrete message
+    // type is specified, exercising the default `T = google::protobuf::Message`
+    // template parameter.
+    ProtobufDeserializer<> deser(
+        client,
+        rule_registry,
+        DeserializerConfig::createDefault()
+    );
+
+    // Deserialize the bytes back into a dynamically-resolved message.
+    auto obj2_ptr = deser.deserialize(ser_ctx, bytes);
+    ASSERT_NE(obj2_ptr, nullptr);
+
+    // The dynamic message should describe the same type and carry the same
+    // data as the original, even though there's no concrete generated class
+    // to cast to.
+    EXPECT_EQ(obj2_ptr->GetDescriptor()->full_name(),
+              test::Author::descriptor()->full_name());
+    EXPECT_EQ(obj2_ptr->SerializeAsString(), obj.SerializeAsString());
+}
+
 TEST(ProtobufTest, GuidInHeader) {
     // Create client configuration with mock URL
     std::vector<std::string> urls = {"mock://"};
