@@ -109,6 +109,12 @@ class ProtobufSerializer {
 
     void validateSchema(const schemaregistry::rest::model::Schema &schema);
 
+    /**
+     * Evaluate the message's inline validation rules, throwing a single error
+     * listing every violation found.
+     */
+    void validateInlineRules(const google::protobuf::Message &message);
+
     std::string getRecordName(
         const std::optional<schemaregistry::rest::model::Schema> &schema);
 };
@@ -294,6 +300,11 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
             return utils::transformFields(rctx, descriptor, val);
         };
 
+        if (base_->validationEnabled(
+                ValidationRulesExecution::BeforeDomainRules)) {
+            validateInlineRules(message);
+        }
+
         google::protobuf::DynamicMessageFactory msg_factory;
         auto *dynamic_proto = msg_factory.GetPrototype(descriptor);
         auto dynamic_msg =
@@ -320,6 +331,11 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
         auto &transformed_msg =
             *proto_variant
                  .template get<std::unique_ptr<google::protobuf::Message>>();
+        if (base_->validationEnabled(
+                ValidationRulesExecution::AfterDomainRules)) {
+            validateInlineRules(transformed_msg);
+        }
+
         encoded_bytes.resize(
             static_cast<size_t>(transformed_msg.ByteSizeLong()));
         if (!transformed_msg.SerializeToArray(
@@ -327,6 +343,12 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
             throw ProtobufError("Failed to serialize protobuf message");
         }
     } else {
+        // No domain rules run on this path, so there is a single validation
+        // point regardless of the configured phase.
+        if (base_->validationEnabled(std::nullopt)) {
+            validateInlineRules(message);
+        }
+
         // Schema not present in registry – create & register or look it up.
         auto refs = resolveDependencies(ctx, descriptor->file());
 
@@ -376,6 +398,14 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
     // Final framing (schema id serialization).
     auto id_serializer = base_->getConfig().schema_id_serializer;
     return id_serializer(encoded_bytes, ctx, schema_id);
+}
+
+template <typename T>
+inline void ProtobufSerializer<T>::validateInlineRules(
+    const google::protobuf::Message &message) {
+    auto executor = base_->validationExecutor();
+    raiseValidationViolations(utils::validateMessage(
+        *executor, message, base_->getConfig().validation_rules_fail_fast));
 }
 
 template <typename T>

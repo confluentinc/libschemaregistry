@@ -21,6 +21,7 @@
 #include "schemaregistry/serdes/Serde.h"
 #include "schemaregistry/serdes/SerdeError.h"
 #include "schemaregistry/serdes/SerdeTypes.h"
+#include "schemaregistry/serdes/ValidationRule.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 
 namespace schemaregistry::serdes::protobuf::utils {
@@ -102,6 +103,30 @@ FieldType getFieldType(const google::protobuf::FieldDescriptor *field_desc);
  */
 std::unordered_set<std::string> getInlineTags(
     const google::protobuf::FieldDescriptor *field_desc);
+
+/**
+ * Walk message against its descriptor, evaluating every inline validation rule
+ * (confluent.Meta rules) encountered and collecting all failures. Read-only —
+ * the message is not modified.
+ *
+ * Two kinds of rules are evaluated:
+ *   - Message-level (rules on confluent.message_meta) — `this` is the message.
+ *   - Field-level (rules on confluent.field_meta) — `this` is the field value.
+ *     Honors the skip-on-null contract: a field with explicit presence that is
+ *     unset does not have its rules invoked.
+ *
+ * Failures carry their dotted-path location (e.g. addr.zip, tags[3],
+ * scores["foo"]). The walk continues after each failure so callers see the full
+ * set rather than only the first, unless fail_fast is set.
+ *
+ * @param executor Executor used to evaluate each rule
+ * @param message Protobuf message to validate
+ * @param fail_fast Stop at the first violation
+ * @return Every violation found, in walk order
+ */
+std::vector<ValidationRuleError> validateMessage(
+    ValidationRuleExecutor &executor, const google::protobuf::Message &message,
+    bool fail_fast);
 
 /**
  * Protobuf Message to JSON conversion

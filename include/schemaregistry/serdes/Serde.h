@@ -369,6 +369,23 @@ class BaseSerializer {
     const Serde &getSerde() const { return serde_; }
     const SerializerConfig &getConfig() const { return config_; }
 
+    /**
+     * Whether inline validation rules should run at the given phase.
+     *
+     * Pass nullopt when there is a single validation point — a serialization
+     * path that applies no domain rules has nothing to run before or after, so
+     * any enabled mode validates there.
+     */
+    bool validationEnabled(std::optional<ValidationRulesExecution> phase) const;
+
+    /**
+     * The executor used to evaluate inline validation rules: the one configured
+     * on the serializer if set, otherwise the one registered on the
+     * serializer's rule registry, otherwise the globally registered one.
+     * Throws when none is available.
+     */
+    std::shared_ptr<ValidationRuleExecutor> validationExecutor() const;
+
     // Copy/move constructors and assignment operators - deleted due to Serde
     // containing non-copyable RuleRegistry
     BaseSerializer(const BaseSerializer &) = delete;
