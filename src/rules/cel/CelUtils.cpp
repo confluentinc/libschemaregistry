@@ -524,10 +524,19 @@ google::api::expr::runtime::CelValue fromProtobufValue(
             auto *map_impl = google::protobuf::Arena::Create<
                 google::api::expr::runtime::CelMapBuilder>(arena);
 
-            std::vector<const google::protobuf::FieldDescriptor *> fields;
-            reflection->ListFields(*msg, &fields);
-
-            for (const auto *field : fields) {
+            // Walk the descriptor rather than only the populated fields: a proto3
+            // scalar sitting at its default is still set as far as the language is
+            // concerned, and omitting it makes an expression like `msg.count == 0`
+            // fail with "no such key". Fields with explicit presence (optional,
+            // oneof members, messages) are still omitted when unset, so that
+            // has(...) keeps working.
+            for (int field_index = 0; field_index < descriptor->field_count();
+                 ++field_index) {
+                const auto *field = descriptor->field(field_index);
+                if (field->has_presence() &&
+                    !reflection->HasField(*msg, field)) {
+                    continue;
+                }
                 auto *arena_field_name =
                     google::protobuf::Arena::Create<std::string>(arena,
                                                                  field->name());
