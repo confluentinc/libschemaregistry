@@ -83,6 +83,13 @@ struct Walker {
     void walk(const nlohmann::json &schema, const std::string &ns,
               const ::avro::GenericDatum &datum, const std::string &path);
 
+    /**
+     * Registers every named definition reachable from schema, without
+     * evaluating rules.
+     * Used to seed the walk with the referenced schemas.
+     */
+    void collectNamed(const nlohmann::json &schema, const std::string &ns);
+
     void walkRecord(const nlohmann::json &schema, const std::string &ns,
                     const ::avro::GenericDatum &datum, const std::string &path);
 };
@@ -149,6 +156,81 @@ void Walker::walkRecord(const nlohmann::json &schema, const std::string &ns,
         walk(*field_type_it, record_ns, field_datum, field_path);
         if (done()) {
             return;
+        }
+    }
+}
+
+void Walker::collectNamed(const nlohmann::json &schema, const std::string &ns) {
+    if (schema.is_array()) {
+        for (const auto &variant : schema) {
+            collectNamed(variant, ns);
+        }
+        return;
+    }
+    if (!schema.is_object()) {
+        return;
+    }
+    auto type_it = schema.find("type");
+    if (type_it == schema.end()) {
+        return;
+    }
+    if (!type_it->is_string()) {
+        collectNamed(*type_it, ns);
+        return;
+    }
+    std::string type = type_it->get<std::string>();
+    if (type == "array") {
+        auto items_it = schema.find("items");
+        if (items_it != schema.end()) {
+            collectNamed(*items_it, ns);
+        }
+        return;
+    }
+    if (type == "map") {
+        auto values_it = schema.find("values");
+        if (values_it != schema.end()) {
+            collectNamed(*values_it, ns);
+        }
+        return;
+    }
+    if (type != "record") {
+        return;
+    }
+
+    std::string record_ns = ns;
+    std::string record_name;
+    auto name_it = schema.find("name");
+    if (name_it != schema.end() && name_it->is_string()) {
+        record_name = name_it->get<std::string>();
+    }
+    if (record_name.find('.') != std::string::npos) {
+        record_ns = impliedNamespace(record_name);
+        named[record_name] = &schema;
+    } else {
+        auto ns_it = schema.find("namespace");
+        if (ns_it != schema.end() && ns_it->is_string()) {
+            record_ns = ns_it->get<std::string>();
+        }
+        if (!record_name.empty()) {
+            named[record_ns.empty() ? record_name
+                                    : record_ns + "." + record_name] = &schema;
+            if (record_ns.empty()) {
+                named[record_name] = &schema;
+            }
+        }
+    }
+
+    auto fields_it = schema.find("fields");
+    if (fields_it == schema.end() || !fields_it->is_array()) {
+        return;
+    }
+    for (const auto &field : *fields_it) {
+        if (!field.is_object()) {
+            continue;
+        }
+        auto field_type_it = field.find("type");
+        if (field_type_it != field.end()) {
+            collectNamed(*field_type_it, record_ns);
         }
     }
 }
@@ -222,9 +304,16 @@ void Walker::walk(const nlohmann::json &schema, const std::string &ns,
 
 std::vector<ValidationRuleError> validateMessage(
     ValidationRuleExecutor &executor, const nlohmann::json &schema,
+    const std::vector<nlohmann::json> &named_schemas,
     const ::avro::GenericDatum &datum, bool fail_fast) {
     std::vector<ValidationRuleError> violations;
     Walker walker{executor, fail_fast, violations, {}};
+    // Index the referenced schemas first: a field may name a record defined in
+    // another subject, and without their definitions those rules would be
+    // silently skipped.
+    for (const auto &named : named_schemas) {
+        walker.collectNamed(named, "");
+    }
     walker.walk(schema, "", datum, "");
     return violations;
 }

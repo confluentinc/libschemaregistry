@@ -91,9 +91,49 @@ void AvroSerde::resolveNamedSchema(
     }
 }
 
+std::shared_ptr<const std::pair<nlohmann::json, std::vector<nlohmann::json>>>
+AvroSerde::getSchemaJsons(
+    const schemaregistry::rest::model::Schema &schema,
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
+    if (!schema.getSchema().has_value()) {
+        return nullptr;
+    }
+    // getSchema() returns by value, so the string must be copied rather than
+    // bound to a reference into the returned temporary.
+    const std::string cache_key = schema.getSchema().value();
+
+    {
+        std::shared_lock lock(mutex_);
+        auto it = schema_jsons_.find(cache_key);
+        if (it != schema_jsons_.end()) {
+            return it->second;
+        }
+    }
+
+    std::vector<std::string> named_schema_strings;
+    std::unordered_set<std::string> visited;
+    resolveNamedSchema(schema, client, named_schema_strings, visited);
+
+    std::vector<nlohmann::json> named_schemas;
+    named_schemas.reserve(named_schema_strings.size());
+    for (const auto &named : named_schema_strings) {
+        named_schemas.push_back(nlohmann::json::parse(named));
+    }
+    auto result = std::make_shared<
+        const std::pair<nlohmann::json, std::vector<nlohmann::json>>>(
+        nlohmann::json::parse(cache_key), std::move(named_schemas));
+
+    {
+        std::unique_lock lock(mutex_);
+        schema_jsons_[cache_key] = result;
+    }
+    return result;
+}
+
 void AvroSerde::clear() {
     std::unique_lock lock(mutex_);
     parsed_schemas_.clear();
+    schema_jsons_.clear();
 }
 
 // AvroSerializer implementation (PIMPL)
@@ -172,7 +212,7 @@ class AvroSerializer::Impl {
 
             if (base_->validationEnabled(
                     ValidationRulesExecution::BeforeDomainRules)) {
-                validateInlineRules(schema_json, value);
+                validateInlineRules(schema, value);
             }
 
             // Create field transformer lambda
@@ -208,7 +248,7 @@ class AvroSerializer::Impl {
 
             if (base_->validationEnabled(
                     ValidationRulesExecution::AfterDomainRules)) {
-                validateInlineRules(schema_json, value);
+                validateInlineRules(schema, value);
             }
         } else {
             // Use provided schema and register/lookup
@@ -220,8 +260,7 @@ class AvroSerializer::Impl {
             // No domain rules run on this path, so there is a single validation
             // point regardless of the configured phase.
             if (base_->validationEnabled(std::nullopt)) {
-                validateInlineRules(
-                    nlohmann::json::parse(schema_->getSchema().value()), value);
+                validateInlineRules(schema_.value(), value);
             }
 
             schemaregistry::rest::model::RegisteredSchema registered_schema;
@@ -292,11 +331,20 @@ class AvroSerializer::Impl {
 
     // Evaluate the schema's inline validation rules against datum, throwing a
     // single error listing every violation found.
-    void validateInlineRules(const nlohmann::json &schema_json,
-                             const ::avro::GenericDatum &datum) {
+    void validateInlineRules(
+        const schemaregistry::rest::model::Schema &target_schema,
+        const ::avro::GenericDatum &datum) {
+        // The schema JSON and the schemas it references are cached, so this
+        // neither re-parses the schema text per message nor loses rules
+        // declared in a referenced schema.
+        auto schema_jsons = serde_->getSchemaJsons(
+            target_schema, base_->getSerde().getClient());
+        if (!schema_jsons) {
+            return;
+        }
         auto executor = base_->validationExecutor();
         raiseValidationViolations(utils::validateMessage(
-            *executor, schema_json, datum,
+            *executor, schema_jsons->first, schema_jsons->second, datum,
             base_->getConfig().validation_rules_fail_fast));
     }
 

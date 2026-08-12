@@ -550,7 +550,12 @@ google::api::expr::runtime::CelValue fromProtobufValue(
                 google::api::expr::runtime::CelValue cel_value =
                     google::api::expr::runtime::CelValue::CreateNull();
 
-                if (field->is_repeated()) {
+                if (field->is_map()) {
+                    // Maps are repeated in the reflection API, so they must be
+                    // handled before the repeated branch or they bind as a list
+                    // of entries.
+                    cel_value = convertProtobufMapToCel(*msg, field, arena);
+                } else if (field->is_repeated()) {
                     std::vector<google::api::expr::runtime::CelValue> vec;
                     int field_size = reflection->FieldSize(*msg, field);
 
@@ -665,13 +670,15 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
             return google::api::expr::runtime::CelValue::CreateInt64(value);
         }
 
+        // As in fromProtobufValue: unsigned values keep CEL's unsigned type, so
+        // that a uint64 above int64 max is not seen as negative.
         case google::protobuf::FieldDescriptor::CPPTYPE_UINT32: {
             uint32_t value =
                 (index >= 0)
                     ? reflection->GetRepeatedUInt32(message, field, index)
                     : reflection->GetUInt32(message, field);
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(value));
+            return google::api::expr::runtime::CelValue::CreateUint64(
+                static_cast<uint64_t>(value));
         }
 
         case google::protobuf::FieldDescriptor::CPPTYPE_UINT64: {
@@ -679,8 +686,7 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
                 (index >= 0)
                     ? reflection->GetRepeatedUInt64(message, field, index)
                     : reflection->GetUInt64(message, field);
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(value));
+            return google::api::expr::runtime::CelValue::CreateUint64(value);
         }
 
         case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT: {
@@ -731,7 +737,10 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
                     : reflection->GetMessage(message, field);
 
             if (field->is_map()) {
-                return convertProtobufMapToCel(nested_message, field, arena);
+                // Reached only when a caller asks for a single entry; the whole
+                // map is built by the message binding below, which passes the
+                // containing message.
+                return convertProtobufMapToCel(message, field, arena);
             } else {
                 auto message_copy = std::unique_ptr<google::protobuf::Message>(
                     nested_message.New());
@@ -748,34 +757,41 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
 }
 
 google::api::expr::runtime::CelValue convertProtobufMapToCel(
-    const google::protobuf::Message &map_entry,
-    const google::protobuf::FieldDescriptor * /*map_field*/,
+    const google::protobuf::Message &message,
+    const google::protobuf::FieldDescriptor *map_field,
     google::protobuf::Arena *arena) {
     auto *map_impl = google::protobuf::Arena::Create<
         google::api::expr::runtime::CelMapBuilder>(arena);
 
-    const auto *descriptor = map_entry.GetDescriptor();
-    const auto *reflection = map_entry.GetReflection();
-
-    if (!descriptor || !reflection) {
+    const auto *reflection = message.GetReflection();
+    if (map_field == nullptr || reflection == nullptr ||
+        !map_field->is_map()) {
         return google::api::expr::runtime::CelValue::CreateMap(map_impl);
     }
 
-    const auto *key_field = descriptor->field(0);
-    const auto *value_field = descriptor->field(1);
-
-    if (!key_field || !value_field) {
+    // A protobuf map is a repeated field of two-field entry messages. Aggregate
+    // every entry into a single CEL map, so that `this.scores["foo"]` indexes a
+    // map rather than a list of one-entry maps.
+    const auto *entry_descriptor = map_field->message_type();
+    const auto *key_field = entry_descriptor->map_key();
+    const auto *value_field = entry_descriptor->map_value();
+    if (key_field == nullptr || value_field == nullptr) {
         return google::api::expr::runtime::CelValue::CreateMap(map_impl);
     }
 
-    auto cel_key =
-        convertProtobufFieldToCel(map_entry, key_field, reflection, arena, -1);
-    auto cel_value = convertProtobufFieldToCel(map_entry, value_field,
-                                               reflection, arena, -1);
-
-    if (!cel_key.IsError() && !cel_value.IsError()) {
-        auto status = map_impl->Add(cel_key, cel_value);
-        if (!status.ok()) {
+    int count = reflection->FieldSize(message, map_field);
+    for (int i = 0; i < count; ++i) {
+        const auto &entry =
+            reflection->GetRepeatedMessage(message, map_field, i);
+        const auto *entry_reflection = entry.GetReflection();
+        auto cel_key = convertProtobufFieldToCel(entry, key_field,
+                                                 entry_reflection, arena, -1);
+        auto cel_value = convertProtobufFieldToCel(entry, value_field,
+                                                   entry_reflection, arena, -1);
+        if (!cel_key.IsError() && !cel_value.IsError()) {
+            auto status = map_impl->Add(cel_key, cel_value);
+            if (!status.ok()) {
+            }
         }
     }
 

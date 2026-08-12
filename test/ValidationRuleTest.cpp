@@ -9,6 +9,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
@@ -277,11 +278,13 @@ const char *kAvroSchema = R"schema({
     return datum;
 }
 
-std::vector<ValidationRuleError> validateAvro(const ::avro::GenericDatum &datum,
-                                              bool fail_fast = false) {
+std::vector<ValidationRuleError> validateAvro(
+    const ::avro::GenericDatum &datum, bool fail_fast = false,
+    const std::vector<nlohmann::json> &named_schemas = {}) {
     CelValidator validator;
     return schemaregistry::serdes::avro::utils::validateMessage(
-        validator, nlohmann::json::parse(kAvroSchema), datum, fail_fast);
+        validator, nlohmann::json::parse(kAvroSchema), named_schemas, datum,
+        fail_fast);
 }
 
 }  // namespace
@@ -326,6 +329,59 @@ TEST(ValidationRuleTest, AvroSkipsRulesOnNullFields) {
     ASSERT_EQ(violations.size(), 1);
     EXPECT_EQ(violations[0].rule.name, "note_not_empty");
     EXPECT_EQ(violations[0].field_path, "note");
+}
+
+TEST(ValidationRuleTest, AvroEvaluatesRulesFromReferencedSchemas) {
+    // The datum is built from the resolved schema, but the raw root schema only
+    // names the referenced record, so its rules are reachable only through the
+    // referenced schemas the walk is seeded with.
+    const char *root = R"schema({
+        "type": "record",
+        "name": "Order",
+        "namespace": "test",
+        "fields": [
+            {"name": "address", "type": "test.Address"}
+        ]
+    })schema";
+    const char *referenced = R"schema({
+        "type": "record",
+        "name": "Address",
+        "namespace": "test",
+        "fields": [
+            {"name": "zip", "type": "string",
+             "confluent:rules": [
+                {"name": "zip_digits",
+                 "expr": "this.matches('^[0-9]{5}$') ? '' : 'zip must be 5 digits'"}
+             ]}
+        ]
+    })schema";
+    const char *resolved = R"schema({
+        "type": "record",
+        "name": "Order",
+        "namespace": "test",
+        "fields": [
+            {"name": "address", "type": {
+                "type": "record",
+                "name": "Address",
+                "fields": [{"name": "zip", "type": "string"}]
+            }}
+        ]
+    })schema";
+
+    auto schema = ::avro::compileJsonSchemaFromString(resolved);
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<::avro::GenericRecord>().setFieldAt(
+        0, ::avro::GenericDatum(std::string("abc")));
+
+    CelValidator validator;
+    std::vector<nlohmann::json> named_schemas{
+        nlohmann::json::parse(referenced)};
+    auto violations = schemaregistry::serdes::avro::utils::validateMessage(
+        validator, nlohmann::json::parse(root), named_schemas, datum, false);
+    ASSERT_EQ(violations.size(), 1);
+    EXPECT_EQ(violations[0].rule.name, "zip_digits");
+    EXPECT_EQ(violations[0].field_path, "address.zip");
 }
 
 TEST(ValidationRuleTest, AvroSerializerRejectsInvalidMessage) {
@@ -596,6 +652,53 @@ TEST(ValidationRuleTest, JsonSerializerRejectsInvalidMessage) {
         ValidationRulesFailedError);
 }
 
+TEST(ValidationRuleTest, JsonOneOfPicksTheBranchTheValueSatisfies) {
+    // Both branches are objects, so they cannot be told apart by JSON type:
+    // they differ by the "kind" const. Evaluating both branches' rules would
+    // reject a valid message.
+    const char *schema = R"schema({
+        "type": "object",
+        "properties": {
+            "payload": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"const": "a"},
+                            "v": {"type": "integer",
+                                  "confluent:rules": [{"name": "ruleA", "expr": "false"}]}
+                        },
+                        "required": ["kind"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"const": "b"},
+                            "v": {"type": "integer",
+                                  "confluent:rules": [{"name": "ruleB", "expr": "false"}]}
+                        },
+                        "required": ["kind"]
+                    }
+                ]
+            }
+        }
+    })schema";
+
+    CelValidator validator;
+    auto parsed = nlohmann::json::parse(schema);
+    for (const auto &[kind, expected] :
+         std::vector<std::pair<std::string, std::string>>{{"a", "ruleA"},
+                                                          {"b", "ruleB"}}) {
+        nlohmann::json value = {{"payload", {{"kind", kind}, {"v", 1}}}};
+        auto violations = schemaregistry::serdes::json::utils::validateMessage(
+            validator, parsed, value, false);
+        ASSERT_EQ(violations.size(), 1u)
+            << "kind " << kind << ": " << violations.size();
+        EXPECT_EQ(violations[0].rule.name, expected);
+        EXPECT_EQ(violations[0].field_path, "$.payload.v");
+    }
+}
+
 #endif  // SCHEMAREGISTRY_USE_JSON
 
 // --- Protobuf -------------------------------------------------------------
@@ -766,6 +869,26 @@ TEST(ValidationRuleTest, ProtobufPreservesUnsignedValues) {
     auto violations = validateProto(order);
     ASSERT_EQ(violations.size(), 1u);
     EXPECT_EQ(violations[0].rule.name, "serial_positive");
+}
+
+TEST(ValidationRuleTest, MessageLevelRulesSeeUnsignedFieldsAndMaps) {
+    test::ValidationMessageLevel message;
+    message.set_serial(std::numeric_limits<uint64_t>::max());
+    (*message.mutable_scores())["ok"] = 0;
+
+    auto violations = validateProto(message);
+    for (const auto &violation : violations) {
+        EXPECT_TRUE(violation.cause.empty())
+            << "message-level rule failed to evaluate: "
+            << violation.toString();
+    }
+    EXPECT_EQ(violations.size(), 0u);
+
+    // and the rule really does run: a zero serial fails it
+    message.set_serial(0);
+    auto failures = validateProto(message);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures[0].rule.name, "sees_serial_and_scores");
 }
 
 #endif  // SCHEMAREGISTRY_USE_PROTOBUF

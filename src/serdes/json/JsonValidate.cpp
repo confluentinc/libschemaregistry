@@ -76,11 +76,41 @@ struct Walker {
     }
 
     /**
-     * Whether the instance could plausibly be described by the subschema, used
-     * to pick the live branch of a oneOf/anyOf. Only the declared "type" is
-     * considered: a full validation would need a compiled validator per branch,
-     * and getting this wrong would attribute violations to a branch the value
-     * does not follow.
+     * Whether the instance satisfies the subschema, used to pick the live
+     * branch of a
+     * oneOf/anyOf. Branches routinely share a JSON type and differ by const,
+     * required,
+     * ranges and so on, so the instance is validated against the whole
+     * subschema; a
+     * cheaper type comparison would evaluate rules from branches the value does
+     * not
+     * follow and reject valid messages.
+     *
+     * The root's definitions travel with the subschema, since references are
+     * flattened
+     * into them and a branch may point at one.
+     */
+    bool subschemaMatches(const nlohmann::json &subschema,
+                          const nlohmann::json &value) const {
+        try {
+            nlohmann::json standalone = subschema;
+            for (const char *defs : {"definitions", "$defs"}) {
+                auto it = root.find(defs);
+                if (it != root.end() && !standalone.contains(defs)) {
+                    standalone[defs] = *it;
+                }
+            }
+            auto compiled = jsoncons::jsonschema::make_json_schema(
+                utils::jsonToOJson(standalone));
+            return compiled.is_valid(utils::jsonToOJson(value));
+        } catch (const std::exception &) {
+            // An uncompilable branch cannot be the one the value follows.
+            return false;
+        }
+    }
+
+    /**
+     * Unused legacy helper kept out of the walk; see subschemaMatches.
      */
     static bool typeMatches(const nlohmann::json &schema,
                             const nlohmann::json &value) {
@@ -145,11 +175,17 @@ void Walker::walk(const nlohmann::json &schema, const nlohmann::json &value,
             continue;
         }
         bool all = std::string(keyword) == "allOf";
+        bool one = std::string(keyword) == "oneOf";
         for (const auto &branch : *branches_it) {
-            if (all || typeMatches(*resolveRef(branch), value)) {
+            if (all || subschemaMatches(*resolveRef(branch), value)) {
                 walk(branch, value, path);
                 if (done()) {
                     return;
+                }
+                if (one) {
+                    // oneOf has a single live branch; stop at the one that
+                    // matched.
+                    break;
                 }
             }
         }

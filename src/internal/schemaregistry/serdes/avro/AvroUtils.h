@@ -185,12 +185,16 @@ void getInlineTagsRecursively(
  * @param executor Executor used to evaluate each rule
  * @param schema Raw schema JSON — the Avro parser drops custom attributes, so
  * the rules must be read from the original schema text
+ * @param named_schemas Raw JSON of the referenced schemas, so that a field
+ * whose type names a record defined in another subject resolves to its
+ * definition instead of being skipped
  * @param datum Avro datum to validate
  * @param fail_fast Stop at the first violation
  * @return Every violation found, in walk order
  */
 std::vector<ValidationRuleError> validateMessage(
     ValidationRuleExecutor &executor, const nlohmann::json &schema,
+    const std::vector<nlohmann::json> &named_schemas,
     const ::avro::GenericDatum &datum, bool fail_fast);
 
 /**
