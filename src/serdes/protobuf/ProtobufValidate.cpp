@@ -9,6 +9,15 @@
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 #include "schemaregistry/serdes/protobuf/ProtobufUtils.h"
 
+// Fix for Windows GetMessage macro conflict
+// On Windows, GetMessage is defined as a macro in winuser.h which conflicts
+// with the GetMessage method in google::protobuf::Reflection
+#ifdef _WIN32
+#ifdef GetMessage
+#undef GetMessage
+#endif
+#endif
+
 namespace schemaregistry::serdes::protobuf::utils {
 
 namespace {
