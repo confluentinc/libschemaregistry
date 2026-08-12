@@ -9,6 +9,10 @@
 
 namespace schemaregistry::rules::cel {
 
+// Pulled in here rather than in the header, so that including CelValidator.h does not
+// leak the whole serdes namespace into the consumer's translation unit.
+using namespace schemaregistry::serdes;
+
 namespace {
 
 std::string ruleName(const ValidationRule &rule) {

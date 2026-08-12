@@ -157,9 +157,38 @@ JsonSerde::getParsedSchema(
     return compiled_schema;
 }
 
+std::shared_ptr<const nlohmann::json> JsonSerde::getSchemaJson(
+    const schemaregistry::rest::model::Schema& schema,
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
+    auto schema_str = schema.getSchema();
+    if (!schema_str.has_value()) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    auto it = schema_json_cache_.find(schema_str.value());
+    if (it != schema_json_cache_.end()) {
+        return it->second;
+    }
+
+    // Resolve and inline references the same way getParsedSchema does, so that a $ref
+    // into a referenced schema becomes a local pointer the walker can follow, and so
+    // that the schema text is not re-parsed for every message.
+    std::unordered_set<std::string> visited;
+    auto resolved_refs =
+        schema_resolution::resolveNamedSchema(schema, client, visited);
+    auto flattened = flattenSchemaReferences(
+        nlohmann::json::parse(schema_str.value()), resolved_refs);
+
+    auto parsed = std::make_shared<const nlohmann::json>(std::move(flattened));
+    schema_json_cache_[schema_str.value()] = parsed;
+    return parsed;
+}
+
 void JsonSerde::clear() {
     std::lock_guard<std::mutex> lock(cache_mutex_);
     parsed_schemas_cache_.clear();
+    schema_json_cache_.clear();
 }
 
 void JsonSerde::resolveNamedSchema(
@@ -384,13 +413,16 @@ class JsonSerializer::Impl {
     void validateInlineRules(
         const schemaregistry::rest::model::Schema& target_schema,
         const nlohmann::json& value) {
-        auto schema_str = target_schema.getSchema();
-        if (!schema_str.has_value()) {
+        // The schema JSON is resolved and cached, so this neither re-parses the schema
+        // text per message nor loses rules declared in a referenced schema.
+        auto schema_json = serde_->getSchemaJson(
+            target_schema, base_->getSerde().getClient());
+        if (!schema_json) {
             return;
         }
         auto executor = base_->validationExecutor();
         raiseValidationViolations(utils::validateMessage(
-            *executor, nlohmann::json::parse(schema_str.value()), value,
+            *executor, *schema_json, value,
             base_->getConfig().validation_rules_fail_fast));
     }
 

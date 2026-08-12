@@ -8,7 +8,10 @@
 
 namespace schemaregistry::rules::cel {
 
-using namespace schemaregistry::serdes;
+using schemaregistry::serdes::SerdeValue;
+using schemaregistry::serdes::ValidationRule;
+using schemaregistry::serdes::ValidationRuleExecutor;
+using schemaregistry::serdes::ValidationRuleResult;
 
 /**
  * Validation-rule executor backed by CEL. The rule expression is evaluated with

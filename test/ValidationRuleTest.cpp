@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -446,6 +447,30 @@ TEST(ValidationRuleTest, AvroSerializerRunsValidationAfterDomainRules) {
     }
 }
 
+TEST(ValidationRuleTest, AvroInlineTagsQualifyRecordNames) {
+    // The fullname of "foobar" in namespace "foo" is "foo.foobar". Treating the
+    // namespace as an already-present prefix keys the tags under "foobar",
+    // which never matches, and the tags - which drive field encryption - are
+    // silently dropped.
+    auto tags = schemaregistry::serdes::avro::utils::getInlineTags(
+        nlohmann::json::parse(R"schema({
+            "type": "record", "namespace": "foo", "name": "foobar",
+            "fields": [{"name": "x", "type": "string", "confluent:tags": ["PII"]}]
+        })schema"));
+    ASSERT_EQ(tags.count("foo.foobar.x"), 1u)
+        << "tags keyed under the wrong name";
+    EXPECT_EQ(tags.at("foo.foobar.x").count("PII"), 1u);
+
+    // A dotted name is already a fullname, so the namespace attribute is
+    // ignored.
+    auto dotted = schemaregistry::serdes::avro::utils::getInlineTags(
+        nlohmann::json::parse(R"schema({
+            "type": "record", "namespace": "x", "name": "a.B",
+            "fields": [{"name": "y", "type": "string", "confluent:tags": ["PII"]}]
+        })schema"));
+    ASSERT_EQ(dotted.count("a.B.y"), 1u) << "namespace prepended to a fullname";
+}
+
 #endif  // SCHEMAREGISTRY_USE_AVRO
 
 // --- JSON Schema ----------------------------------------------------------
@@ -589,6 +614,9 @@ test::ValidationOrder protoOrder(const std::string &id, int32_t quantity,
         order.add_items(item);
     }
     order.mutable_address()->set_zip(zip);
+    // serial has a positive rule; keep it valid so tests assert only what they
+    // target.
+    order.set_serial(1);
     return order;
 }
 
@@ -651,6 +679,7 @@ TEST(ValidationRuleTest, ProtobufSkipsRulesOnUnsetMessageFields) {
     order.set_id("ord-1234");
     order.set_quantity(1);
     order.add_items("a");
+    order.set_serial(1);
     EXPECT_TRUE(validateProto(order).empty());
 }
 
@@ -680,6 +709,7 @@ TEST(ValidationRuleTest, ProtobufAllowsDefaultedProto3Scalars) {
     // able to see them rather than failing with "no such key".
     test::ValidationOrder order;
     order.set_id("ord-1234");
+    order.set_serial(1);
     auto violations = validateProto(order);
 
     for (const auto &violation : violations) {
@@ -723,6 +753,19 @@ TEST(ValidationRuleTest, ProtobufUsesTheSelectedSchemasDescriptor) {
                  ValidationRulesFailedError);
     EXPECT_NO_THROW(serializer.serialize(
         ctx, protoOrder("ord-1234", 2, {"a", "b"}, "12345")));
+}
+
+TEST(ValidationRuleTest, ProtobufPreservesUnsignedValues) {
+    // A uint64 above int64 max narrowed to a signed value reads as negative, so
+    // a "this > 0" rule would reject a perfectly valid serial number.
+    test::ValidationOrder order = protoOrder("ord-1234", 1, {"a"}, "12345");
+    order.set_serial(std::numeric_limits<uint64_t>::max());
+    EXPECT_EQ(validateProto(order).size(), 0u);
+
+    order.set_serial(0);
+    auto violations = validateProto(order);
+    ASSERT_EQ(violations.size(), 1u);
+    EXPECT_EQ(violations[0].rule.name, "serial_positive");
 }
 
 #endif  // SCHEMAREGISTRY_USE_PROTOBUF

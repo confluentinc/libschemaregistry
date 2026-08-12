@@ -19,8 +19,12 @@ struct Walker {
     bool done() const { return fail_fast && !violations.empty(); }
 
     /**
-     * Follow a local "$ref" ("#/definitions/Foo") to the schema it names.
-     * Non-local refs are left unresolved — the schema node is returned as-is.
+     * Follow a "$ref" to the schema it names. References are flattened into
+     * local pointers before the walk, so a ref that cannot be followed means
+     * the schema is broken or refers somewhere we cannot see — which throws
+     * rather than being treated as a node carrying no rules, since silently
+     * skipping the referenced subtree would let a message serialize without the
+     * checks the reference was there to supply.
      */
     const nlohmann::json *resolveRef(const nlohmann::json &schema) const {
         if (!schema.is_object()) {
@@ -32,12 +36,14 @@ struct Walker {
         }
         std::string ref = ref_it->get<std::string>();
         if (ref.empty() || ref[0] != '#') {
-            return &schema;
+            throw JsonError("cannot resolve reference '" + ref +
+                            "' while validating inline rules");
         }
         try {
             return &root.at(nlohmann::json::json_pointer(ref.substr(1)));
-        } catch (const nlohmann::json::exception &) {
-            return &schema;
+        } catch (const nlohmann::json::exception &e) {
+            throw JsonError("cannot resolve reference '" + ref +
+                            "' while validating inline rules: " + e.what());
         }
     }
 
