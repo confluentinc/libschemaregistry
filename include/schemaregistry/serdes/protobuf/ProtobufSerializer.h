@@ -112,8 +112,14 @@ class ProtobufSerializer {
     /**
      * Evaluate the message's inline validation rules, throwing a single error
      * listing every violation found.
+     *
+     * When a schema was selected from the registry, its descriptor is the one
+     * carrying the rules — the caller's compiled-in descriptor may predate them
+     * — so pass that schema's pool and the message is re-resolved there before
+     * being validated. Pass nullptr when no registry schema was selected.
      */
-    void validateInlineRules(const google::protobuf::Message &message);
+    void validateInlineRules(const google::protobuf::Message &message,
+                             const google::protobuf::DescriptorPool *pool);
 
     std::string getRecordName(
         const std::optional<schemaregistry::rest::model::Schema> &schema);
@@ -145,8 +151,7 @@ inline ProtobufSerializer<T>::ProtobufSerializer(
       serde_(std::make_unique<ProtobufSerde>()),
       reference_subject_name_strategy_(defaultReferenceSubjectNameStrategy),
       subject_name_strategy_(configureSubjectNameStrategy(
-          config.subject_name_strategy_type,
-          base_->getSerde().getClient(),
+          config.subject_name_strategy_type, base_->getSerde().getClient(),
           config.subject_name_strategy_config,
           [this](const std::optional<schemaregistry::rest::model::Schema> &s) {
               return getRecordName(s);
@@ -180,8 +185,7 @@ inline ProtobufSerializer<T>::ProtobufSerializer(
       serde_(std::make_unique<ProtobufSerde>()),
       reference_subject_name_strategy_(std::move(strategy)),
       subject_name_strategy_(configureSubjectNameStrategy(
-          config.subject_name_strategy_type,
-          base_->getSerde().getClient(),
+          config.subject_name_strategy_type, base_->getSerde().getClient(),
           config.subject_name_strategy_config,
           [this](const std::optional<schemaregistry::rest::model::Schema> &s) {
               return getRecordName(s);
@@ -266,7 +270,8 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
     auto subject_opt =
         subject_name_strategy_(ctx.topic, ctx.serde_type, schema_);
     if (!subject_opt.has_value()) {
-        throw SerializationError("Could not determine subject for serialization");
+        throw SerializationError(
+            "Could not determine subject for serialization");
     }
     const std::string &subject = subject_opt.value();
 
@@ -302,7 +307,7 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
 
         if (base_->validationEnabled(
                 ValidationRulesExecution::BeforeDomainRules)) {
-            validateInlineRules(message);
+            validateInlineRules(message, pool);
         }
 
         google::protobuf::DynamicMessageFactory msg_factory;
@@ -333,7 +338,7 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
                  .template get<std::unique_ptr<google::protobuf::Message>>();
         if (base_->validationEnabled(
                 ValidationRulesExecution::AfterDomainRules)) {
-            validateInlineRules(transformed_msg);
+            validateInlineRules(transformed_msg, pool);
         }
 
         encoded_bytes.resize(
@@ -344,9 +349,10 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
         }
     } else {
         // No domain rules run on this path, so there is a single validation
-        // point regardless of the configured phase.
+        // point regardless of the configured phase, and no registry schema
+        // whose descriptor could carry the rules instead.
         if (base_->validationEnabled(std::nullopt)) {
-            validateInlineRules(message);
+            validateInlineRules(message, nullptr);
         }
 
         // Schema not present in registry – create & register or look it up.
@@ -402,10 +408,39 @@ ProtobufSerializer<T>::serializeWithMessageDescriptor(
 
 template <typename T>
 inline void ProtobufSerializer<T>::validateInlineRules(
-    const google::protobuf::Message &message) {
+    const google::protobuf::Message &message,
+    const google::protobuf::DescriptorPool *pool) {
     auto executor = base_->validationExecutor();
-    raiseValidationViolations(utils::validateMessage(
-        *executor, message, base_->getConfig().validation_rules_fail_fast));
+    bool fail_fast = base_->getConfig().validation_rules_fail_fast;
+
+    const google::protobuf::Descriptor *schema_descriptor = nullptr;
+    if (pool != nullptr) {
+        schema_descriptor =
+            pool->FindMessageTypeByName(message.GetDescriptor()->full_name());
+    }
+    if (schema_descriptor == nullptr ||
+        schema_descriptor == message.GetDescriptor()) {
+        raiseValidationViolations(
+            utils::validateMessage(*executor, message, fail_fast));
+        return;
+    }
+
+    // Re-resolve the message against the selected schema's descriptor. The two
+    // descriptors live in different pools, so round-trip through the wire
+    // format rather than CopyFrom.
+    google::protobuf::DynamicMessageFactory factory;
+    auto schema_msg = std::unique_ptr<google::protobuf::Message>(
+        factory.GetPrototype(schema_descriptor)->New());
+    std::string bytes;
+    if (!message.SerializeToString(&bytes) ||
+        !schema_msg->ParseFromString(bytes)) {
+        // Fall back to the caller's descriptor rather than skipping validation.
+        raiseValidationViolations(
+            utils::validateMessage(*executor, message, fail_fast));
+        return;
+    }
+    raiseValidationViolations(
+        utils::validateMessage(*executor, *schema_msg, fail_fast));
 }
 
 template <typename T>

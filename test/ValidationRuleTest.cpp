@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "schemaregistry/rest/ClientConfiguration.h"
+#include "schemaregistry/rest/MockSchemaRegistryClient.h"
 #include "schemaregistry/rest/SchemaRegistryClient.h"
 #include "schemaregistry/rest/model/Rule.h"
 #include "schemaregistry/rest/model/RuleSet.h"
@@ -671,6 +672,57 @@ TEST(ValidationRuleTest, ProtobufSerializerRejectsInvalidMessage) {
     EXPECT_THROW(
         serializer.serialize(ctx, protoOrder("bad", 2, {"a", "b"}, "12345")),
         ValidationRulesFailedError);
+}
+
+TEST(ValidationRuleTest, ProtobufAllowsDefaultedProto3Scalars) {
+    // quantity and items are both at their proto3 defaults, so
+    // "this.quantity == size(this.items)" holds; the message-level rule must be
+    // able to see them rather than failing with "no such key".
+    test::ValidationOrder order;
+    order.set_id("ord-1234");
+    auto violations = validateProto(order);
+
+    for (const auto &violation : violations) {
+        EXPECT_TRUE(violation.cause.empty())
+            << "no rule should fail to evaluate: " << violation.toString();
+    }
+    EXPECT_EQ(findViolation(violations, "quantity_matches_items"), nullptr);
+    // quantity = 0 still legitimately fails "this > 0".
+    ASSERT_EQ(violations.size(), 1);
+    EXPECT_EQ(violations[0].rule.name, "positive_quantity");
+}
+
+TEST(ValidationRuleTest, ProtobufUsesTheSelectedSchemasDescriptor) {
+    auto client = std::make_shared<MockSchemaRegistryClient>(
+        std::make_shared<const ClientConfiguration>(
+            std::vector<std::string>{"mock://"}));
+
+    test::ValidationOrder invalid = protoOrder("bad", 2, {"a", "b"}, "12345");
+    Schema schema;
+    schema.setSchemaType("PROTOBUF");
+    schema.setSchema(
+        protobuf::utils::schemaToString(invalid.GetDescriptor()->file()));
+    client->registerSchema("test-value", schema, false);
+
+    auto ser_config = SerializerConfig(
+        false, std::make_optional(SchemaSelector::useLatestVersion()), false,
+        false, std::unordered_map<std::string, std::string>{});
+    ser_config.validation_rules_execution =
+        ValidationRulesExecution::AfterDomainRules;
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerValidationExecutor(std::make_shared<CelValidator>());
+
+    schemaregistry::serdes::protobuf::ProtobufSerializer<test::ValidationOrder>
+        serializer(client, std::nullopt, rule_registry, ser_config);
+    auto ctx = valueContext(SerdeFormat::Protobuf);
+
+    // Rules are read from the descriptor parsed out of the selected registry
+    // schema, not from the caller's compiled-in one.
+    EXPECT_THROW(serializer.serialize(ctx, invalid),
+                 ValidationRulesFailedError);
+    EXPECT_NO_THROW(serializer.serialize(
+        ctx, protoOrder("ord-1234", 2, {"a", "b"}, "12345")));
 }
 
 #endif  // SCHEMAREGISTRY_USE_PROTOBUF
