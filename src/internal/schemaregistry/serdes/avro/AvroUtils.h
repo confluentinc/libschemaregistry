@@ -21,6 +21,7 @@
 #include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/serdes/SerdeError.h"
 #include "schemaregistry/serdes/SerdeTypes.h"
+#include "schemaregistry/serdes/ValidationRule.h"
 #include "schemaregistry/serdes/avro/AvroTypes.h"
 
 namespace schemaregistry::serdes::avro {
@@ -164,6 +165,33 @@ void getInlineTagsRecursively(
     const std::string &ns, const std::string &name,
     const nlohmann::json &schema,
     std::unordered_map<std::string, std::unordered_set<std::string>> &tags);
+
+/**
+ * Walk datum against schema, evaluating every inline "confluent:rules" CHECK
+ * constraint encountered and collecting all failures. Read-only — the datum is
+ * not modified.
+ *
+ * Two kinds of rules are evaluated:
+ *   - Record-level ("confluent:rules" on a record schema) — `this` is the
+ *     record.
+ *   - Field-level ("confluent:rules" on a record's field) — `this` is the field
+ *     value. Honors the skip-on-null contract: a null field value does not have
+ *     its rules invoked.
+ *
+ * Failures carry their dotted-path location (e.g. addr.zip, tags[3],
+ * scores["foo"]). The walk continues after each failure so callers see the full
+ * set rather than only the first, unless fail_fast is set.
+ *
+ * @param executor Executor used to evaluate each rule
+ * @param schema Raw schema JSON — the Avro parser drops custom attributes, so
+ * the rules must be read from the original schema text
+ * @param datum Avro datum to validate
+ * @param fail_fast Stop at the first violation
+ * @return Every violation found, in walk order
+ */
+std::vector<ValidationRuleError> validateMessage(
+    ValidationRuleExecutor &executor, const nlohmann::json &schema,
+    const ::avro::GenericDatum &datum, bool fail_fast);
 
 /**
  * Compile a JSON schema string to an Avro ValidSchema, removing confluent:tags

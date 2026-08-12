@@ -663,10 +663,15 @@ void getInlineTagsRecursively(
  */
 void removeConfluentTags(nlohmann::json &schema) {
     if (schema.is_object()) {
-        // Remove confluent:tags if it exists
+        // Remove the confluent-specific attributes if they exist; the Avro
+        // parser rejects schemas carrying them.
         auto tags_it = schema.find("confluent:tags");
         if (tags_it != schema.end()) {
             schema.erase(tags_it);
+        }
+        auto rules_it = schema.find(VALIDATION_RULES_PROP);
+        if (rules_it != schema.end()) {
+            schema.erase(rules_it);
         }
 
         // Recursively process all values in the object
