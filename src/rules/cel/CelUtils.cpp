@@ -470,13 +470,16 @@ google::api::expr::runtime::CelValue fromProtobufValue(
             return google::api::expr::runtime::CelValue::CreateInt64(
                 variant.get<int64_t>());
 
+        // CEL has a distinct unsigned type; narrowing these to Int would wrap
+        // any u64 above int64 max to a negative number, so `this > 0` would
+        // reject valid values.
         case ProtobufVariant::ValueType::U32:
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(variant.get<uint32_t>()));
+            return google::api::expr::runtime::CelValue::CreateUint64(
+                static_cast<uint64_t>(variant.get<uint32_t>()));
 
         case ProtobufVariant::ValueType::U64:
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(variant.get<uint64_t>()));
+            return google::api::expr::runtime::CelValue::CreateUint64(
+                variant.get<uint64_t>());
 
         case ProtobufVariant::ValueType::F32:
             return google::api::expr::runtime::CelValue::CreateDouble(
@@ -524,10 +527,19 @@ google::api::expr::runtime::CelValue fromProtobufValue(
             auto *map_impl = google::protobuf::Arena::Create<
                 google::api::expr::runtime::CelMapBuilder>(arena);
 
-            std::vector<const google::protobuf::FieldDescriptor *> fields;
-            reflection->ListFields(*msg, &fields);
-
-            for (const auto *field : fields) {
+            // Walk the descriptor rather than only the populated fields: a
+            // proto3 scalar sitting at its default is still set as far as the
+            // language is concerned, and omitting it makes an expression like
+            // `msg.count == 0` fail with "no such key". Fields with explicit
+            // presence (optional, oneof members, messages) are still omitted
+            // when unset, so that has(...) keeps working.
+            for (int field_index = 0; field_index < descriptor->field_count();
+                 ++field_index) {
+                const auto *field = descriptor->field(field_index);
+                if (field->has_presence() &&
+                    !reflection->HasField(*msg, field)) {
+                    continue;
+                }
                 auto *arena_field_name =
                     google::protobuf::Arena::Create<std::string>(arena,
                                                                  field->name());

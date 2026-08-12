@@ -21,6 +21,7 @@ set(TEST_SOURCES
 
 if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES AzureKmsAeadTest.cpp)  # Azure KMS AEAD wire-format tests
+    list(APPEND TEST_SOURCES ValidationRuleTest.cpp)  # Inline validation rule tests
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)
