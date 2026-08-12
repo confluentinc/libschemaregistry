@@ -41,6 +41,22 @@ class AvroSerde {
         std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client);
 
     /**
+     * The schema JSON of the schema and of every schema it references, parsed
+     * once and cached. Inline validation reads rules from the schema JSON,
+     * because the Avro parser drops custom attributes, and it needs the
+     * referenced schemas so that a field naming a record from another subject
+     * resolves instead of being skipped.
+     * @param schema Schema to parse
+     * @param client Client for resolving references
+     * @return The schema JSON and the referenced schemas' JSON
+     */
+    std::shared_ptr<
+        const std::pair<nlohmann::json, std::vector<nlohmann::json>>>
+    getSchemaJsons(
+        const schemaregistry::rest::model::Schema &schema,
+        std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client);
+
+    /**
      * Clear all cached schemas
      */
     void clear();
@@ -50,6 +66,13 @@ class AvroSerde {
     std::unordered_map<std::string, std::pair<::avro::ValidSchema,
                                               std::vector<::avro::ValidSchema>>>
         parsed_schemas_;
+
+    // Cache for schema JSON: schema string -> (schema, referenced schemas)
+    std::unordered_map<
+        std::string,
+        std::shared_ptr<const std::pair<nlohmann::json,
+                                        std::vector<nlohmann::json>>>>
+        schema_jsons_;
 
     /**
      * Resolve schema references recursively
