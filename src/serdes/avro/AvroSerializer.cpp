@@ -165,8 +165,15 @@ class AvroSerializer::Impl {
                                  latest_schema->getGuid(), std::nullopt);
 
             auto schema = latest_schema->toSchema();
+            auto schema_json =
+                nlohmann::json::parse(schema.getSchema().value());
             auto parsed_schema =
                 serde_->getParsedSchema(schema, base_->getSerde().getClient());
+
+            if (base_->validationEnabled(
+                    ValidationRulesExecution::BeforeDomainRules)) {
+                validateInlineRules(schema_json, value);
+            }
 
             // Create field transformer lambda
             auto field_transformer =
@@ -188,8 +195,7 @@ class AvroSerializer::Impl {
             auto transformed_value = base_->getSerde().executeRules(
                 ctx, subject, Mode::Write, std::nullopt,
                 std::make_optional(schema), *avro_value,
-                utils::getInlineTags(
-                    nlohmann::json::parse(schema.getSchema().value())),
+                utils::getInlineTags(schema_json),
                 std::make_shared<FieldTransformer>(field_transformer));
 
             // Extract Avro value from result
@@ -199,11 +205,23 @@ class AvroSerializer::Impl {
                 throw AvroError(
                     "Unexpected serde value type returned from rule execution");
             }
+
+            if (base_->validationEnabled(
+                    ValidationRulesExecution::AfterDomainRules)) {
+                validateInlineRules(schema_json, value);
+            }
         } else {
             // Use provided schema and register/lookup
             if (!schema_.has_value()) {
                 throw AvroError(
                     "No schema provided and none found in registry");
+            }
+
+            // No domain rules run on this path, so there is a single validation
+            // point regardless of the configured phase.
+            if (base_->validationEnabled(std::nullopt)) {
+                validateInlineRules(
+                    nlohmann::json::parse(schema_->getSchema().value()), value);
             }
 
             schemaregistry::rest::model::RegisteredSchema registered_schema;
@@ -270,6 +288,16 @@ class AvroSerializer::Impl {
         if (serde_) {
             serde_->clear();
         }
+    }
+
+    // Evaluate the schema's inline validation rules against datum, throwing a
+    // single error listing every violation found.
+    void validateInlineRules(const nlohmann::json &schema_json,
+                             const ::avro::GenericDatum &datum) {
+        auto executor = base_->validationExecutor();
+        raiseValidationViolations(utils::validateMessage(
+            *executor, schema_json, datum,
+            base_->getConfig().validation_rules_fail_fast));
     }
 
     std::pair<::avro::ValidSchema, std::vector<::avro::ValidSchema>>

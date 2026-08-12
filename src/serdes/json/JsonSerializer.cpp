@@ -260,6 +260,11 @@ class JsonSerializer::Impl {
             // Get parsed schema
             parsed_schema = getParsedSchema(target_schema);
 
+            if (base_->validationEnabled(
+                    ValidationRulesExecution::BeforeDomainRules)) {
+                validateInlineRules(target_schema, mutable_value);
+            }
+
             // Create field transformer lambda
             auto field_transformer =
                 [this, &parsed_schema](
@@ -289,12 +294,23 @@ class JsonSerializer::Impl {
                 throw JsonError(
                     "Unexpected serde value type returned from rule execution");
             }
+
+            if (base_->validationEnabled(
+                    ValidationRulesExecution::AfterDomainRules)) {
+                validateInlineRules(target_schema, mutable_value);
+            }
         } else {
             // Use provided schema
             if (!schema_.has_value()) {
                 throw JsonError("Schema needs to be set for auto-registration");
             }
             target_schema = schema_.value();
+
+            // No domain rules run on this path, so there is a single validation
+            // point regardless of the configured phase.
+            if (base_->validationEnabled(std::nullopt)) {
+                validateInlineRules(target_schema, mutable_value);
+            }
 
             // Register or get schema
             if (base_->getConfig().auto_register_schemas) {
@@ -362,6 +378,21 @@ class JsonSerializer::Impl {
     }
 
     void close() { serde_->clear(); }
+
+    // Evaluate the schema's inline validation rules against value, throwing a
+    // single error listing every violation found.
+    void validateInlineRules(
+        const schemaregistry::rest::model::Schema& target_schema,
+        const nlohmann::json& value) {
+        auto schema_str = target_schema.getSchema();
+        if (!schema_str.has_value()) {
+            return;
+        }
+        auto executor = base_->validationExecutor();
+        raiseValidationViolations(utils::validateMessage(
+            *executor, nlohmann::json::parse(schema_str.value()), value,
+            base_->getConfig().validation_rules_fail_fast));
+    }
 
     std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>
     getParsedSchema(const schemaregistry::rest::model::Schema &schema) {
