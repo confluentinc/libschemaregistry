@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -725,11 +726,58 @@ test::ValidationOrder protoOrder(const std::string &id, int32_t quantity,
     return order;
 }
 
+/**
+ * Rebuilds the validation proto's file into `pool`, with `mutate` applied to the
+ * copy, so a test can pair a registered schema against the generated type the way
+ * use.latest.version does. Returns the rebuilt ValidationOrder descriptor, which is
+ * a different object from the generated one even where it describes the same fields.
+ */
+const google::protobuf::Descriptor *rebuiltValidationDescriptor(
+    google::protobuf::DescriptorPool &pool,
+    const std::function<void(google::protobuf::FileDescriptorProto &)> &mutate) {
+    const auto *file = test::ValidationOrder::descriptor()->file();
+    // Dependencies first, so the file's imports resolve in the new pool.
+    std::function<void(const google::protobuf::FileDescriptor *)> add_dependency =
+        [&](const google::protobuf::FileDescriptor *dependency) {
+            for (int i = 0; i < dependency->dependency_count(); ++i) {
+                add_dependency(dependency->dependency(i));
+            }
+            if (pool.FindFileByName(dependency->name()) != nullptr) {
+                return;
+            }
+            google::protobuf::FileDescriptorProto proto;
+            dependency->CopyTo(&proto);
+            pool.BuildFile(proto);
+        };
+    for (int i = 0; i < file->dependency_count(); ++i) {
+        add_dependency(file->dependency(i));
+    }
+    google::protobuf::FileDescriptorProto proto;
+    file->CopyTo(&proto);
+    mutate(proto);
+    if (pool.BuildFile(proto) == nullptr) {
+        return nullptr;
+    }
+    return pool.FindMessageTypeByName("test.ValidationOrder");
+}
+
+google::protobuf::DescriptorProto *messageOf(
+    google::protobuf::FileDescriptorProto &proto, const std::string &name) {
+    for (auto &message : *proto.mutable_message_type()) {
+        if (message.name() == name) {
+            return &message;
+        }
+    }
+    return nullptr;
+}
+
 std::vector<ValidationRuleError> validateProto(
     const google::protobuf::Message &message, bool fail_fast = false) {
     CelValidator validator;
+    // The message is already in the schema's terms here, so its own descriptor is
+    // what carries the rules.
     return schemaregistry::serdes::protobuf::utils::validateMessage(
-        validator, message, fail_fast);
+        validator, message, message.GetDescriptor(), fail_fast);
 }
 
 }  // namespace
@@ -965,6 +1013,75 @@ TEST(ValidationRuleTest, MessageLevelRulesSeeUnsignedFieldsAndMaps) {
     auto failures = validateProto(message);
     ASSERT_EQ(failures.size(), 1u);
     EXPECT_EQ(failures[0].rule.name, "sees_serial_and_scores");
+}
+
+
+// A rule that binds `this` to a nested message needs that message in the schema's
+// terms, not just the top-level one: a rule's environment is built from the
+// registered schema, so `this.renamed_zip` cannot read a field the caller's type
+// calls `zip`. Renaming a field at the same number is a compatible change.
+TEST(ValidationRuleTest, ProtobufNestedMessageRuleSeesSchemaNamesUnderARename) {
+    google::protobuf::DescriptorPool pool;
+    const auto *schema_descriptor = rebuiltValidationDescriptor(
+        pool, [](google::protobuf::FileDescriptorProto &proto) {
+            auto *address = messageOf(proto, "ValidationAddress");
+            ASSERT_NE(address, nullptr);
+            for (auto &field : *address->mutable_field()) {
+                if (field.number() == 1) {
+                    field.set_name("renamed_zip");
+                    field.set_json_name("renamedZip");
+                    field.clear_options();
+                }
+            }
+            auto *meta = address->mutable_options()->MutableExtension(
+                confluent::message_meta);
+            meta->clear_rules();
+            auto *rule = meta->add_rules();
+            rule->set_name("zip_present");
+            rule->set_expr("size(this.renamed_zip) > 0");
+        });
+    ASSERT_NE(schema_descriptor, nullptr);
+
+    auto order = protoOrder("ord-1234", 1, {"a"}, "12345");
+    CelValidator validator;
+    auto violations = schemaregistry::serdes::protobuf::utils::validateMessage(
+        validator, order, schema_descriptor, false);
+
+    EXPECT_TRUE(violations.empty()) << violations.size() << " violations";
+}
+
+// Adding a field is the most ordinary compatible change there is, so the registered
+// schema can declare one the generated type has never heard of - and a
+// message-level rule can reference it, expecting the schema's default. That only
+// works if the message is read through the schema, so a field with no counterpart
+// is itself a reason to re-read, even when every shared field agrees.
+TEST(ValidationRuleTest, ProtobufMessageRuleSeesAFieldOnlyTheSchemaDeclares) {
+    google::protobuf::DescriptorPool pool;
+    const auto *schema_descriptor = rebuiltValidationDescriptor(
+        pool, [](google::protobuf::FileDescriptorProto &proto) {
+            auto *order = messageOf(proto, "ValidationOrder");
+            ASSERT_NE(order, nullptr);
+            auto *added = order->add_field();
+            added->set_name("added");
+            added->set_json_name("added");
+            added->set_number(99);
+            added->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
+            added->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+            auto *meta = order->mutable_options()->MutableExtension(
+                confluent::message_meta);
+            meta->clear_rules();
+            auto *rule = meta->add_rules();
+            rule->set_name("added_default");
+            rule->set_expr("this.added == ''");
+        });
+    ASSERT_NE(schema_descriptor, nullptr);
+
+    auto order = protoOrder("ord-1234", 1, {"a"}, "12345");
+    CelValidator validator;
+    auto violations = schemaregistry::serdes::protobuf::utils::validateMessage(
+        validator, order, schema_descriptor, false);
+
+    EXPECT_TRUE(violations.empty()) << violations.size() << " violations";
 }
 
 #endif  // SCHEMAREGISTRY_USE_PROTOBUF

@@ -413,34 +413,17 @@ inline void ProtobufSerializer<T>::validateInlineRules(
     auto executor = base_->validationExecutor();
     bool fail_fast = base_->getConfig().validation_rules_fail_fast;
 
+    // The rules come from the selected schema's descriptor, which may declare
+    // fields - or name them - differently from the caller's generated type. The
+    // walk pairs the two by number and re-reads the message through the schema
+    // only when they present values differently; both live in validateMessage.
     const google::protobuf::Descriptor *schema_descriptor = nullptr;
     if (pool != nullptr) {
         schema_descriptor =
             pool->FindMessageTypeByName(message.GetDescriptor()->full_name());
     }
-    if (schema_descriptor == nullptr ||
-        schema_descriptor == message.GetDescriptor()) {
-        raiseValidationViolations(
-            utils::validateMessage(*executor, message, fail_fast));
-        return;
-    }
-
-    // Re-resolve the message against the selected schema's descriptor. The two
-    // descriptors live in different pools, so round-trip through the wire
-    // format rather than CopyFrom.
-    google::protobuf::DynamicMessageFactory factory;
-    auto schema_msg = std::unique_ptr<google::protobuf::Message>(
-        factory.GetPrototype(schema_descriptor)->New());
-    std::string bytes;
-    if (!message.SerializeToString(&bytes) ||
-        !schema_msg->ParseFromString(bytes)) {
-        // Fall back to the caller's descriptor rather than skipping validation.
-        raiseValidationViolations(
-            utils::validateMessage(*executor, message, fail_fast));
-        return;
-    }
     raiseValidationViolations(
-        utils::validateMessage(*executor, *schema_msg, fail_fast));
+        utils::validateMessage(*executor, message, schema_descriptor, fail_fast));
 }
 
 template <typename T>

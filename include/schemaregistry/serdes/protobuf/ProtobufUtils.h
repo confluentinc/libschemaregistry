@@ -138,14 +138,23 @@ std::optional<confluent::Meta> getFieldMeta(
  * scores["foo"]). The walk continues after each failure so callers see the full
  * set rather than only the first, unless fail_fast is set.
  *
+ * The walk is driven by `message` - it decides which fields exist, which are
+ * absent, and what the values are - while `schema_descriptor` supplies the rules
+ * and the names a rule refers to, paired to the message's fields by number. Where
+ * the two present values differently, the message is re-read through the schema so
+ * that a rule binding `this` sees it in the schema's terms; that decision is made
+ * once per descriptor pair rather than per record.
+ *
  * @param executor Executor used to evaluate each rule
  * @param message Protobuf message to validate
+ * @param schema_descriptor The registered schema's descriptor for the message's
+ *     type, or null to read the rules from the message's own descriptor
  * @param fail_fast Stop at the first violation
  * @return Every violation found, in walk order
  */
 std::vector<ValidationRuleError> validateMessage(
     ValidationRuleExecutor &executor, const google::protobuf::Message &message,
-    bool fail_fast);
+    const google::protobuf::Descriptor *schema_descriptor, bool fail_fast);
 
 /**
  * Protobuf Message to JSON conversion
