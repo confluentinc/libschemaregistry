@@ -1,6 +1,8 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
 
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,6 +59,31 @@ std::string mapKeyToString(const google::protobuf::Message &entry,
     }
 }
 
+/**
+ * A map key as the variant a map value is keyed by, or nullopt for a key type
+ * protobuf cannot produce.
+ */
+std::optional<MapKey> mapKey(const google::protobuf::Message &entry,
+                             const google::protobuf::FieldDescriptor *key_field) {
+    const auto *reflection = entry.GetReflection();
+    switch (key_field->cpp_type()) {
+        case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
+            return MapKey(reflection->GetString(entry, key_field));
+        case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
+            return MapKey(reflection->GetBool(entry, key_field));
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
+            return MapKey(reflection->GetInt32(entry, key_field));
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
+            return MapKey(reflection->GetInt64(entry, key_field));
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
+            return MapKey(reflection->GetUInt32(entry, key_field));
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
+            return MapKey(reflection->GetUInt64(entry, key_field));
+        default:
+            return std::nullopt;
+    }
+}
+
 struct Walker {
     ValidationRuleExecutor &executor;
     bool fail_fast;
@@ -82,6 +109,21 @@ struct Walker {
     static std::unique_ptr<SerdeValue> fieldValue(
         const google::protobuf::Message &message,
         const google::protobuf::FieldDescriptor *field, int index);
+
+    /**
+     * A repeated field's elements as a single list value, so that a field-level
+     * rule sees the whole collection - `this` is the list, as in the JVM client.
+     */
+    static std::unique_ptr<SerdeValue> repeatedFieldValue(
+        const google::protobuf::Message &message,
+        const google::protobuf::FieldDescriptor *field);
+
+    /**
+     * A map field's entries as a single map value, for the same reason.
+     */
+    static std::unique_ptr<SerdeValue> mapFieldValue(
+        const google::protobuf::Message &message,
+        const google::protobuf::FieldDescriptor *field);
 
     void walkMessage(const google::protobuf::Message &message,
                      const std::string &path);
@@ -154,6 +196,46 @@ std::unique_ptr<SerdeValue> Walker::fieldValue(
     }
 }
 
+std::unique_ptr<SerdeValue> Walker::repeatedFieldValue(
+    const google::protobuf::Message &message,
+    const google::protobuf::FieldDescriptor *field) {
+    int count = message.GetReflection()->FieldSize(message, field);
+    std::vector<ProtobufVariant> elements;
+    elements.reserve(static_cast<size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        auto element = fieldValue(message, field, index);
+        if (!element) {
+            return nullptr;
+        }
+        elements.push_back(asProtobuf(*element));
+    }
+    return makeProtobufValue(ProtobufVariant(std::move(elements)));
+}
+
+std::unique_ptr<SerdeValue> Walker::mapFieldValue(
+    const google::protobuf::Message &message,
+    const google::protobuf::FieldDescriptor *field) {
+    const auto *reflection = message.GetReflection();
+    const auto *entry_type = field->message_type();
+    const auto *key_field = entry_type->map_key();
+    const auto *value_field = entry_type->map_value();
+    int count = reflection->FieldSize(message, field);
+    std::map<MapKey, ProtobufVariant> entries;
+    for (int index = 0; index < count; ++index) {
+        const auto &entry = reflection->GetRepeatedMessage(message, field, index);
+        auto key = mapKey(entry, key_field);
+        if (!key.has_value()) {
+            return nullptr;
+        }
+        auto value = fieldValue(entry, value_field, 0);
+        if (!value) {
+            return nullptr;
+        }
+        entries.emplace(*key, asProtobuf(*value));
+    }
+    return makeProtobufValue(ProtobufVariant(std::move(entries)));
+}
+
 void Walker::walkMessage(const google::protobuf::Message &message,
                          const std::string &path) {
     if (done()) {
@@ -193,6 +275,16 @@ void Walker::walkMessage(const google::protobuf::Message &message,
             const auto *entry = field->message_type();
             const auto *key_field = entry->map_key();
             const auto *value_field = entry->map_value();
+            // Field-level rules see the whole map, matching the JVM client: `this`
+            // is the map itself, so a rule over its contents is written as a
+            // comprehension - this.all(k, this[k] >= 0) - rather than being
+            // invoked once per entry.
+            if (!rules.empty()) {
+                auto map_value = mapFieldValue(message, field);
+                if (map_value && evaluateRules(rules, *map_value, field_path)) {
+                    return;
+                }
+            }
             int count = reflection->FieldSize(message, field);
             for (int index = 0; index < count; ++index) {
                 const auto &map_entry =
@@ -200,10 +292,6 @@ void Walker::walkMessage(const google::protobuf::Message &message,
                 std::string entry_path = field_path + "[" +
                                          mapKeyToString(map_entry, key_field) +
                                          "]";
-                auto value = fieldValue(map_entry, value_field, 0);
-                if (value && evaluateRules(rules, *value, entry_path)) {
-                    return;
-                }
                 if (value_field->cpp_type() ==
                     google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
                     walkMessage(map_entry.GetReflection()->GetMessage(
@@ -218,14 +306,17 @@ void Walker::walkMessage(const google::protobuf::Message &message,
         }
 
         if (field->is_repeated()) {
+            // As for maps: the whole list is bound to `this`.
+            if (!rules.empty()) {
+                auto list_value = repeatedFieldValue(message, field);
+                if (list_value && evaluateRules(rules, *list_value, field_path)) {
+                    return;
+                }
+            }
             int count = reflection->FieldSize(message, field);
             for (int index = 0; index < count; ++index) {
                 std::string element_path =
                     field_path + "[" + std::to_string(index) + "]";
-                auto value = fieldValue(message, field, index);
-                if (value && evaluateRules(rules, *value, element_path)) {
-                    return;
-                }
                 if (field->cpp_type() ==
                     google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
                     walkMessage(

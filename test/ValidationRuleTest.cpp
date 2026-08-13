@@ -19,6 +19,7 @@
 #include "schemaregistry/rest/model/RuleSet.h"
 #include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/rules/cel/CelExecutor.h"
+#include "schemaregistry/rules/cel/CelFieldExecutor.h"
 #include "schemaregistry/rules/cel/CelValidator.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
 #include "schemaregistry/serdes/SerdeConfig.h"
@@ -39,6 +40,7 @@
 #endif
 
 #ifdef SCHEMAREGISTRY_USE_PROTOBUF
+#include "schemaregistry/serdes/protobuf/ProtobufDeserializer.h"
 #include "schemaregistry/serdes/protobuf/ProtobufSerializer.h"
 #include "schemaregistry/serdes/protobuf/ProtobufUtils.h"
 #include "test/validation.pb.h"
@@ -732,6 +734,59 @@ std::vector<ValidationRuleError> validateProto(
 
 }  // namespace
 
+// A field transform - the walk that drives CSFLE - has to descend into a nested message
+// with that message's own descriptor. Walking it against the containing descriptor applies
+// the parent's fields to the child, which the protobuf reflection API rejects with a fatal
+// error rather than an exception.
+TEST(ValidationRuleTest, ProtobufFieldTransformDescendsIntoNestedMessages) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
+
+    std::unordered_map<std::string, std::string> rule_config;
+    auto ser_conf = SerializerConfig(
+        false, std::make_optional(SchemaSelector::useLatestVersion()), false,
+        false, rule_config);
+
+    test::ValidationOrder obj = protoOrder("ord-1234", 2, {"a", "b"}, "12345");
+
+    Rule rule;
+    rule.setName("test-cel");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setType("CEL_FIELD");
+    rule.setExpr("typeName == 'STRING' ; value + '-suffix'");
+    RuleSet rule_set;
+    rule_set.setDomainRules(std::vector<Rule>{rule});
+
+    Schema schema;
+    schema.setSchemaType("PROTOBUF");
+    schema.setRuleSet(rule_set);
+    schema.setSchema(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file()));
+    client->registerSchema("test-value", schema, false);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerExecutor(
+        std::make_shared<schemaregistry::rules::cel::CelFieldExecutor>());
+
+    schemaregistry::serdes::protobuf::ProtobufSerializer<test::ValidationOrder>
+        ser(client, std::nullopt, rule_registry, ser_conf);
+    auto ctx = valueContext(SerdeFormat::Protobuf);
+    auto bytes = ser.serialize(ctx, obj);
+
+    // The rule is write-only, so deserializing shows what was written.
+    schemaregistry::serdes::protobuf::ProtobufDeserializer<test::ValidationOrder>
+        deser(client, rule_registry, DeserializerConfig::createDefault());
+    auto result = deser.deserialize(ctx, bytes);
+    const auto *order = dynamic_cast<const test::ValidationOrder *>(result.get());
+    ASSERT_NE(order, nullptr);
+    EXPECT_EQ(order->id(), "ord-1234-suffix");
+    // The nested message's string field is only reached by descending with the
+    // nested descriptor.
+    EXPECT_EQ(order->address().zip(), "12345-suffix");
+}
+
 TEST(ValidationRuleTest, ProtobufMetaIsReadableFromGeneratedDescriptors) {
     // Everything the protobuf walker does depends on this, and so does field
     // encryption, which reads its tags from the same options. If the meta cannot be
@@ -770,9 +825,10 @@ TEST(ValidationRuleTest, ProtobufCollectsEveryViolation) {
     EXPECT_EQ(violations[2].message, "id is too short");
     EXPECT_EQ(violations[3].rule.name, "positive_quantity");
     EXPECT_EQ(violations[3].field_path, "quantity");
-    // Repeated fields are validated element by element.
+    // A repeated field's own rules see the whole list, so the violation is reported
+    // against the field rather than an element.
     EXPECT_EQ(violations[4].rule.name, "item_not_empty");
-    EXPECT_EQ(violations[4].field_path, "items[1]");
+    EXPECT_EQ(violations[4].field_path, "items");
     EXPECT_EQ(violations[5].rule.name, "zip_digits");
     EXPECT_EQ(violations[5].field_path, "address.zip");
 }
@@ -786,8 +842,9 @@ TEST(ValidationRuleTest, ProtobufValidatesNestedMessagesAndMapValues) {
     ASSERT_EQ(violations.size(), 2);
     EXPECT_EQ(violations[0].rule.name, "zip_digits");
     EXPECT_EQ(violations[0].field_path, "address.zip");
+    // As for a repeated field, a map field's own rules see the whole map.
     EXPECT_EQ(violations[1].rule.name, "score_not_negative");
-    EXPECT_EQ(violations[1].field_path, "scores[\"bad\"]");
+    EXPECT_EQ(violations[1].field_path, "scores");
 }
 
 TEST(ValidationRuleTest, ProtobufFailFastStopsAtFirstViolation) {
@@ -911,3 +968,35 @@ TEST(ValidationRuleTest, MessageLevelRulesSeeUnsignedFieldsAndMaps) {
 }
 
 #endif  // SCHEMAREGISTRY_USE_PROTOBUF
+
+// A field-level rule on a repeated or map field is evaluated once, with the whole
+// collection bound to `this` - matching the JVM client - rather than once per element.
+// A rule about the elements is therefore written as a comprehension over them.
+TEST(ValidationRuleTest, ProtobufCollectionRulesSeeTheWholeCollection) {
+    auto order = protoOrder("ord-1234", 2, {"a", "b"}, "12345");
+    (*order.mutable_scores())["ok"] = 1;
+    // size(this) is only answerable if the whole list is bound.
+    EXPECT_TRUE(validateProto(order).empty());
+
+    // One empty element fails the comprehension, and the violation is reported against
+    // the field, once.
+    auto with_empty = protoOrder("ord-1234", 2, {"a", ""}, "12345");
+    auto violations = validateProto(with_empty);
+    ASSERT_EQ(violations.size(), 1);
+    EXPECT_EQ(violations[0].rule.name, "item_not_empty");
+    EXPECT_EQ(violations[0].field_path, "items");
+    EXPECT_TRUE(violations[0].cause.empty());
+
+    // An empty map is bound as an empty map, not skipped and not an error.
+    auto no_scores = protoOrder("ord-1234", 2, {"a", "b"}, "12345");
+    EXPECT_TRUE(validateProto(no_scores).empty());
+
+    // A negative entry fails the comprehension over the map's keys.
+    auto negative = protoOrder("ord-1234", 2, {"a", "b"}, "12345");
+    (*negative.mutable_scores())["bad"] = -1;
+    auto map_violations = validateProto(negative);
+    ASSERT_EQ(map_violations.size(), 1);
+    EXPECT_EQ(map_violations[0].rule.name, "score_not_negative");
+    EXPECT_EQ(map_violations[0].field_path, "scores");
+    EXPECT_TRUE(map_violations[0].cause.empty());
+}

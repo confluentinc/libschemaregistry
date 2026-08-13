@@ -128,7 +128,9 @@ std::optional<confluent::Meta> getFieldMeta(
  *
  * Two kinds of rules are evaluated:
  *   - Message-level (rules on confluent.message_meta) — `this` is the message.
- *   - Field-level (rules on confluent.field_meta) — `this` is the field value.
+ *   - Field-level (rules on confluent.field_meta) — `this` is the field value. A
+ *     repeated or map field binds the whole collection, once, so a rule about the
+ *     elements is written as a comprehension over them.
  *     Honors the skip-on-null contract: a field with explicit presence that is
  *     unset does not have its rules invoked.
  *

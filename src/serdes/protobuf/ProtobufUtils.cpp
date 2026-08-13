@@ -232,7 +232,17 @@ std::optional<ProtobufVariant> transformFieldWithContext(
 
     try {
         ProtobufVariant value = getMessageFieldValue(message, fd);
-        ProtobufVariant new_value = transformRecursive(ctx, desc, value);
+        // Descend with the field's own message type. Walking a nested message
+        // against the containing descriptor applies the parent's fields to the
+        // child, which the reflection API rejects outright. A map field arrives as
+        // a list of entry messages, so its message type - the entry type - is the
+        // right descriptor for those too.
+        const google::protobuf::Descriptor* child_desc = desc;
+        if (fd->type() == google::protobuf::FieldDescriptor::TYPE_MESSAGE ||
+            fd->type() == google::protobuf::FieldDescriptor::TYPE_GROUP) {
+            child_desc = fd->message_type();
+        }
+        ProtobufVariant new_value = transformRecursive(ctx, child_desc, value);
 
         // Check for condition rules
         auto rule_kind = ctx.getRule().getKind();
