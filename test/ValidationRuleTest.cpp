@@ -1000,3 +1000,112 @@ TEST(ValidationRuleTest, ProtobufCollectionRulesSeeTheWholeCollection) {
     EXPECT_EQ(map_violations[0].field_path, "scores");
     EXPECT_TRUE(map_violations[0].cause.empty());
 }
+
+// A field with explicit presence that is unset has nothing to transform, and writing a
+// value back would materialize it: an absent message would become present, carrying a
+// transformed default.
+TEST(ValidationRuleTest, ProtobufFieldTransformLeavesAbsentFieldsAbsent) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
+
+    std::unordered_map<std::string, std::string> rule_config;
+    auto ser_conf = SerializerConfig(
+        false, std::make_optional(SchemaSelector::useLatestVersion()), false,
+        false, rule_config);
+
+    // address is absent.
+    test::ValidationOrder obj;
+    obj.set_id("ord-1234");
+    obj.set_quantity(2);
+    obj.add_items("a");
+    obj.set_serial(1);
+
+    Rule rule;
+    rule.setName("test-cel");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setType("CEL_FIELD");
+    rule.setExpr("typeName == 'STRING' ; value + '-suffix'");
+    RuleSet rule_set;
+    rule_set.setDomainRules(std::vector<Rule>{rule});
+
+    Schema schema;
+    schema.setSchemaType("PROTOBUF");
+    schema.setRuleSet(rule_set);
+    schema.setSchema(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file()));
+    client->registerSchema("test-value", schema, false);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerExecutor(
+        std::make_shared<schemaregistry::rules::cel::CelFieldExecutor>());
+
+    schemaregistry::serdes::protobuf::ProtobufSerializer<test::ValidationOrder>
+        ser(client, std::nullopt, rule_registry, ser_conf);
+    auto ctx = valueContext(SerdeFormat::Protobuf);
+    auto bytes = ser.serialize(ctx, obj);
+
+    schemaregistry::serdes::protobuf::ProtobufDeserializer<test::ValidationOrder>
+        deser(client, rule_registry, DeserializerConfig::createDefault());
+    auto result = deser.deserialize(ctx, bytes);
+    const auto *order = dynamic_cast<const test::ValidationOrder *>(result.get());
+    ASSERT_NE(order, nullptr);
+    EXPECT_FALSE(order->has_address()) << "the absent message was materialized";
+    // The fields that are present are still transformed.
+    EXPECT_EQ(order->id(), "ord-1234-suffix");
+}
+
+// A map field arrives as a list of entry messages, so the transform walk reaches the
+// entry's key as well as its value. A key is part of the map's identity rather than a
+// value to transform - rewriting it moves the entry - and the validation walk never
+// evaluates anything on a key either.
+TEST(ValidationRuleTest, ProtobufFieldTransformLeavesMapKeysAlone) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
+
+    std::unordered_map<std::string, std::string> rule_config;
+    auto ser_conf = SerializerConfig(
+        false, std::make_optional(SchemaSelector::useLatestVersion()), false,
+        false, rule_config);
+
+    test::ValidationOrder obj = protoOrder("ord-1234", 2, {"a"}, "12345");
+    (*obj.mutable_scores())["k1"] = 1;
+
+    Rule rule;
+    rule.setName("test-cel");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setType("CEL_FIELD");
+    rule.setExpr("typeName == 'STRING' ; value + '-suffix'");
+    RuleSet rule_set;
+    rule_set.setDomainRules(std::vector<Rule>{rule});
+
+    Schema schema;
+    schema.setSchemaType("PROTOBUF");
+    schema.setRuleSet(rule_set);
+    schema.setSchema(
+        protobuf::utils::schemaToString(obj.GetDescriptor()->file()));
+    client->registerSchema("test-value", schema, false);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerExecutor(
+        std::make_shared<schemaregistry::rules::cel::CelFieldExecutor>());
+
+    schemaregistry::serdes::protobuf::ProtobufSerializer<test::ValidationOrder>
+        ser(client, std::nullopt, rule_registry, ser_conf);
+    auto ctx = valueContext(SerdeFormat::Protobuf);
+    auto bytes = ser.serialize(ctx, obj);
+
+    schemaregistry::serdes::protobuf::ProtobufDeserializer<test::ValidationOrder>
+        deser(client, rule_registry, DeserializerConfig::createDefault());
+    auto result = deser.deserialize(ctx, bytes);
+    const auto *order = dynamic_cast<const test::ValidationOrder *>(result.get());
+    ASSERT_NE(order, nullptr);
+    ASSERT_EQ(order->scores().size(), 1);
+    EXPECT_EQ(order->scores().begin()->first, "k1")
+        << "the map key was rewritten by the transform";
+    // The string fields that are values are still transformed.
+    EXPECT_EQ(order->id(), "ord-1234-suffix");
+}

@@ -129,6 +129,14 @@ ProtobufVariant transformRecursive(
             for (int i = 0; i < descriptor->field_count(); ++i) {
                 const google::protobuf::FieldDescriptor* fd =
                     descriptor->field(i);
+                if (fd == descriptor->map_key()) {
+                    // A map field arrives as a list of entry messages, so the walk
+                    // reaches the entry's key as well as its value. A key is part of
+                    // the map's identity rather than a value to transform - rewriting
+                    // it would move the entry - and the validation walk never
+                    // evaluates anything on it either.
+                    continue;
+                }
                 auto field = transformFieldWithContext(ctx, fd, descriptor,
                                                        result.get());
                 if (field.has_value()) {
@@ -223,9 +231,12 @@ std::optional<ProtobufVariant> transformFieldWithContext(
     ctx.enterField(*temp_serde_value, fd->full_name(), fd->name(),
                    getFieldType(fd), getInlineTags(fd));
 
-    if (fd->containing_oneof() &&
+    // Skip-on-null, as in the validation walk: a field with explicit presence that is
+    // unset has no value to transform, and writing one back would materialize it -
+    // turning an absent message or unset optional scalar into a present one carrying a
+    // transformed default. has_presence covers oneof members too.
+    if (fd->has_presence() &&
         !message->GetReflection()->HasField(*message, fd)) {
-        // Skip oneof fields that are not set
         ctx.exitField();
         return std::nullopt;
     }
