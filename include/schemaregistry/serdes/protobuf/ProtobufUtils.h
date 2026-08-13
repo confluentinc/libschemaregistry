@@ -16,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#include "confluent/meta.pb.h"
 #include "schemaregistry/rest/ISchemaRegistryClient.h"
 #include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/serdes/Serde.h"
@@ -102,6 +103,22 @@ FieldType getFieldType(const google::protobuf::FieldDescriptor *field_desc);
  * Extract inline tags from field options (confluent.field_meta)
  */
 std::unordered_set<std::string> getInlineTags(
+    const google::protobuf::FieldDescriptor *field_desc);
+
+/**
+ * The confluent.Meta carried by a message's or field's options, or nullopt if there
+ * is none.
+ *
+ * Reads the resolved extension when the pool that built the descriptor knew about
+ * confluent/meta.proto, and otherwise recovers it from the options' unknown fields:
+ * an options extension is only resolved if the extension was registered when the
+ * descriptor was built, which is not guaranteed for a descriptor from a pool built
+ * at runtime or for one registered by a different copy of the protobuf runtime.
+ * Falling back keeps rules and tags from silently disappearing in those setups.
+ */
+std::optional<confluent::Meta> getMessageMeta(
+    const google::protobuf::Descriptor *message_desc);
+std::optional<confluent::Meta> getFieldMeta(
     const google::protobuf::FieldDescriptor *field_desc);
 
 /**

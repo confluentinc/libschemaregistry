@@ -698,22 +698,63 @@ void setMessageField(google::protobuf::Message* message,
     }
 }
 
+namespace {
+
+// confluent.Meta is installed on every options message as extension field 1088.
+constexpr int kMetaExtensionNumber = 1088;
+
+// Recovers a Meta that the descriptor's pool left unresolved, by parsing it out of the
+// options' unknown fields.
+std::optional<confluent::Meta> parseMetaFromUnknownFields(
+    const google::protobuf::UnknownFieldSet& unknown) {
+    for (int i = 0; i < unknown.field_count(); ++i) {
+        const auto& field = unknown.field(i);
+        if (field.number() != kMetaExtensionNumber ||
+            field.type() !=
+                google::protobuf::UnknownField::TYPE_LENGTH_DELIMITED) {
+            continue;
+        }
+        confluent::Meta meta;
+        if (meta.ParseFromString(field.length_delimited())) {
+            return meta;
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+std::optional<confluent::Meta> getMessageMeta(
+    const google::protobuf::Descriptor* message_desc) {
+    if (!message_desc) {
+        return std::nullopt;
+    }
+    const google::protobuf::MessageOptions& options = message_desc->options();
+    if (options.HasExtension(confluent::message_meta)) {
+        return options.GetExtension(confluent::message_meta);
+    }
+    return parseMetaFromUnknownFields(options.unknown_fields());
+}
+
+std::optional<confluent::Meta> getFieldMeta(
+    const google::protobuf::FieldDescriptor* field_desc) {
+    if (!field_desc) {
+        return std::nullopt;
+    }
+    const google::protobuf::FieldOptions& options = field_desc->options();
+    if (options.HasExtension(confluent::field_meta)) {
+        return options.GetExtension(confluent::field_meta);
+    }
+    return parseMetaFromUnknownFields(options.unknown_fields());
+}
+
 std::unordered_set<std::string> getInlineTags(
     const google::protobuf::FieldDescriptor* field_desc) {
     std::unordered_set<std::string> tag_set;
 
-    if (!field_desc) {
-        return tag_set;
-    }
-
-    // Try to get the confluent.field_meta extension from the field options
-    const google::protobuf::FieldOptions& options = field_desc->options();
-
-    if (options.HasExtension(confluent::field_meta)) {
-        auto ext = options.GetExtension(confluent::field_meta);
-        const auto& tags =
-            ext.tags();  // Call tags() method to get RepeatedPtrField
-        for (const auto& tag : tags) {
+    auto meta = getFieldMeta(field_desc);
+    if (meta.has_value()) {
+        for (const auto& tag : meta->tags()) {
             tag_set.insert(tag);
         }
     }

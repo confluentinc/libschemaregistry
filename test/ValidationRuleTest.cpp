@@ -732,6 +732,25 @@ std::vector<ValidationRuleError> validateProto(
 
 }  // namespace
 
+TEST(ValidationRuleTest, ProtobufMetaIsReadableFromGeneratedDescriptors) {
+    // Everything the protobuf walker does depends on this, and so does field
+    // encryption, which reads its tags from the same options. If the meta cannot be
+    // read then no rule ever fires and no field is ever encrypted, both silently, so
+    // assert it directly rather than only through a rule's outcome.
+    const auto *desc = test::ValidationOrder::descriptor();
+    auto message_meta = schemaregistry::serdes::protobuf::utils::getMessageMeta(desc);
+    ASSERT_TRUE(message_meta.has_value());
+    ASSERT_EQ(message_meta->rules_size(), 1);
+    EXPECT_EQ(message_meta->rules(0).name(), "quantity_matches_items");
+
+    const auto *field = desc->FindFieldByName("id");
+    ASSERT_NE(field, nullptr);
+    auto field_meta = schemaregistry::serdes::protobuf::utils::getFieldMeta(field);
+    ASSERT_TRUE(field_meta.has_value());
+    ASSERT_EQ(field_meta->rules_size(), 2);
+    EXPECT_EQ(field_meta->rules(0).name(), "id_prefix");
+}
+
 TEST(ValidationRuleTest, ProtobufValidMessageHasNoViolations) {
     EXPECT_TRUE(
         validateProto(protoOrder("ord-1234", 2, {"a", "b"}, "12345")).empty());

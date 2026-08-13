@@ -166,10 +166,9 @@ void Walker::walkMessage(const google::protobuf::Message &message,
     }
 
     // Message-level rules: `this` is the message itself.
-    const auto &message_options = descriptor->options();
-    if (message_options.HasExtension(confluent::message_meta)) {
-        auto rules = toValidationRules(
-            message_options.GetExtension(confluent::message_meta));
+    auto message_meta = getMessageMeta(descriptor);
+    if (message_meta.has_value()) {
+        auto rules = toValidationRules(*message_meta);
         if (!rules.empty()) {
             auto copy =
                 std::unique_ptr<google::protobuf::Message>(message.New());
@@ -184,10 +183,9 @@ void Walker::walkMessage(const google::protobuf::Message &message,
     for (int i = 0; i < descriptor->field_count(); ++i) {
         const auto *field = descriptor->field(i);
         std::vector<ValidationRule> rules;
-        const auto &field_options = field->options();
-        if (field_options.HasExtension(confluent::field_meta)) {
-            rules = toValidationRules(
-                field_options.GetExtension(confluent::field_meta));
+        auto field_meta = getFieldMeta(field);
+        if (field_meta.has_value()) {
+            rules = toValidationRules(*field_meta);
         }
         std::string field_path = appendValidationPath(path, field->name());
 
