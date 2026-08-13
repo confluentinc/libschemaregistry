@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
-
 #include "schemaregistry/serdes/SerdeError.h"
 #include "schemaregistry/serdes/SerdeTypes.h"
+#include "schemaregistry/serdes/ValidationRule.h"
 
 namespace schemaregistry::serdes {
 
@@ -27,6 +27,7 @@ class RuleRegistry {
         rule_executors_;
     absl::flat_hash_map<std::string, std::shared_ptr<RuleAction>> rule_actions_;
     absl::flat_hash_map<std::string, RuleOverride> rule_overrides_;
+    std::shared_ptr<ValidationRuleExecutor> validation_executor_;
     mutable std::shared_mutex mutex_;
 
   public:
@@ -37,6 +38,12 @@ class RuleRegistry {
     void registerExecutor(std::shared_ptr<RuleExecutor> executor);
     std::shared_ptr<RuleExecutor> getExecutor(const std::string &type) const;
     std::vector<std::shared_ptr<RuleExecutor>> getExecutors() const;
+
+    // Validation rule executor management. Unlike rule executors there is a
+    // single validation executor, so registering replaces any previous one.
+    void registerValidationExecutor(
+        std::shared_ptr<ValidationRuleExecutor> executor);
+    std::shared_ptr<ValidationRuleExecutor> getValidationExecutor() const;
 
     // Rule action management
     void registerAction(std::shared_ptr<RuleAction> action);
@@ -82,6 +89,19 @@ std::shared_ptr<RuleExecutor> getRuleExecutor(const std::string &type);
  * Get all rule executors from global registry
  */
 std::vector<std::shared_ptr<RuleExecutor>> getRuleExecutors();
+
+/**
+ * Register the validation rule executor globally. There is a single validation
+ * executor, so this replaces any previously registered one.
+ */
+void registerValidationRuleExecutor(
+    std::shared_ptr<ValidationRuleExecutor> executor);
+
+/**
+ * Get the validation rule executor from the global registry, or nullptr when
+ * none has been registered
+ */
+std::shared_ptr<ValidationRuleExecutor> getValidationRuleExecutor();
 
 /**
  * Register a rule action globally
