@@ -16,11 +16,13 @@
 #include <variant>
 #include <vector>
 
+#include "confluent/meta.pb.h"
 #include "schemaregistry/rest/ISchemaRegistryClient.h"
 #include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/serdes/Serde.h"
 #include "schemaregistry/serdes/SerdeError.h"
 #include "schemaregistry/serdes/SerdeTypes.h"
+#include "schemaregistry/serdes/ValidationRule.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 
 namespace schemaregistry::serdes::protobuf::utils {
@@ -102,6 +104,46 @@ FieldType getFieldType(const google::protobuf::FieldDescriptor *field_desc);
  */
 std::unordered_set<std::string> getInlineTags(
     const google::protobuf::FieldDescriptor *field_desc);
+
+/**
+ * The confluent.Meta carried by a message's or field's options, or nullopt if there
+ * is none.
+ *
+ * Reads the resolved extension when the pool that built the descriptor knew about
+ * confluent/meta.proto, and otherwise recovers it from the options' unknown fields:
+ * an options extension is only resolved if the extension was registered when the
+ * descriptor was built, which is not guaranteed for a descriptor from a pool built
+ * at runtime or for one registered by a different copy of the protobuf runtime.
+ * Falling back keeps rules and tags from silently disappearing in those setups.
+ */
+std::optional<confluent::Meta> getMessageMeta(
+    const google::protobuf::Descriptor *message_desc);
+std::optional<confluent::Meta> getFieldMeta(
+    const google::protobuf::FieldDescriptor *field_desc);
+
+/**
+ * Walk message against its descriptor, evaluating every inline validation rule
+ * (confluent.Meta rules) encountered and collecting all failures. Read-only —
+ * the message is not modified.
+ *
+ * Two kinds of rules are evaluated:
+ *   - Message-level (rules on confluent.message_meta) — `this` is the message.
+ *   - Field-level (rules on confluent.field_meta) — `this` is the field value.
+ *     Honors the skip-on-null contract: a field with explicit presence that is
+ *     unset does not have its rules invoked.
+ *
+ * Failures carry their dotted-path location (e.g. addr.zip, tags[3],
+ * scores["foo"]). The walk continues after each failure so callers see the full
+ * set rather than only the first, unless fail_fast is set.
+ *
+ * @param executor Executor used to evaluate each rule
+ * @param message Protobuf message to validate
+ * @param fail_fast Stop at the first violation
+ * @return Every violation found, in walk order
+ */
+std::vector<ValidationRuleError> validateMessage(
+    ValidationRuleExecutor &executor, const google::protobuf::Message &message,
+    bool fail_fast);
 
 /**
  * Protobuf Message to JSON conversion

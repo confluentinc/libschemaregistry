@@ -153,6 +153,15 @@ CelExecutor::Impl::executeRule(
     const absl::flat_hash_map<std::string, google::api::expr::runtime::CelValue>
         &args,
     google::protobuf::Arena *arena) {
+    return evaluate(expr, args, arena);
+}
+
+std::unique_ptr<google::api::expr::runtime::CelValue>
+CelExecutor::Impl::evaluate(
+    const std::string &expr,
+    const absl::flat_hash_map<std::string, google::api::expr::runtime::CelValue>
+        &args,
+    google::protobuf::Arena *arena) {
     // Get or compile the expression (with caching)
     auto parsed_expr_status = getOrCompileExpression(expr);
     if (!parsed_expr_status.ok()) {
