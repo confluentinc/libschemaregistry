@@ -61,6 +61,7 @@ CelExecutor::Impl::newRuleBuilder(google::protobuf::Arena *arena) {
     google::api::expr::runtime::InterpreterOptions options;
     options.enable_qualified_type_identifiers = true;
     options.enable_timestamp_duration_overflow_errors = true;
+    options.enable_heterogeneous_equality = true;
     options.enable_empty_wrapper_null_unboxing = true;
     options.enable_regex_precompilation = true;
     options.constant_folding = true;
@@ -150,6 +151,15 @@ std::unique_ptr<SerdeValue> CelExecutor::Impl::execute(
 std::unique_ptr<google::api::expr::runtime::CelValue>
 CelExecutor::Impl::executeRule(
     RuleContext &ctx, const SerdeValue &msg, const std::string &expr,
+    const absl::flat_hash_map<std::string, google::api::expr::runtime::CelValue>
+        &args,
+    google::protobuf::Arena *arena) {
+    return evaluate(expr, args, arena);
+}
+
+std::unique_ptr<google::api::expr::runtime::CelValue>
+CelExecutor::Impl::evaluate(
+    const std::string &expr,
     const absl::flat_hash_map<std::string, google::api::expr::runtime::CelValue>
         &args,
     google::protobuf::Arena *arena) {
