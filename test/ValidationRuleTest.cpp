@@ -1437,3 +1437,82 @@ TEST(ValidationRuleTest, ProtobufHasFollowsProtobufPresence) {
         << "has() reported a written field as unset";
 }
 #endif
+
+#ifdef SCHEMAREGISTRY_USE_JSON
+namespace {
+
+/// A oneOf whose live branch carries a rule, and a sibling reference in that branch
+/// pointing at `pointer`. Matching the branch means compiling it, and a "#/..." reference
+/// resolves against the document root - so the root has to travel with the branch.
+std::string branchSchemaWithRefTo(const std::string &pointer) {
+    return R"schema({
+        "$defs": {"Shared": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "marker": {"type": "string"},
+            "payload": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "other": {"$ref": ")schema" +
+           pointer + R"schema("},
+                            "code": {
+                                "type": "string",
+                                "confluent:rules": [
+                                    {"name": "codeNotEmpty", "expr": "size(this) > 0"}
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    })schema";
+}
+
+std::vector<ValidationRuleError> validateAgainstBranchSchema(
+    const std::string &pointer) {
+    auto client = newMockClient();
+    Schema schema;
+    schema.setSchemaType("JSON");
+    schema.setSchema(std::make_optional(branchSchemaWithRefTo(pointer)));
+    client->registerSchema("test-value", schema, false);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerValidationExecutor(std::make_shared<CelValidator>());
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    ser_config.validation_rules_execution =
+        ValidationRulesExecution::AfterDomainRules;
+    schemaregistry::serdes::json::JsonSerializer ser(
+        client, std::nullopt, rule_registry, ser_config);
+    auto ctx = valueContext(SerdeFormat::Json);
+
+    nlohmann::json value = {{"marker", "m"}, {"payload", {{"code", ""}}}};
+    try {
+        ser.serialize(ctx, value);
+        return {};
+    } catch (const ValidationRulesFailedError &e) {
+        return e.getViolations();
+    }
+}
+
+}  // namespace
+
+// A reference into $defs was already reachable, because the definition buckets were copied
+// onto the branch. Kept as the control for the case below.
+TEST(ValidationRuleTest, JsonBranchResolvesRefIntoDefs) {
+    auto violations = validateAgainstBranchSchema("#/$defs/Shared");
+    EXPECT_NE(findViolation(violations, "codeNotEmpty"), nullptr);
+}
+
+// A reference anywhere else in the document used to leave the branch uncompilable, so no
+// branch matched and every rule inside the one the value follows was silently skipped.
+TEST(ValidationRuleTest, JsonBranchResolvesRefOutsideDefs) {
+    auto violations = validateAgainstBranchSchema("#/properties/marker");
+    EXPECT_NE(findViolation(violations, "codeNotEmpty"), nullptr)
+        << "the branch was not matched, so its rules never ran";
+}
+#endif

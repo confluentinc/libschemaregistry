@@ -1,4 +1,6 @@
 #include <nlohmann/json.hpp>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,11 @@ struct Walker {
     bool fail_fast;
     std::vector<ValidationRuleError> &violations;
     const nlohmann::json &root;
+    /// Compiled branch matchers, keyed by the branch's serialized form.
+    mutable std::map<
+        std::string,
+        std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>>
+        matcher_cache;
 
     bool done() const { return fail_fast && !violations.empty(); }
 
@@ -76,41 +83,110 @@ struct Walker {
     }
 
     /**
-     * Whether the instance satisfies the subschema, used to pick the live
-     * branch of a
-     * oneOf/anyOf. Branches routinely share a JSON type and differ by const,
-     * required,
-     * ranges and so on, so the instance is validated against the whole
-     * subschema; a
-     * cheaper type comparison would evaluate rules from branches the value does
-     * not
-     * follow and reject valid messages.
-     *
-     * The root's definitions travel with the subschema, since references are
-     * flattened
-     * into them and a branch may point at one.
+     * The key the root document travels under inside a standalone branch document.
+     * Chosen to be one no schema would use.
      */
-    bool subschemaMatches(const nlohmann::json &subschema,
-                          const nlohmann::json &value) const {
-        try {
-            nlohmann::json standalone = subschema;
-            for (const char *defs : {"definitions", "$defs"}) {
-                auto it = root.find(defs);
-                if (it != root.end() && !standalone.contains(defs)) {
-                    standalone[defs] = *it;
+    static constexpr const char *kRootKey = "__confluent_root__";
+
+    /**
+     * Repoints every same-document reference at the copy of the root carried under
+     * kRootKey.
+     *
+     * A "#/..." reference is resolved against the document root, so a branch lifted out
+     * of its schema cannot follow one - "#/properties/shared" would be looked up in the
+     * branch. Rewriting them, in the branch and in the carried root alike, keeps every
+     * such reference pointing at the same node it named in the original document.
+     *
+     * References that name another document, or use $anchor or $dynamicRef, are left
+     * alone; they resolve the same way in either document.
+     */
+    static void repointFragmentRefs(nlohmann::json &node) {
+        if (node.is_object()) {
+            for (auto &[key, child] : node.items()) {
+                if (key == "$ref" && child.is_string()) {
+                    const std::string ref = child.get<std::string>();
+                    if (ref == "#") {
+                        child = std::string("#/") + kRootKey;
+                    } else if (ref.rfind("#/", 0) == 0) {
+                        child = std::string("#/") + kRootKey + "/" + ref.substr(2);
+                    }
+                    continue;
                 }
+                repointFragmentRefs(child);
             }
-            auto compiled = jsoncons::jsonschema::make_json_schema(
-                utils::jsonToOJson(standalone));
-            return compiled.is_valid(utils::jsonToOJson(value));
-        } catch (const std::exception &) {
-            // An uncompilable branch cannot be the one the value follows.
-            return false;
+        } else if (node.is_array()) {
+            for (auto &element : node) {
+                repointFragmentRefs(element);
+            }
         }
     }
 
     /**
-     * Unused legacy helper kept out of the walk; see subschemaMatches.
+     * A compiled schema that matches the subschema alone, with the root document still
+     * reachable so that references resolve, or null when it cannot be compiled.
+     *
+     * Compiling is far more expensive than validating, and the same branch is matched
+     * once per value the walk reaches, so the result is kept for the walk's lifetime.
+     */
+    std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>> matcherFor(
+        const nlohmann::json &subschema) const {
+        const std::string key = subschema.dump();
+        auto cached = matcher_cache.find(key);
+        if (cached != matcher_cache.end()) {
+            return cached->second;
+        }
+
+        std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>
+            compiled;
+        try {
+            nlohmann::json standalone = subschema;
+            repointFragmentRefs(standalone);
+            standalone[kRootKey] = root;
+            repointFragmentRefs(standalone[kRootKey]);
+            // The dialect belongs to the document, not to the branch, and decides how
+            // the branch's own keywords are read.
+            auto schema_it = root.find("$schema");
+            if (schema_it != root.end() && !standalone.contains("$schema")) {
+                standalone["$schema"] = *schema_it;
+            }
+            compiled = std::make_shared<
+                jsoncons::jsonschema::json_schema<jsoncons::ojson>>(
+                jsoncons::jsonschema::make_json_schema(
+                    utils::jsonToOJson(standalone)));
+        } catch (const std::exception &) {
+            compiled = nullptr;
+        }
+        matcher_cache.emplace(key, compiled);
+        return compiled;
+    }
+
+    /**
+     * Whether the instance satisfies the subschema, used to pick the live branch of a
+     * oneOf/anyOf. Branches routinely share a JSON type and differ by const, required,
+     * ranges and so on, so the instance is validated against the whole subschema; a
+     * cheaper type comparison would evaluate rules from branches the value does not
+     * follow and reject valid messages.
+     *
+     * A branch that cannot be compiled falls back to comparing types rather than
+     * reporting no match: reporting no match would skip every rule in the branch the
+     * value actually follows, and skip it silently.
+     */
+    bool subschemaMatches(const nlohmann::json &subschema,
+                          const nlohmann::json &value) const {
+        auto compiled = matcherFor(subschema);
+        if (compiled == nullptr) {
+            return typeMatches(subschema, value);
+        }
+        try {
+            return compiled->is_valid(utils::jsonToOJson(value));
+        } catch (const std::exception &) {
+            return typeMatches(subschema, value);
+        }
+    }
+
+    /**
+     * A structural comparison of a schema's declared type against the instance. Used
+     * only when a branch cannot be compiled; see subschemaMatches.
      */
     static bool typeMatches(const nlohmann::json &schema,
                             const nlohmann::json &value) {
