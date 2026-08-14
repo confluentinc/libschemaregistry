@@ -1085,8 +1085,6 @@ TEST(ValidationRuleTest, ProtobufMessageRuleSeesAFieldOnlyTheSchemaDeclares) {
     EXPECT_TRUE(violations.empty()) << violations.size() << " violations";
 }
 
-#endif  // SCHEMAREGISTRY_USE_PROTOBUF
-
 // A field-level rule on a repeated or map field is evaluated once, with the whole
 // collection bound to `this` - matching the JVM client - rather than once per element.
 // A rule about the elements is therefore written as a comprehension over them.
@@ -1227,6 +1225,8 @@ TEST(ValidationRuleTest, ProtobufFieldTransformLeavesMapKeysAlone) {
     // The string fields that are values are still transformed.
     EXPECT_EQ(order->id(), "ord-1234-suffix");
 }
+
+#endif  // SCHEMAREGISTRY_USE_PROTOBUF
 
 #ifdef SCHEMAREGISTRY_USE_JSON
 namespace {
