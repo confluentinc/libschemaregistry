@@ -1299,3 +1299,105 @@ TEST(ValidationRuleTest, JsonSchemaCacheSeparatesSchemasByTheirReferences) {
               flattened_a);
 }
 #endif
+
+#ifdef SCHEMAREGISTRY_USE_JSON
+namespace {
+
+std::shared_ptr<ISchemaRegistryClient> clientWithJsonFieldRule(
+    const std::string &expr, const std::string &schema_json) {
+    auto client = newMockClient();
+    Rule rule;
+    rule.setName("fieldRule");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setType("CEL_FIELD");
+    rule.setTags(std::vector<std::string>{"PII"});
+    rule.setExpr(expr);
+    RuleSet rule_set;
+    rule_set.setDomainRules(std::vector<Rule>{rule});
+
+    Schema schema;
+    schema.setSchemaType("JSON");
+    schema.setRuleSet(rule_set);
+    schema.setSchema(std::make_optional<std::string>(schema_json));
+    client->registerSchema("test-value", schema, false);
+    return client;
+}
+
+schemaregistry::serdes::json::JsonSerializer jsonSerializerFor(
+    std::shared_ptr<ISchemaRegistryClient> client) {
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerExecutor(
+        std::make_shared<schemaregistry::rules::cel::CelFieldExecutor>());
+    auto ser_config = SerializerConfig::createDefault();
+    ser_config.auto_register_schemas = false;
+    ser_config.use_schema = SchemaSelector::useLatestVersion();
+    return schemaregistry::serdes::json::JsonSerializer(
+        client, std::nullopt, rule_registry, ser_config);
+}
+
+}  // namespace
+
+// A field transform that fails must reach the caller. transformFields used to wrap the
+// per-field call, the pointer write and the whole walk in catch blocks with empty bodies,
+// so a failing rule left the field with its original value and the serializer reported
+// success - for a field-encryption rule, emitting the plaintext.
+TEST(ValidationRuleTest, JsonFieldTransformFailureIsNotSwallowed) {
+    auto client = clientWithJsonFieldRule("noSuchFunction(value)", R"schema({
+        "type": "object",
+        "properties": {"code": {"type": "string", "confluent:tags": ["PII"]}}
+    })schema");
+    auto ser = jsonSerializerFor(client);
+    auto ctx = valueContext(SerdeFormat::Json);
+
+    nlohmann::json value = {{"code", "secret"}};
+    EXPECT_THROW(ser.serialize(ctx, value), std::exception);
+}
+
+// A transform that succeeds still has to write its result back.
+TEST(ValidationRuleTest, JsonFieldTransformResultIsWrittenBack) {
+    auto client = clientWithJsonFieldRule("value + '-x'", R"schema({
+        "type": "object",
+        "properties": {"code": {"type": "string", "confluent:tags": ["PII"]}}
+    })schema");
+    auto ser = jsonSerializerFor(client);
+    auto ctx = valueContext(SerdeFormat::Json);
+
+    auto bytes = ser.serialize(ctx, nlohmann::json{{"code", "a"}});
+    std::string payload(bytes.begin() + 5, bytes.end());
+    EXPECT_NE(payload.find("a-x"), std::string::npos) << payload;
+}
+
+// getFieldType must not guess String for a schema that declares no usable type: a rule
+// keyed on the field's type would match the wrong fields, and an encryption rule would
+// treat a number or an object as text.
+TEST(ValidationRuleTest, JsonFieldTypeIsDerivedFromTheSchema) {
+    using schemaregistry::serdes::json::utils::schema_navigation::getFieldType;
+    auto typeOf = [](const char *json) {
+        return getFieldType(jsoncons::ojson::parse(json));
+    };
+
+    EXPECT_EQ(typeOf(R"({"type":"string"})"), FieldType::String);
+    EXPECT_EQ(typeOf(R"({"type":"integer"})"), FieldType::Int);
+    EXPECT_EQ(typeOf(R"({"type":"number"})"), FieldType::Double);
+    EXPECT_EQ(typeOf(R"({"type":"boolean"})"), FieldType::Boolean);
+    EXPECT_EQ(typeOf(R"({"type":"array"})"), FieldType::Array);
+    // An object with declared properties is a record; without them, an open map.
+    EXPECT_EQ(typeOf(R"({"type":"object","properties":{"a":{"type":"string"}}})"),
+              FieldType::Record);
+    EXPECT_EQ(typeOf(R"({"type":"object"})"), FieldType::Map);
+    // A nullable field is the type that is not null.
+    EXPECT_EQ(typeOf(R"({"type":["string","null"]})"), FieldType::String);
+    EXPECT_EQ(typeOf(R"({"type":["null","integer"]})"), FieldType::Int);
+    // Genuinely ambiguous, so no single type to act on.
+    EXPECT_EQ(typeOf(R"({"type":["string","integer"]})"), FieldType::Combined);
+    EXPECT_EQ(typeOf(R"({"anyOf":[{"type":"string"},{"type":"integer"}]})"),
+              FieldType::Combined);
+    EXPECT_EQ(typeOf(R"({"type":"string","enum":["a","b"]})"), FieldType::Enum);
+    // No type at all: a record if it declares properties, otherwise nothing to act on -
+    // and never String, which is what it used to return.
+    EXPECT_EQ(typeOf(R"({"properties":{"a":{"type":"string"}}})"), FieldType::Record);
+    EXPECT_EQ(typeOf(R"({"$ref":"#/$defs/Other"})"), FieldType::Null);
+    EXPECT_EQ(typeOf(R"({"type":"unrecognized"})"), FieldType::Null);
+}
+#endif
