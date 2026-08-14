@@ -624,6 +624,54 @@ TEST(ValidationRuleTest, JsonFailFastStopsAtFirstViolation) {
     EXPECT_EQ(validateJson(jsonOrder("x", 0, {"a"}, "abc"), true).size(), 1);
 }
 
+// A node carrying both "$ref" and "confluent:rules" declares rules of its own, and the
+// schema it names declares its own: both are charged, at the same location. Resolving the
+// reference before reading the rules dropped the referring node's, silently - the JVM
+// client fires wrapper and target alike, and so do the Go, Python, JS, Rust and .NET
+// clients.
+TEST(ValidationRuleTest, JsonRulesBesideARefAreEvaluatedAsWellAsTheTarget) {
+    const char *schema_str = R"schema({
+        "type": "object",
+        "$defs": {
+            "Inner": {
+                "type": "object",
+                "confluent:rules": [{"name": "target", "expr": "size(this.x) > 0"}],
+                "properties": {"x": {"type": "string"}}
+            }
+        },
+        "properties": {
+            "inner": {
+                "$ref": "#/$defs/Inner",
+                "confluent:rules": [
+                    {"name": "wrapper", "expr": "size(this.x) > 1"}
+                ]
+            }
+        }
+    })schema";
+
+    CelValidator validator;
+    auto validate = [&](const nlohmann::json &value) {
+        return schemaregistry::serdes::json::utils::validateMessage(
+            validator, nlohmann::json::parse(schema_str), value, false);
+    };
+
+    // Satisfies both rules.
+    EXPECT_TRUE(validate(nlohmann::json{{"inner", {{"x", "ab"}}}}).empty());
+
+    // Fails only the rule declared beside the "$ref": the target's rule is happy with one
+    // character, so a violation here can only have come from the referring node.
+    auto wrapper_only = validate(nlohmann::json{{"inner", {{"x", "a"}}}});
+    ASSERT_EQ(wrapper_only.size(), 1u);
+    EXPECT_EQ(wrapper_only[0].rule.name, "wrapper");
+    EXPECT_EQ(wrapper_only[0].field_path, "$.inner");
+
+    // Fails both, so the target is still charged its own.
+    auto both = validate(nlohmann::json{{"inner", {{"x", ""}}}});
+    ASSERT_EQ(both.size(), 2u);
+    EXPECT_NE(findViolation(both, "wrapper"), nullptr);
+    EXPECT_NE(findViolation(both, "target"), nullptr);
+}
+
 TEST(ValidationRuleTest, JsonSkipsAbsentAndNullProperties) {
     nlohmann::json value{{"quantity", 1}, {"items", {"a"}}};
     EXPECT_TRUE(validateJson(value).empty());
@@ -1453,6 +1501,11 @@ TEST(ValidationRuleTest, JsonFieldTypeIsDerivedFromTheSchema) {
     EXPECT_EQ(typeOf(R"({"anyOf":[{"type":"string"},{"type":"integer"}]})"),
               FieldType::Combined);
     EXPECT_EQ(typeOf(R"({"type":"string","enum":["a","b"]})"), FieldType::Enum);
+    // An enumeration is typed by its values and need not declare a type as well, which is
+    // the ordinary way to write one. Read as a typeless node it came out Null - a primitive,
+    // so a field rule ran against it, where the JVM client answers ENUM and skips it.
+    EXPECT_EQ(typeOf(R"({"enum":["a","b"]})"), FieldType::Enum);
+    EXPECT_EQ(typeOf(R"({"const":"a"})"), FieldType::Enum);
     // No type at all: a record if it declares properties, otherwise nothing to act on -
     // and never String, which is what it used to return.
     EXPECT_EQ(typeOf(R"({"properties":{"a":{"type":"string"}}})"), FieldType::Record);

@@ -319,6 +319,15 @@ FieldType getFieldType(const jsoncons::ojson &schema) {
                               schema.contains("anyOf") ||
                               schema.contains("oneOf");
 
+    // An enumeration is typed by its values, and JSON Schema does not require it to declare
+    // a type as well - {"enum": ["a", "b"]} is the ordinary form. This is checked before
+    // anything else so that form is not read as a typeless node: the JVM client answers ENUM
+    // for it, and ENUM is not a primitive, so a field rule that would otherwise be charged
+    // against it is skipped there and has to be here too.
+    if (schema.contains("const") || schema.contains("enum")) {
+        return FieldType::Enum;
+    }
+
     if (!schema.contains("type")) {
         if (has_properties) return FieldType::Record;
         // A node built only from allOf/anyOf/oneOf is not any single type. Its branches

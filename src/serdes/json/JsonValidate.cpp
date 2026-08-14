@@ -233,15 +233,28 @@ void Walker::walk(const nlohmann::json &schema, const nlohmann::json &value,
     if (done()) {
         return;
     }
-    const nlohmann::json &node = *resolveRef(schema);
-    if (!node.is_object()) {
+    if (!schema.is_object()) {
         return;
     }
 
-    // Rules declared at this level: `this` is the value at this location.
-    if (evaluateRules(node, value, path)) {
+    // Rules declared at this level: `this` is the value at this location. This runs before
+    // the reference is followed, because a node carrying both "$ref" and "confluent:rules"
+    // declares rules of its own: the JVM client evaluates the referring node and then the
+    // schema it names, charging both, and every other client follows it.
+    if (evaluateRules(schema, value, path)) {
         return;
     }
+
+    const nlohmann::json *resolved = resolveRef(schema);
+    if (resolved != &schema) {
+        // Continue at the referenced schema, which the recursive call charges its own
+        // rules. A reference contributes nothing else: as in the JVM client, the keywords
+        // that decide the walk come from the schema it names, not from the node holding
+        // the reference.
+        walk(*resolved, value, path);
+        return;
+    }
+    const nlohmann::json &node = schema;
 
     // allOf branches all apply; for oneOf/anyOf only the branches whose type
     // matches the instance do.
