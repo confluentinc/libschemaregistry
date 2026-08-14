@@ -1401,3 +1401,39 @@ TEST(ValidationRuleTest, JsonFieldTypeIsDerivedFromTheSchema) {
     EXPECT_EQ(typeOf(R"({"type":"unrecognized"})"), FieldType::Null);
 }
 #endif
+
+#ifdef SCHEMAREGISTRY_USE_PROTOBUF
+// cel-cpp is handed the message itself, not a map of its fields, so the engine answers from
+// the descriptor. A well-known type is then the value it wraps rather than a map of seconds
+// and nanos, and these rules have an overload at all.
+TEST(ValidationRuleTest, ProtobufWellKnownTypesBindAsTheValueTheyWrap) {
+    test::ValidationWellKnown obj;
+    obj.mutable_created_at()->set_seconds(1600000000);
+    obj.mutable_name()->set_value("widget");
+    EXPECT_TRUE(validateProto(obj).empty());
+}
+
+TEST(ValidationRuleTest, ProtobufWellKnownTypeRulesStillFire) {
+    // Epoch is not after epoch, and an empty string fails size() > 0.
+    test::ValidationWellKnown obj;
+    obj.mutable_created_at()->set_seconds(0);
+    obj.mutable_name()->set_value("");
+    auto violations = validateProto(obj);
+    EXPECT_NE(findViolation(violations, "created_after_epoch"), nullptr);
+    EXPECT_NE(findViolation(violations, "name_not_empty"), nullptr);
+}
+
+// has() reports protobuf presence: a proto3 scalar left at its default is unset. Built as a
+// map the key was always there, so has() was unconditionally true.
+TEST(ValidationRuleTest, ProtobufHasFollowsProtobufPresence) {
+    test::ValidationPresence unset;
+    auto violations = validateProto(unset);
+    EXPECT_NE(findViolation(violations, "quantity_unset"), nullptr)
+        << "has() reported an unwritten field as set";
+
+    test::ValidationPresence written;
+    written.set_quantity(5);
+    EXPECT_TRUE(validateProto(written).empty())
+        << "has() reported a written field as unset";
+}
+#endif

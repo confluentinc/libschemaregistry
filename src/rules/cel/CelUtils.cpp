@@ -4,6 +4,7 @@
 
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
+#include "eval/public/structs/cel_proto_wrapper.h"
 
 // Fix for Windows GetMessage macro conflict
 // On Windows, GetMessage is defined as a macro in winuser.h which conflicts
@@ -517,75 +518,24 @@ google::api::expr::runtime::CelValue fromProtobufValue(
                 return google::api::expr::runtime::CelValue::CreateNull();
             }
 
-            const auto *descriptor = msg->GetDescriptor();
-            if (!descriptor)
-                return google::api::expr::runtime::CelValue::CreateNull();
-            const auto *reflection = msg->GetReflection();
-            if (!reflection)
-                return google::api::expr::runtime::CelValue::CreateNull();
-
-            auto *map_impl = google::protobuf::Arena::Create<
-                google::api::expr::runtime::CelMapBuilder>(arena);
-
-            // Walk the descriptor rather than only the populated fields: a
-            // proto3 scalar sitting at its default is still set as far as the
-            // language is concerned, and omitting it makes an expression like
-            // `msg.count == 0` fail with "no such key". Fields with explicit
-            // presence (optional, oneof members, messages) are still omitted
-            // when unset, so that has(...) keeps working.
-            for (int field_index = 0; field_index < descriptor->field_count();
-                 ++field_index) {
-                const auto *field = descriptor->field(field_index);
-                if (field->has_presence() &&
-                    !reflection->HasField(*msg, field)) {
-                    continue;
-                }
-                auto *arena_field_name =
-                    google::protobuf::Arena::Create<std::string>(arena,
-                                                                 field->name());
-                auto cel_key =
-                    google::api::expr::runtime::CelValue::CreateString(
-                        arena_field_name);
-
-                google::api::expr::runtime::CelValue cel_value =
-                    google::api::expr::runtime::CelValue::CreateNull();
-
-                if (field->is_map()) {
-                    // Maps are repeated in the reflection API, so they must be
-                    // handled before the repeated branch or they bind as a list
-                    // of entries.
-                    cel_value = convertProtobufMapToCel(*msg, field, arena);
-                } else if (field->is_repeated()) {
-                    std::vector<google::api::expr::runtime::CelValue> vec;
-                    int field_size = reflection->FieldSize(*msg, field);
-
-                    for (int i = 0; i < field_size; ++i) {
-                        cel_value = convertProtobufFieldToCel(
-                            *msg, field, reflection, arena, i);
-                        if (!cel_value.IsError()) {
-                            vec.push_back(cel_value);
-                        }
-                    }
-
-                    auto *list_impl = google::protobuf::Arena::Create<
-                        google::api::expr::runtime::ContainerBackedListImpl>(
-                        arena, vec);
-                    cel_value =
-                        google::api::expr::runtime::CelValue::CreateList(
-                            list_impl);
-                } else {
-                    cel_value = convertProtobufFieldToCel(
-                        *msg, field, reflection, arena, -1);
-                }
-
-                if (!cel_value.IsError()) {
-                    auto status = map_impl->Add(cel_key, cel_value);
-                    if (!status.ok()) {
-                    }
-                }
-            }
-
-            return google::api::expr::runtime::CelValue::CreateMap(map_impl);
+            // Hand cel-cpp the message itself rather than a map of its fields.
+            // The engine then answers from the descriptor, which is what the other
+            // clients' engines do and what protovalidate-cc does:
+            //
+            //   - has() follows protobuf presence, so an unset field reads as unset
+            //     rather than as its default. A map cannot express that: the key has
+            //     to be there for `this.count == 0` to resolve, and its being there
+            //     is what has() reports.
+            //   - a well-known type becomes the value it wraps - a Timestamp a CEL
+            //     timestamp, a StringValue a string - which CreateMessage does by
+            //     downcasting. Built as a map it stayed a map of seconds and nanos.
+            //
+            // The copy is arena-allocated because the CelValue holds a bare pointer
+            // and has to stay valid for the whole evaluation, outliving this variant.
+            auto *owned = msg->New(arena);
+            owned->CopyFrom(*msg);
+            return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                owned, arena);
         }
 
         case ProtobufVariant::ValueType::List: {

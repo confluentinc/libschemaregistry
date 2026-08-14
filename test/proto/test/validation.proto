@@ -3,6 +3,8 @@ syntax = "proto3";
 package test;
 
 import "confluent/meta.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
 
 message ValidationAddress {
   string zip = 1 [(confluent.field_meta) = {
@@ -72,4 +74,32 @@ message ValidationMessageLevel {
 
   uint64 serial = 1;
   map<string, int32> scores = 2;
+}
+
+// A well-known type stands for the thing it wraps: a Timestamp is a CEL timestamp and a
+// StringValue is a string. Handing cel-cpp the message lets it downcast them; built as a map
+// of fields they stayed a map, and these rules had no matching overload.
+message ValidationWellKnown {
+  google.protobuf.Timestamp created_at = 1 [(confluent.field_meta) = {
+    rules: [
+      { name: "created_after_epoch", expr: "this > timestamp('1970-01-01T00:00:00Z')" }
+    ]
+  }];
+  google.protobuf.StringValue name = 2 [(confluent.field_meta) = {
+    rules: [
+      { name: "name_not_empty", expr: "size(this) > 0" }
+    ]
+  }];
+}
+
+// Presence shapes, for pinning what has() reports.
+message ValidationPresence {
+  option (confluent.message_meta) = {
+    rules: [
+      { name: "quantity_unset", expr: "has(this.quantity) ? '' : 'quantity is unset'" }
+    ]
+  };
+  int32 quantity = 1;
+  ValidationAddress address = 2;
+  repeated string items = 3;
 }
