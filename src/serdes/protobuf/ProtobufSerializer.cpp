@@ -44,9 +44,11 @@ ProtobufSerde::getParsedSchema(
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
     std::lock_guard<std::mutex> lock(cache_mutex_);
 
-    // Create cache key from schema content
     auto schema_str = schema.getSchema();
-    std::string cache_key = schema_str.value_or("");
+    // Keyed on the whole schema: the descriptor pool built below contains the
+    // referenced .proto files, so two roots with the same text but different
+    // references do not parse to the same thing.
+    std::string cache_key = schemaCacheKey(schema);
 
     auto it = parsed_schemas_cache_.find(cache_key);
     if (it != parsed_schemas_cache_.end()) {
@@ -67,7 +69,8 @@ ProtobufSerde::getParsedSchema(
     }
 
     // Parse main schema
-    auto file_desc = stringToSchema(pool.get(), "main.proto", cache_key);
+    auto file_desc =
+        stringToSchema(pool.get(), "main.proto", schema_str.value_or(""));
 
     // Store in cache with raw FileDescriptor pointer (owned by pool)
     parsed_schemas_cache_[cache_key] =
