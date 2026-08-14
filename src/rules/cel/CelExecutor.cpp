@@ -61,6 +61,7 @@ CelExecutor::Impl::newRuleBuilder(google::protobuf::Arena *arena) {
     google::api::expr::runtime::InterpreterOptions options;
     options.enable_qualified_type_identifiers = true;
     options.enable_timestamp_duration_overflow_errors = true;
+    options.enable_heterogeneous_equality = true;
     options.enable_empty_wrapper_null_unboxing = true;
     options.enable_regex_precompilation = true;
     options.constant_folding = true;
