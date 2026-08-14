@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "schemaregistry/serdes/SerdeTypes.h"
+#include "schemaregistry/serdes/ValidationRule.h"
 
 namespace schemaregistry::rest {
 class ISchemaRegistryClient;
@@ -31,6 +32,21 @@ struct SerializerConfig {
     SubjectNameStrategyType subject_name_strategy_type;
     std::unordered_map<std::string, std::string> subject_name_strategy_config;
     SchemaIdSerializer schema_id_serializer;
+    /**
+     * When to evaluate the schema's inline validation rules. Disabled by
+     * default; set to BeforeDomainRules or AfterDomainRules to run them.
+     */
+    ValidationRulesExecution validation_rules_execution;
+    /**
+     * Stop at the first inline validation rule violation instead of collecting
+     * every violation in the message.
+     */
+    bool validation_rules_fail_fast;
+    /**
+     * Executor used to evaluate inline validation rules. When unset, the
+     * serializer's rule registry is consulted, then the global registry.
+     */
+    std::shared_ptr<ValidationRuleExecutor> validation_rule_executor;
 
     // Constructors
     SerializerConfig();
