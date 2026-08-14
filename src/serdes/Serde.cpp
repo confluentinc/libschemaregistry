@@ -410,6 +410,13 @@ std::optional<FieldContext> RuleContext::currentField() const {
         back.getFieldType(), back.getTags());
 }
 
+void RuleContext::setCurrentFieldType(FieldType field_type) {
+    if (field_contexts_.empty()) {
+        return;
+    }
+    field_contexts_.back()->setFieldType(field_type);
+}
+
 void RuleContext::enterField(const SerdeValue &containing_message,
                              const std::string &full_name,
                              const std::string &name, FieldType field_type,

@@ -257,6 +257,17 @@ class RuleContext {
                     const std::unordered_set<std::string> &tags);
     void exitField();
 
+    /**
+     * Set the type of the field currently being walked, replacing the one it was
+     * entered with. A walk records the type the schema declares for a field on
+     * entry and narrows it as it descends - a union field is entered as
+     * FieldType::Combined, and what an executor needs is the type of the branch
+     * the value holds. This has to go through the context: currentField()
+     * answers with a fresh FieldContext, because FieldContext cannot be copied,
+     * so setting the type on what it returns would be discarded.
+     */
+    void setCurrentFieldType(FieldType field_type);
+
     // Tag handling
     std::unordered_set<std::string> getTags(const std::string &full_name) const;
 

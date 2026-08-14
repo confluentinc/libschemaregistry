@@ -226,7 +226,7 @@ jsoncons::ojson transform(RuleContext &ctx, const jsoncons::ojson &schema,
     // Field-level transformation logic
     auto field_ctx = ctx.currentField();
     if (field_ctx.has_value()) {
-        field_ctx->setFieldType(schema_navigation::getFieldType(schema));
+        ctx.setCurrentFieldType(schema_navigation::getFieldType(schema));
 
         auto rule_tags = ctx.getRule().getTags();
         std::unordered_set<std::string> rule_tags_set;
