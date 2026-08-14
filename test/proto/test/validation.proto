@@ -76,6 +76,16 @@ message ValidationMessageLevel {
   map<string, int32> scores = 2;
 }
 
+// A map key's type is decided by the key field, not by the value: an unsigned key above
+// int64 max reads as a negative number if it is narrowed on the way into CEL.
+message ValidationUnsignedKeys {
+  map<uint64, int32> by_serial = 1 [(confluent.field_meta) = {
+    rules: [
+      { name: "keys_positive", expr: "this.all(k, k > 0u)" }
+    ]
+  }];
+}
+
 // A well-known type stands for the thing it wraps: a Timestamp is a CEL timestamp and a
 // StringValue is a string. Handing cel-cpp the message lets it downcast them; built as a map
 // of fields they stayed a map, and these rules had no matching overload.

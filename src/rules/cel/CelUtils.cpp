@@ -571,6 +571,15 @@ google::api::expr::runtime::CelValue fromProtobufValue(
                         } else if constexpr (std::is_same_v<T, bool>) {
                             cel_key = google::api::expr::runtime::CelValue::
                                 CreateBool(k);
+                        } else if constexpr (std::is_unsigned_v<T>) {
+                            // CEL has a distinct unsigned type, and a map key is
+                            // the one value whose type comes from the key field
+                            // rather than from the value itself. Narrowing an
+                            // unsigned key to int64 wraps anything above int64
+                            // max to a negative number, so a rule could neither
+                            // index by such a key nor compare it.
+                            cel_key = google::api::expr::runtime::CelValue::
+                                CreateUint64(static_cast<uint64_t>(k));
                         } else {
                             cel_key = google::api::expr::runtime::CelValue::
                                 CreateInt64(static_cast<int64_t>(k));

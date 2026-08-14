@@ -1016,6 +1016,28 @@ TEST(ValidationRuleTest, MessageLevelRulesSeeUnsignedFieldsAndMaps) {
     EXPECT_EQ(failures[0].rule.name, "sees_serial_and_scores");
 }
 
+// A map key is the one value whose type comes from the key field rather than from the
+// value itself, and CEL has a distinct unsigned type. Narrowed to int64, a uint64 key
+// above int64 max reads as negative, and a rule can neither compare it nor index by it.
+TEST(ValidationRuleTest, ProtobufPreservesUnsignedMapKeys) {
+    test::ValidationUnsignedKeys keys;
+    (*keys.mutable_by_serial())[std::numeric_limits<uint64_t>::max()] = 1;
+    auto violations = validateProto(keys);
+    for (const auto &violation : violations) {
+        EXPECT_TRUE(violation.cause.empty())
+            << "rule failed to evaluate: " << violation.toString();
+    }
+    EXPECT_EQ(violations.size(), 0u);
+
+    // and the rule really does run: a zero key fails it
+    test::ValidationUnsignedKeys zero;
+    (*zero.mutable_by_serial())[0] = 1;
+    auto failures = validateProto(zero);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures[0].rule.name, "keys_positive");
+    EXPECT_TRUE(failures[0].cause.empty());
+}
+
 
 // A rule that binds `this` to a nested message needs that message in the schema's
 // terms, not just the top-level one: a rule's environment is built from the
@@ -1083,6 +1105,43 @@ TEST(ValidationRuleTest, ProtobufMessageRuleSeesAFieldOnlyTheSchemaDeclares) {
         validator, order, schema_descriptor, false);
 
     EXPECT_TRUE(violations.empty()) << violations.size() << " violations";
+}
+
+// A message that cannot be read through the registered schema is refused, rather than
+// validated without the schema's view. The producer is about to write bytes a consumer
+// using that schema could not read, so reporting no violations would let exactly the
+// record nobody can consume through - which is what the JVM, Go, Rust, JS and Python
+// clients all treat as a serialization error. Non-UTF-8 data in a string field is the
+// reachable case: those same bytes are legal in the bytes field the schema may have been
+// widened from, and widening bytes to string is a compatible change.
+TEST(ValidationRuleTest, ProtobufRefusesAMessageTheSchemaCannotRead) {
+    google::protobuf::DescriptorPool pool;
+    const auto *schema_descriptor = rebuiltValidationDescriptor(
+        pool, [](google::protobuf::FileDescriptorProto &proto) {
+            // Any disagreement forces the re-read; a rename is the cheapest one.
+            auto *address = messageOf(proto, "ValidationAddress");
+            ASSERT_NE(address, nullptr);
+            for (auto &field : *address->mutable_field()) {
+                if (field.number() == 1) {
+                    field.set_name("renamed_zip");
+                    field.set_json_name("renamedZip");
+                }
+            }
+        });
+    ASSERT_NE(schema_descriptor, nullptr);
+
+    auto order = protoOrder("ord-1234", 1, {"a"}, "12345");
+    order.set_id(std::string("ord-\xff\xfe"));
+    CelValidator validator;
+    EXPECT_THROW(schemaregistry::serdes::protobuf::utils::validateMessage(
+                     validator, order, schema_descriptor, false),
+                 schemaregistry::serdes::protobuf::ProtobufError);
+
+    // The same schema reads a message that is valid under it, so the refusal is about
+    // the bytes and not about the rename.
+    auto readable = protoOrder("ord-1234", 1, {"a"}, "12345");
+    EXPECT_NO_THROW(schemaregistry::serdes::protobuf::utils::validateMessage(
+        validator, readable, schema_descriptor, false));
 }
 
 // A field-level rule on a repeated or map field is evaluated once, with the whole

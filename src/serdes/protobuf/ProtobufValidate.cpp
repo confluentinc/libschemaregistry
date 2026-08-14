@@ -579,12 +579,16 @@ std::vector<ValidationRuleError> validateMessage(
     std::string bytes;
     if (!message.SerializeToString(&bytes) ||
         !schema_message->ParseFromString(bytes)) {
-        // The message cannot be read through the registered schema. Walk it
-        // anyway, without the schema's view: every rule still runs, and one that
-        // depends on the schema's names fails as a rule error rather than
-        // silently not running at all.
-        walker.walkMessage(schema_descriptor, message, nullptr, "");
-        return violations;
+        // The bytes the producer is about to write cannot be read through the
+        // registered schema, so a consumer reading with that schema could not
+        // read them either - a bytes field carrying non-UTF-8 data against a
+        // schema that declares a string, for instance, which is a compatible
+        // change. Fail in the channel the caller already handles rather than
+        // reporting no violations and writing the record anyway, and name the
+        // type so it is searchable.
+        throw ProtobufError("Could not read message " +
+                            schema_descriptor->full_name() +
+                            " through the registered schema");
     }
     walker.walkMessage(schema_descriptor, message, schema_message.get(), "");
     return violations;
