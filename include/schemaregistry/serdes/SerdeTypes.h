@@ -34,6 +34,23 @@ namespace schemaregistry::serdes {
 enum class SerdeFormat { Avro, Json, Protobuf };
 
 /**
+ * Key identifying a schema in a parsed-schema cache.
+ *
+ * <p>The whole schema, not just its text. Parsing resolves the schema's
+ * references and inlines what they contain, so two schemas whose text is
+ * identical but whose references point at different subjects or versions parse
+ * to different things — and inline validation rules can come entirely from a
+ * referenced schema. Keying on the text alone would hand the second schema the
+ * first one's resolution.
+ */
+inline std::string schemaCacheKey(
+    const schemaregistry::rest::model::Schema &schema) {
+    nlohmann::json key_json;
+    to_json(key_json, schema);
+    return key_json.dump();
+}
+
+/**
  * Base interface for serialization values of different formats
  */
 class SerdeValue {

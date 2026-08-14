@@ -37,6 +37,15 @@ class CelExecutor::Impl {
                                   google::api::expr::runtime::CelValue> &args,
         google::protobuf::Arena *arena);
 
+    // Compile (with caching) and evaluate an expression against the given
+    // bindings. Carries no rule context, so it also serves the validation-rule
+    // path, which has no RuleContext of its own.
+    std::unique_ptr<google::api::expr::runtime::CelValue> evaluate(
+        const std::string &expr,
+        const absl::flat_hash_map<std::string,
+                                  google::api::expr::runtime::CelValue> &args,
+        google::protobuf::Arena *arena);
+
     absl::StatusOr<std::shared_ptr<google::api::expr::runtime::CelExpression>>
     getOrCompileExpression(const std::string &expr);
 

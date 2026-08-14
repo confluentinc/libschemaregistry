@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package test;
+
+import "confluent/meta.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+message ValidationAddress {
+  string zip = 1 [(confluent.field_meta) = {
+    rules: [
+      { name: "zip_digits", expr: "this.matches('^[0-9]{5}$') ? '' : 'zip must be 5 digits'" }
+    ]
+  }];
+}
+
+message ValidationOrder {
+  option (confluent.message_meta) = {
+    rules: [
+      {
+        name: "quantity_matches_items",
+        doc: "quantity must match the number of items",
+        expr: "this.quantity == size(this.items)"
+      }
+    ]
+  };
+
+  string id = 1 [(confluent.field_meta) = {
+    rules: [
+      { name: "id_prefix", expr: "this.startsWith('ord-')" },
+      { name: "id_length", expr: "size(this) > 4 ? '' : 'id is too short'" }
+    ]
+  }];
+  int32 quantity = 2 [(confluent.field_meta) = {
+    rules: [
+      { name: "positive_quantity", doc: "quantity must be positive", expr: "this > 0" }
+    ]
+  }];
+  // A field-level rule on a repeated or map field is evaluated once, with the whole
+  // collection bound to `this`, so a rule about the elements is written as a
+  // comprehension over them.
+  repeated string items = 3 [(confluent.field_meta) = {
+    rules: [
+      { name: "item_not_empty", expr: "this.all(i, size(i) > 0)" }
+    ]
+  }];
+  ValidationAddress address = 4;
+  map<string, int32> scores = 5 [(confluent.field_meta) = {
+    rules: [
+      { name: "score_not_negative", expr: "this.all(k, this[k] >= 0)" }
+    ]
+  }];
+  // Exercises the unsigned conversion: a value above int64 max must still compare as
+  // positive, which it would not if it were narrowed to a signed integer.
+  uint64 serial = 6 [(confluent.field_meta) = {
+    rules: [
+      { name: "serial_positive", expr: "this > 0" }
+    ]
+  }];
+}
+
+// Binding a whole message to `this` goes through a different conversion path than a field
+// value: unsigned fields must stay unsigned, and a map must bind as a CEL map rather than
+// as a list of single-entry maps.
+message ValidationMessageLevel {
+  option (confluent.message_meta) = {
+    rules: [
+      {
+        name: "sees_serial_and_scores",
+        expr: "this.serial > 0 && this.scores['ok'] >= 0"
+      }
+    ]
+  };
+
+  uint64 serial = 1;
+  map<string, int32> scores = 2;
+}
+
+// A well-known type stands for the thing it wraps: a Timestamp is a CEL timestamp and a
+// StringValue is a string. Handing cel-cpp the message lets it downcast them; built as a map
+// of fields they stayed a map, and these rules had no matching overload.
+message ValidationWellKnown {
+  google.protobuf.Timestamp created_at = 1 [(confluent.field_meta) = {
+    rules: [
+      { name: "created_after_epoch", expr: "this > timestamp('1970-01-01T00:00:00Z')" }
+    ]
+  }];
+  google.protobuf.StringValue name = 2 [(confluent.field_meta) = {
+    rules: [
+      { name: "name_not_empty", expr: "size(this) > 0" }
+    ]
+  }];
+}
+
+// Presence shapes, for pinning what has() reports.
+message ValidationPresence {
+  option (confluent.message_meta) = {
+    rules: [
+      { name: "quantity_unset", expr: "has(this.quantity) ? '' : 'quantity is unset'" }
+    ]
+  };
+  int32 quantity = 1;
+  ValidationAddress address = 2;
+  repeated string items = 3;
+}
