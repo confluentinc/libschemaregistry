@@ -1,6 +1,7 @@
 #include "schemaregistry/serdes/json/JsonUtils.h"
 
 #include <algorithm>
+#include <exception>
 #include <sstream>
 
 #include "schemaregistry/serdes/RuleRegistry.h"  // For global_registry functions
@@ -80,11 +81,16 @@ nlohmann::json transformFields(
     // Track visited locations to avoid duplicate transformations
     std::unordered_set<std::string> visited_locations;
 
-    // Use the schema's walk method to traverse and transform the JSON structure
+    // A field whose transform fails must not be passed through unchanged: for a
+    // field-encryption rule that would emit the plaintext and report success. The walk
+    // callback cannot throw through jsoncons, so the first failure is captured, the walk is
+    // aborted, and it is rethrown to the caller below.
+    std::exception_ptr failure;
+
     try {
         schema->walk(
             mutable_value,
-            [&ctx, &mutable_value, &visited_locations](
+            [&ctx, &mutable_value, &visited_locations, &failure](
                 const std::string &keyword, const jsoncons::ojson &schema_node,
                 const jsoncons::uri &schema_location,
                 const jsoncons::ojson &instance_node,
@@ -139,34 +145,34 @@ nlohmann::json transformFields(
                                         : "";
 
                                 // Update the mutable_value using the JSON
-                                // pointer
-                                try {
-                                    jsoncons::jsonpointer::replace(
-                                        mutable_value, field_location,
-                                        transformed_value);
-                                } catch (const std::exception &e) {
-                                    // If pointer access fails, continue with
-                                    // next field
-                                }
+                                // pointer. A transformed value that cannot be
+                                // written back is a failure, not something to
+                                // skip - the field would keep its original
+                                // value.
+                                jsoncons::jsonpointer::replace(
+                                    mutable_value, field_location,
+                                    transformed_value);
                             }
                         }
                     }
-                } catch (const std::exception &e) {
-                    // Continue processing even if a single field transformation
-                    // fails This maintains consistency with the recursive
-                    // approach
+                } catch (...) {
+                    failure = std::current_exception();
+                    return jsoncons::jsonschema::walk_result::abort;
                 }
 
                 return jsoncons::jsonschema::walk_result::advance;
             });
-
-        // Convert back to nlohmann::json and return
-        return ojsonToJson(mutable_value);
-
-    } catch (const std::exception &e) {
-        // If walk fails, fall back to the original value
-        return value;
+    } catch (...) {
+        // The walk itself failed rather than a field within it.
+        if (!failure) {
+            failure = std::current_exception();
+        }
     }
+
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
+    return ojsonToJson(mutable_value);
 }
 
 jsoncons::ojson transformFieldWithContext(RuleContext &ctx,
@@ -285,30 +291,65 @@ jsoncons::ojson transform(RuleContext &ctx, const jsoncons::ojson &schema,
 // Schema navigation implementations
 namespace schema_navigation {
 
-FieldType getFieldType(const jsoncons::ojson &schema) {
-    if (!schema.contains("type")) {
-        return FieldType::String;  // Default fallback
-    }
+namespace {
 
-    std::string type = schema["type"].as<std::string>();
-
+/// Maps a single JSON Schema type keyword. Null for anything this walk cannot act on -
+/// never String, which would hand an encryption rule a number or an object to encrypt as
+/// text.
+FieldType scalarFieldType(const std::string &type, bool has_properties) {
     if (type == "object") {
-        return FieldType::Record;
-    } else if (type == "array") {
-        return FieldType::Array;
-    } else if (type == "string") {
-        return FieldType::String;
-    } else if (type == "integer") {
-        return FieldType::Int;
-    } else if (type == "number") {
-        return FieldType::Double;
-    } else if (type == "boolean") {
-        return FieldType::Boolean;
-    } else if (type == "null") {
+        // An object with no declared properties is an open map.
+        return has_properties ? FieldType::Record : FieldType::Map;
+    }
+    if (type == "array") return FieldType::Array;
+    if (type == "string") return FieldType::String;
+    if (type == "integer") return FieldType::Int;
+    if (type == "number") return FieldType::Double;
+    if (type == "boolean") return FieldType::Boolean;
+    return FieldType::Null;
+}
+
+}  // namespace
+
+FieldType getFieldType(const jsoncons::ojson &schema) {
+    const bool has_properties = schema.contains("properties") &&
+                                schema["properties"].is_object() &&
+                                !schema["properties"].empty();
+    const bool has_combined = schema.contains("allOf") ||
+                              schema.contains("anyOf") ||
+                              schema.contains("oneOf");
+
+    if (!schema.contains("type")) {
+        if (has_properties) return FieldType::Record;
+        // A node built only from allOf/anyOf/oneOf is not any single type. Its branches
+        // are separate nodes and the walk types each of them on its own.
+        if (has_combined) return FieldType::Combined;
         return FieldType::Null;
     }
 
-    return FieldType::String;  // Default fallback
+    // A nullable field is written ["string", "null"], and the type that matters is the one
+    // that is not null - the JVM and Go clients reach the same place by narrowing the union
+    // to the branch the value matches. Only a union with several real types has no single
+    // type to act on.
+    if (schema["type"].is_array()) {
+        std::string single;
+        int count = 0;
+        for (const auto &entry : schema["type"].array_range()) {
+            if (!entry.is_string()) continue;
+            std::string type = entry.as<std::string>();
+            if (type == "null") continue;
+            single = type;
+            ++count;
+        }
+        if (count == 0) return FieldType::Null;
+        if (count > 1) return FieldType::Combined;
+        return scalarFieldType(single, has_properties);
+    }
+
+    if (schema.contains("const") || schema.contains("enum")) {
+        return FieldType::Enum;
+    }
+    return scalarFieldType(schema["type"].as<std::string>(), has_properties);
 }
 
 bool isObjectSchema(const jsoncons::ojson &schema) {
