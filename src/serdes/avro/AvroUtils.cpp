@@ -471,7 +471,8 @@ std::vector<uint8_t> serializeAvroData(
     const ::avro::GenericDatum &datum, const ::avro::ValidSchema &writer_schema,
     const std::vector<::avro::ValidSchema> &named_schemas) {
     try {
-        // If the writer schema is AVRO_BYTES, just return the raw bytes directly
+        // If the writer schema is AVRO_BYTES, just return the raw bytes
+        // directly
         if (writer_schema.root()->type() == ::avro::AVRO_BYTES) {
             return datum.value<std::vector<uint8_t>>();
         }
@@ -501,7 +502,8 @@ std::vector<uint8_t> serializeAvroData(
     const ::avro::ValidSchema *reader_schema,
     const std::vector<::avro::ValidSchema> &named_schemas) {
     try {
-        // If the writer schema is AVRO_BYTES, just return the raw bytes directly
+        // If the writer schema is AVRO_BYTES, just return the raw bytes
+        // directly
         if (writer_schema.root()->type() == ::avro::AVRO_BYTES) {
             ::avro::GenericDatum datum(writer_schema);
             datum.value<std::vector<uint8_t>>() = data;
@@ -601,22 +603,29 @@ void getInlineTagsRecursively(
             std::string record_ns;
             std::string record_name;
 
-            auto ns_it = schema.find("namespace");
-            if (ns_it != schema.end() && ns_it->is_string()) {
-                record_ns = ns_it->get<std::string>();
-            } else {
-                record_ns = impliedNamespace(name);
-                if (record_ns.empty()) {
-                    record_ns = ns;
-                }
-            }
-
             auto name_it = schema.find("name");
             if (name_it != schema.end() && name_it->is_string()) {
                 record_name = name_it->get<std::string>();
+            }
 
-                // Add namespace prefix if needed
-                if (!record_ns.empty() && record_name.find(record_ns) != 0) {
+            if (record_name.find('.') != std::string::npos) {
+                // A name containing a dot is already a fullname; Avro ignores
+                // any namespace attribute for it.
+                record_ns = impliedNamespace(record_name);
+            } else {
+                auto ns_it = schema.find("namespace");
+                if (ns_it != schema.end() && ns_it->is_string()) {
+                    record_ns = ns_it->get<std::string>();
+                } else {
+                    record_ns = impliedNamespace(name);
+                    if (record_ns.empty()) {
+                        record_ns = ns;
+                    }
+                }
+                // The namespace is a prefix to prepend, not a prefix to test
+                // for: a record named "foobar" in namespace "foo" is
+                // "foo.foobar", not "foobar".
+                if (!record_ns.empty() && !record_name.empty()) {
                     record_name = record_ns + "." + record_name;
                 }
             }
@@ -663,10 +672,15 @@ void getInlineTagsRecursively(
  */
 void removeConfluentTags(nlohmann::json &schema) {
     if (schema.is_object()) {
-        // Remove confluent:tags if it exists
+        // Remove the confluent-specific attributes if they exist; the Avro
+        // parser rejects schemas carrying them.
         auto tags_it = schema.find("confluent:tags");
         if (tags_it != schema.end()) {
             schema.erase(tags_it);
+        }
+        auto rules_it = schema.find(VALIDATION_RULES_PROP);
+        if (rules_it != schema.end()) {
+            schema.erase(rules_it);
         }
 
         // Recursively process all values in the object
