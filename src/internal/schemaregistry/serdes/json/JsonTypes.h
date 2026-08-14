@@ -46,13 +46,12 @@ class JsonSerde {
     void clear();
 
   private:
-    // Cache for parsed schemas: Schema -> json_schema
+    // Both caches are keyed by schemaCacheKey(), not by schema text: see there.
     std::unordered_map<
         std::string,
         std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>>
         parsed_schemas_cache_;
 
-    // Cache for raw schema JSON: schema string -> parsed json
     std::unordered_map<std::string, std::shared_ptr<const nlohmann::json>>
         schema_json_cache_;
 

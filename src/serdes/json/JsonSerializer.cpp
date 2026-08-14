@@ -119,9 +119,9 @@ JsonSerde::getParsedSchema(
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
     std::lock_guard<std::mutex> lock(cache_mutex_);
 
-    // Create cache key from schema content
-    auto schema_str = schema.getSchema();
-    std::string cache_key = schema_str.value_or("");
+    // Keyed on the whole schema: what gets compiled below is the schema with
+    // its references flattened in, so the references are part of its identity.
+    std::string cache_key = schemaCacheKey(schema);
 
     auto it = parsed_schemas_cache_.find(cache_key);
     if (it != parsed_schemas_cache_.end()) {
@@ -136,7 +136,7 @@ JsonSerde::getParsedSchema(
     // Parse main schema
     nlohmann::json parsed_schema;
     try {
-        parsed_schema = nlohmann::json::parse(cache_key);
+        parsed_schema = nlohmann::json::parse(schema.getSchema().value_or(""));
     } catch (const nlohmann::json::parse_error &e) {
         throw JsonError("Failed to parse JSON schema: " +
                         std::string(e.what()));
@@ -165,8 +165,13 @@ std::shared_ptr<const nlohmann::json> JsonSerde::getSchemaJson(
         return nullptr;
     }
 
+    // Keyed on the whole schema for the same reason getParsedSchema is: the
+    // flattened document below inlines what the references resolve to, inline
+    // validation rules included.
+    const std::string cache_key = schemaCacheKey(schema);
+
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    auto it = schema_json_cache_.find(schema_str.value());
+    auto it = schema_json_cache_.find(cache_key);
     if (it != schema_json_cache_.end()) {
         return it->second;
     }
@@ -181,7 +186,7 @@ std::shared_ptr<const nlohmann::json> JsonSerde::getSchemaJson(
         nlohmann::json::parse(schema_str.value()), resolved_refs);
 
     auto parsed = std::make_shared<const nlohmann::json>(std::move(flattened));
-    schema_json_cache_[schema_str.value()] = parsed;
+    schema_json_cache_[cache_key] = parsed;
     return parsed;
 }
 

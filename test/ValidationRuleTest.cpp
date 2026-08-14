@@ -37,6 +37,7 @@
 
 #ifdef SCHEMAREGISTRY_USE_JSON
 #include "schemaregistry/serdes/json/JsonSerializer.h"
+#include "schemaregistry/serdes/json/JsonTypes.h"
 #include "schemaregistry/serdes/json/JsonUtils.h"
 #endif
 
@@ -1226,3 +1227,75 @@ TEST(ValidationRuleTest, ProtobufFieldTransformLeavesMapKeysAlone) {
     // The string fields that are values are still transformed.
     EXPECT_EQ(order->id(), "ord-1234-suffix");
 }
+
+#ifdef SCHEMAREGISTRY_USE_JSON
+namespace {
+
+// A root whose text is the same whichever schema it references. What its "$ref"
+// resolves to is decided entirely by the reference list on the Schema.
+constexpr const char *kSharedRoot = R"schema({
+    "type": "object",
+    "properties": {"payload": {"$ref": "ref"}}
+})schema";
+
+// Two referenced schemas that differ only in the rule they declare.
+std::string refSchemaRequiring(const std::string &prefix,
+                               const std::string &rule_name) {
+    return R"schema({
+        "type": "object",
+        "properties": {"code": {"type": "string",
+            "confluent:rules": [{"name": ")schema" +
+           rule_name + R"schema(",
+             "expr": "this.startsWith(')schema" +
+           prefix + R"schema(') ? '' : 'wrong prefix'"}]}}
+    })schema";
+}
+
+Schema rootReferencing(const std::string &subject) {
+    SchemaReference ref;
+    ref.setName(std::make_optional<std::string>("ref"));
+    ref.setSubject(std::make_optional<std::string>(subject));
+    ref.setVersion(std::make_optional<int32_t>(1));
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("JSON"));
+    schema.setSchema(std::make_optional<std::string>(kSharedRoot));
+    schema.setReferences(
+        std::make_optional<std::vector<SchemaReference>>({ref}));
+    return schema;
+}
+
+}  // namespace
+
+TEST(ValidationRuleTest, JsonSchemaCacheSeparatesSchemasByTheirReferences) {
+    auto client = newMockClient();
+    for (const auto &subject : {std::string("ref-a"), std::string("ref-b")}) {
+        Schema ref_schema;
+        ref_schema.setSchemaType(std::make_optional<std::string>("JSON"));
+        ref_schema.setSchema(std::make_optional<std::string>(
+            refSchemaRequiring(subject == "ref-a" ? "A" : "B",
+                               subject == "ref-a" ? "code_a" : "code_b")));
+        client->registerSchema(subject, ref_schema, false);
+    }
+
+    // One serde, so both lookups go through the same cache. The two schemas
+    // agree on every byte of their text and differ only in what they reference,
+    // which is exactly the pair a text-keyed cache would conflate.
+    schemaregistry::serdes::json::JsonSerde serde;
+    auto flattened_a = serde.getSchemaJson(rootReferencing("ref-a"), client);
+    auto flattened_b = serde.getSchemaJson(rootReferencing("ref-b"), client);
+
+    ASSERT_NE(flattened_a, nullptr);
+    ASSERT_NE(flattened_b, nullptr);
+    EXPECT_NE(flattened_a, flattened_b)
+        << "the second schema was served the first one's flattened document";
+    EXPECT_NE(flattened_a->dump().find("code_a"), std::string::npos);
+    EXPECT_NE(flattened_b->dump().find("code_b"), std::string::npos);
+    EXPECT_EQ(flattened_b->dump().find("code_a"), std::string::npos)
+        << "rules from the other schema's reference leaked in";
+
+    // The same schema still hits the cache rather than re-resolving.
+    EXPECT_EQ(serde.getSchemaJson(rootReferencing("ref-a"), client),
+              flattened_a);
+}
+#endif

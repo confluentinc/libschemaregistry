@@ -14,10 +14,7 @@ std::pair<::avro::ValidSchema, std::vector<::avro::ValidSchema>>
 AvroSerde::getParsedSchema(
     const schemaregistry::rest::model::Schema &schema,
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
-    // Generate cache key (reuse the updated SerdeTypes cache key generation)
-    nlohmann::json j;
-    to_json(j, schema);
-    std::string cache_key = j.dump();
+    std::string cache_key = schemaCacheKey(schema);
 
     // Check cache first
     {
@@ -98,9 +95,9 @@ AvroSerde::getSchemaJsons(
     if (!schema.getSchema().has_value()) {
         return nullptr;
     }
-    // getSchema() returns by value, so the string must be copied rather than
-    // bound to a reference into the returned temporary.
-    const std::string cache_key = schema.getSchema().value();
+    // Keyed on the whole schema, matching getParsedSchema: the referenced
+    // schemas returned alongside the root are part of what this resolves to.
+    const std::string cache_key = schemaCacheKey(schema);
 
     {
         std::shared_lock lock(mutex_);
@@ -121,7 +118,8 @@ AvroSerde::getSchemaJsons(
     }
     auto result = std::make_shared<
         const std::pair<nlohmann::json, std::vector<nlohmann::json>>>(
-        nlohmann::json::parse(cache_key), std::move(named_schemas));
+        nlohmann::json::parse(schema.getSchema().value()),
+        std::move(named_schemas));
 
     {
         std::unique_lock lock(mutex_);

@@ -67,7 +67,8 @@ class AvroSerde {
                                               std::vector<::avro::ValidSchema>>>
         parsed_schemas_;
 
-    // Cache for schema JSON: schema string -> (schema, referenced schemas)
+    // Keyed by schemaCacheKey(), like parsed_schemas_ above: the referenced
+    // schemas are part of what a lookup resolves to.
     std::unordered_map<
         std::string,
         std::shared_ptr<const std::pair<nlohmann::json,
