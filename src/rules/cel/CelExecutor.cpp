@@ -10,6 +10,8 @@
 #include "eval/public/containers/container_backed_map_impl.h"
 #include "eval/public/string_extension_func_registrar.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
+#include "extensions/math_ext.h"
+#include "extensions/math_ext_macros.h"
 #include "google/protobuf/descriptor.h"
 #include "google/protobuf/message.h"
 #include "nlohmann/json.hpp"
@@ -60,6 +62,12 @@ absl::StatusOr<
 CelExecutor::Impl::newRuleBuilder(google::protobuf::Arena *arena) {
     google::api::expr::runtime::InterpreterOptions options;
     options.enable_qualified_type_identifiers = true;
+    // The math extension's functions are registered under namespaced names
+    // (math.abs, math.bitAnd). Without this the parser's receiver-style call -
+    // `abs` with the target `math` - is never folded into that name, and every
+    // one of them fails to plan. cel-cpp's own math extension test sets it for
+    // the same reason.
+    options.enable_qualified_identifier_rewrites = true;
     options.enable_timestamp_duration_overflow_errors = true;
     options.enable_heterogeneous_equality = true;
     options.enable_empty_wrapper_null_unboxing = true;
@@ -77,6 +85,11 @@ CelExecutor::Impl::newRuleBuilder(google::protobuf::Arena *arena) {
     register_status =
         google::api::expr::runtime::RegisterStringExtensionFunctions(
             builder->GetRegistry());
+    if (!register_status.ok()) {
+        return register_status;
+    }
+    register_status = ::cel::extensions::RegisterMathExtensionFunctions(
+        builder->GetRegistry(), options);
     if (!register_status.ok()) {
         return register_status;
     }
@@ -205,7 +218,19 @@ CelExecutor::Impl::getOrCompileExpression(const std::string &expr) {
         return absl::FailedPreconditionError("CEL runtime not initialized");
     }
 
-    auto pexpr_or = google::api::expr::parser::Parse(expr);
+    // math.greatest and math.least are macros rather than registry functions -
+    // they take a variable number of arguments - so the parser has to know them
+    // as well. Parsing with an explicit macro list replaces the default set, so
+    // the standard macros (has, all, exists, exists_one, map, filter) are
+    // carried along with them.
+    static const std::vector<::cel::Macro> *kMacros = [] {
+        auto *macros = new std::vector<::cel::Macro>(::cel::Macro::AllMacros());
+        auto math = ::cel::extensions::math_macros();
+        macros->insert(macros->end(), math.begin(), math.end());
+        return macros;
+    }();
+
+    auto pexpr_or = google::api::expr::parser::ParseWithMacros(expr, *kMacros);
     if (!pexpr_or.ok()) {
         return pexpr_or.status();
     }

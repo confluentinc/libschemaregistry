@@ -113,6 +113,39 @@ TEST(ValidationRuleTest, CelValidatorReturnsMessage) {
     EXPECT_EQ(std::get<std::string>(result), "must be an adult");
 }
 
+// The JVM client registers both CEL extensions - strings and math - so a rule written
+// against either resolves there. The string extension was already registered here; the math
+// one supplies math.greatest/least, the rounding and sign functions, and the bit operations.
+TEST(ValidationRuleTest, CelResolvesBothExtensions) {
+    CelValidator validator;
+    auto value = json::makeJsonValue(nlohmann::json{{"name", "alice"}});
+
+    for (const char *expr : {
+             // math
+             "math.greatest(1, 5, 3) == 5",
+             "math.least(1, 5, 3) == 1",
+             "math.abs(-4) == 4",
+             "math.ceil(1.2) == 2.0",
+             "math.floor(1.8) == 1.0",
+             "math.round(1.5) == 2.0",
+             "math.trunc(1.9) == 1.0",
+             "math.sign(-3) == -1",
+             "math.isNaN(0.0/0.0)",
+             "math.bitAnd(12, 10) == 8",
+             "math.bitOr(12, 10) == 14",
+             "math.bitXor(12, 10) == 6",
+             "math.bitShiftLeft(1, 3) == 8",
+             "math.bitShiftRight(8, 3) == 1",
+             // strings, unchanged
+             "'AbC'.lowerAscii() == 'abc'",
+             "'a-b'.split('-') == ['a', 'b']",
+         }) {
+        auto result = validator.execute(rule("n", expr), *value);
+        ASSERT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        EXPECT_TRUE(std::get<bool>(result)) << expr;
+    }
+}
+
 TEST(ValidationRuleTest, CelValidatorRejectsNonBooleanResult) {
     CelValidator validator;
     auto value = json::makeJsonValue(nlohmann::json{{"age", 3}});
