@@ -410,6 +410,13 @@ std::optional<FieldContext> RuleContext::currentField() const {
         back.getFieldType(), back.getTags());
 }
 
+void RuleContext::setCurrentFieldType(FieldType field_type) {
+    if (field_contexts_.empty()) {
+        return;
+    }
+    field_contexts_.back()->setFieldType(field_type);
+}
+
 void RuleContext::enterField(const SerdeValue &containing_message,
                              const std::string &full_name,
                              const std::string &name, FieldType field_type,
@@ -975,6 +982,37 @@ bool Serde::hasRules(std::optional<RuleSet> rule_set, Phase phase,
 
 BaseSerializer::BaseSerializer(Serde serde, const SerializerConfig &config)
     : serde_(std::move(serde)), config_(config) {}
+
+bool BaseSerializer::validationEnabled(
+    std::optional<ValidationRulesExecution> phase) const {
+    if (!phase.has_value()) {
+        return config_.validation_rules_execution !=
+               ValidationRulesExecution::Disabled;
+    }
+    return config_.validation_rules_execution == phase.value();
+}
+
+std::shared_ptr<ValidationRuleExecutor> BaseSerializer::validationExecutor()
+    const {
+    if (config_.validation_rule_executor) {
+        return config_.validation_rule_executor;
+    }
+    auto registry = serde_.getRuleRegistry();
+    if (registry) {
+        auto executor = registry->getValidationExecutor();
+        if (executor) {
+            return executor;
+        }
+    }
+    auto executor = global_registry::getValidationRuleExecutor();
+    if (!executor) {
+        throw SerializationError(
+            "No validation rule executor registered; call "
+            "schemaregistry::rules::cel::registration::registerCelValidator() "
+            "or set validation_rule_executor on the serializer config");
+    }
+    return executor;
+}
 
 // BaseDeserializer implementation
 

@@ -21,6 +21,8 @@ set(TEST_SOURCES
 
 if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES AzureKmsAeadTest.cpp)  # Azure KMS AEAD wire-format tests
+    list(APPEND TEST_SOURCES ValidationRuleTest.cpp)  # Inline validation rule tests
+    list(APPEND TEST_SOURCES CelDecimalTimestampTest.cpp)  # CEL decimal/timestamp + is* tests
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)
@@ -73,6 +75,13 @@ if(SCHEMAREGISTRY_WITH_RULES)
         PRIVATE
             tink::static
     )
+endif()
+
+# CelDecimalTimestampTest is compiled whenever rules are enabled, but its Avro
+# marshalling cases need Avro, which rules do not force on. Flag their availability so
+# those cases compile only when Avro is present.
+if(SCHEMAREGISTRY_WITH_AVRO)
+    target_compile_definitions(schemaregistry-test PRIVATE SCHEMAREGISTRY_TEST_WITH_AVRO)
 endif()
 
 # Discover and register tests
