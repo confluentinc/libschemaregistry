@@ -15,6 +15,8 @@
 #include "schemaregistry/rules/cel/ExtraFunc.h"
 
 #include <charconv>
+#include <cmath>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <regex>
@@ -61,7 +63,16 @@ class LambdaFunction : public cel::CelFunction {
 
     absl::Status Evaluate(absl::Span<const cel::CelValue> args, cel::CelValue* result,
                           Arena* arena) const override {
-        return impl_(args, result, arena);
+        // cel-cpp expects functions to signal failure via an error CelValue, not by
+        // throwing. Convert any exception a conversion helper raises (e.g. an
+        // out-of-range decimal coefficient) into a CEL error so it cannot escape into
+        // the interpreter.
+        try {
+            return impl_(args, result, arena);
+        } catch (const std::exception& e) {
+            *result = cel::CreateErrorValue(arena, e.what());
+            return absl::OkStatus();
+        }
     }
 
    private:
@@ -146,9 +157,20 @@ absl::optional<decimal::Decimal> toDecimalDyn(const cel::CelValue& v, std::strin
         return decimal::Decimal(std::to_string(v.Uint64OrDie()));
     }
     if (v.IsDouble()) {
-        // Shortest round-tripping form, matching BigDecimal.valueOf(double).
+        // Shortest round-tripping form, matching BigDecimal.valueOf(double). NaN/Inf have
+        // no decimal representation (BigDecimal.valueOf throws on them), and std::to_chars
+        // would otherwise emit "nan"/"inf" that Decimal would parse into a non-finite value.
+        double d = v.DoubleOrDie();
+        if (!std::isfinite(d)) {
+            *error_out = "decimal: cannot convert non-finite double to Decimal";
+            return absl::nullopt;
+        }
         char buf[32];
-        auto res = std::to_chars(buf, buf + sizeof(buf), v.DoubleOrDie());
+        auto res = std::to_chars(buf, buf + sizeof(buf), d);
+        if (res.ec != std::errc()) {
+            *error_out = "decimal: cannot convert double to Decimal";
+            return absl::nullopt;
+        }
         return decimal::Decimal(std::string(buf, res.ptr));
     }
     if (v.IsBytes()) {
@@ -547,16 +569,6 @@ absl::Status RegisterExtraFuncs(cel::CelFunctionRegistry& registry, Arena* /*reg
     s = registerDecimal(registry);
     if (!s.ok()) return s;
     return registerTimestamp(registry);
-}
-
-// Test hooks declared in the header.
-bool IsIpv4Prefix(std::string_view toValidate, bool /*strict*/) { return validateIpv4(toValidate); }
-bool IsIpv6Prefix(std::string_view toValidate, bool /*strict*/) { return validateIpv6(toValidate); }
-bool IsIpPrefix(std::string_view toValidate, bool strict) {
-    return IsIpv4Prefix(toValidate, strict) || IsIpv6Prefix(toValidate, strict);
-}
-bool IsHostAndPort(std::string_view toValidate, bool /*portRequired*/) {
-    return validateHostname(toValidate);
 }
 
 }  // namespace schemaregistry::rules::cel

@@ -80,6 +80,9 @@ endif()
 set(MPDEC_GEN_DIR "${MPDEC_BINARY_DIR}/libmpdec")
 file(MAKE_DIRECTORY "${MPDEC_GEN_DIR}")
 
+# mpdecimal.h.in carries a bare @MPD_CONFIG@ token in addition to @MPD_HEADER_CONFIG@;
+# upstream leaves it empty, so define it explicitly rather than rely on an unset variable.
+set(MPD_CONFIG "")
 file(READ "${MPDEC_SOURCE_DIR}/libmpdec/mpdecimal.h.in" MPDECIMAL_H_CONTENT)
 string(REPLACE "@MPD_CONFIG@"        "${MPD_CONFIG}"        MPDECIMAL_H_CONTENT "${MPDECIMAL_H_CONTENT}")
 string(REPLACE "@MPD_HEADER_CONFIG@" "${MPD_HEADER_CONFIG}" MPDECIMAL_H_CONTENT "${MPDECIMAL_H_CONTENT}")

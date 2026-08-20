@@ -48,11 +48,11 @@ void DecimalUtil::bytesToMagnitude(const std::string &bytes, uint8_t &sign, uint
             buf[off + i] = static_cast<uint8_t>(bytes[i]);
         }
     } else {
-        // Coefficient exceeds 128 bits (> ~38 digits); keep the low 16 bytes.
-        const size_t start = len - sizeof(buf);
-        for (size_t i = 0; i < sizeof(buf); ++i) {
-            buf[i] = static_cast<uint8_t>(bytes[start + i]);
-        }
+        // The coefficient is carried in a 128-bit triple (hi/lo), so anything wider than
+        // 16 bytes (> ~38 digits) cannot be represented. Fail fast rather than silently
+        // truncate to a wrong value.
+        throw std::out_of_range(
+            "decimal coefficient exceeds 128 bits (max 16 bytes) and cannot be represented");
     }
 
     uint64_t h = 0;
