@@ -143,6 +143,9 @@ if (SCHEMAREGISTRY_WITH_RULES)
         GIT_TAG        v1.1.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
+
+    # mpdecimal (libmpdec++) backs the CEL Decimal functions.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mpdecimal.cmake)
 endif()
 
 if (SCHEMAREGISTRY_WITH_RULES)
@@ -343,6 +346,9 @@ if(SCHEMAREGISTRY_WITH_RULES)
             $<BUILD_INTERFACE:cel_cpp>
             $<BUILD_INTERFACE:cel_cpp_parser>
             $<BUILD_INTERFACE:cel_cpp_minimal_descriptor_set>
+
+            # mpdecimal (libmpdec++) for CEL Decimal functions
+            $<BUILD_INTERFACE:mpdecxx::mpdecxx>
 
             # JSON processing for rules
             $<BUILD_INTERFACE:jsonata>

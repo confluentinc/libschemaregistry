@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "absl/time/time.h"
+#include "confluent/type/decimal.pb.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
@@ -113,6 +115,32 @@ nlohmann::json toJsonValue(
 
 google::api::expr::runtime::CelValue fromAvroValue(
     const ::avro::GenericDatum &avro, google::protobuf::Arena *arena) {
+    // Logical types are converted to their CEL semantic type so that portable
+    // expressions (decimal(this.amount), timestamp.of(this.ts)) work the same as
+    // in the other clients. Decimal -> confluent.type.Decimal message; timestamp
+    // -> CEL timestamp. Everything else falls through to the base-type switch.
+    switch (avro.logicalType().type()) {
+        case ::avro::LogicalType::DECIMAL: {
+            std::vector<uint8_t> bytes =
+                avro.type() == ::avro::AVRO_FIXED
+                    ? avro.value<::avro::GenericFixed>().value()
+                    : avro.value<std::vector<uint8_t>>();
+            auto *msg =
+                google::protobuf::Arena::Create<confluent::type::Decimal>(arena);
+            msg->set_value(std::string(bytes.begin(), bytes.end()));
+            msg->set_scale(avro.logicalType().scale());
+            return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                msg, arena);
+        }
+        case ::avro::LogicalType::TIMESTAMP_MILLIS:
+            return google::api::expr::runtime::CelValue::CreateTimestamp(
+                absl::FromUnixMillis(avro.value<int64_t>()));
+        case ::avro::LogicalType::TIMESTAMP_MICROS:
+            return google::api::expr::runtime::CelValue::CreateTimestamp(
+                absl::FromUnixMicros(avro.value<int64_t>()));
+        default:
+            break;
+    }
     switch (avro.type()) {
         case ::avro::AVRO_BOOL:
             return google::api::expr::runtime::CelValue::CreateBool(
