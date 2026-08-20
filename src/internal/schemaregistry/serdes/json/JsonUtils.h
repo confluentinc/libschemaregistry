@@ -130,6 +130,32 @@ std::unordered_set<std::string> getConfluentTags(const jsoncons::ojson &schema);
 }  // namespace schema_navigation
 
 /**
+ * Walk value against schema, evaluating every inline "confluent:rules" CHECK
+ * constraint encountered and collecting all failures. Read-only — the value is
+ * not modified.
+ *
+ * Two kinds of rules are evaluated:
+ *   - Object-level ("confluent:rules" on an object schema) — `this` is the
+ *     object.
+ *   - Property-level ("confluent:rules" on a property schema) — `this` is the
+ *     property value. Honors the skip-on-null contract: a property that is
+ *     absent or null does not have its rules invoked.
+ *
+ * Failures carry their location rooted at "$" to match the JVM client (e.g.
+ * $.addr.zip, $.tags[3]). The walk continues after each failure so callers see
+ * the full set rather than only the first, unless fail_fast is set.
+ *
+ * @param executor Executor used to evaluate each rule
+ * @param schema Raw schema JSON, also used as the base for local "$ref"
+ * @param value JSON value to validate
+ * @param fail_fast Stop at the first violation
+ * @return Every violation found, in walk order
+ */
+std::vector<ValidationRuleError> validateMessage(
+    ValidationRuleExecutor &executor, const nlohmann::json &schema,
+    const nlohmann::json &value, bool fail_fast);
+
+/**
  * JSON validation utilities
  */
 namespace validation_utils {

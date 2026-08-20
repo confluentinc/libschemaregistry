@@ -140,9 +140,12 @@ if (SCHEMAREGISTRY_WITH_RULES)
     FetchContent_Declare(
         protovalidate_cc
         GIT_REPOSITORY https://github.com/bufbuild/protovalidate-cc.git
-        GIT_TAG        v1.0.0
+        GIT_TAG        v1.1.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
+
+    # mpdecimal (libmpdec++) backs the CEL Decimal functions.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mpdecimal.cmake)
 endif()
 
 if (SCHEMAREGISTRY_WITH_RULES)
@@ -205,6 +208,7 @@ file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
                               "include/schemaregistry/serdes/SerdeError.h"
                               "include/schemaregistry/serdes/SerdeTypes.h"
                               "include/schemaregistry/serdes/RuleRegistry.h"
+                              "include/schemaregistry/serdes/ValidationRule.h"
                               "include/schemaregistry/serdes/WildcardMatcher.h"
                               "src/internal/schemaregistry/serdes/json/JsonValue.h")
 file(GLOB CORE_SERDES_SOURCES "src/serdes/Serde.cpp"
@@ -212,6 +216,7 @@ file(GLOB CORE_SERDES_SOURCES "src/serdes/Serde.cpp"
                               "src/serdes/SerdeError.cpp"
                               "src/serdes/SerdeTypes.cpp"
                               "src/serdes/RuleRegistry.cpp"
+                              "src/serdes/ValidationRule.cpp"
                               "src/serdes/WildcardMatcher.cpp"
                               "src/serdes/json/JsonValue.cpp")
 target_sources(schemaregistry PRIVATE ${CORE_SERDES_HEADERS} ${CORE_SERDES_SOURCES})
@@ -341,6 +346,9 @@ if(SCHEMAREGISTRY_WITH_RULES)
             $<BUILD_INTERFACE:cel_cpp>
             $<BUILD_INTERFACE:cel_cpp_parser>
             $<BUILD_INTERFACE:cel_cpp_minimal_descriptor_set>
+
+            # mpdecimal (libmpdec++) for CEL Decimal functions
+            $<BUILD_INTERFACE:mpdecxx::mpdecxx>
 
             # JSON processing for rules
             $<BUILD_INTERFACE:jsonata>
