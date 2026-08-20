@@ -77,6 +77,13 @@ if(SCHEMAREGISTRY_WITH_RULES)
     )
 endif()
 
+# CelDecimalTimestampTest is compiled whenever rules are enabled, but its Avro
+# marshalling cases need Avro, which rules do not force on. Flag their availability so
+# those cases compile only when Avro is present.
+if(SCHEMAREGISTRY_WITH_AVRO)
+    target_compile_definitions(schemaregistry-test PRIVATE SCHEMAREGISTRY_TEST_WITH_AVRO)
+endif()
+
 # Discover and register tests
 include(GoogleTest)
 gtest_discover_tests(schemaregistry-test)
