@@ -16,16 +16,21 @@
 
 #include <nlohmann/json.hpp>
 
+// Avro is optional: SCHEMAREGISTRY_WITH_RULES forces Protobuf on but not Avro, so the
+// Avro marshalling tests below are compiled only when Avro is enabled.
+#ifdef SCHEMAREGISTRY_TEST_WITH_AVRO
 #include <avro/Compiler.hh>
 #include <avro/Generic.hh>
 #include <avro/GenericDatum.hh>
 #include <avro/ValidSchema.hh>
 
+#include "schemaregistry/serdes/avro/AvroUtils.h"
+#endif
+
 #include "confluent/type/decimal.pb.h"
 #include "google/protobuf/timestamp.pb.h"
 #include "schemaregistry/rules/cel/CelValidator.h"
 #include "schemaregistry/serdes/ValidationRule.h"
-#include "schemaregistry/serdes/avro/AvroUtils.h"
 #include "schemaregistry/serdes/json/JsonValue.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 
@@ -138,6 +143,7 @@ TEST(CelDecimalTimestampTest, ProtoWktTimestampIntoCel) {
     EXPECT_TRUE(std::get<bool>(result));
 }
 
+#ifdef SCHEMAREGISTRY_TEST_WITH_AVRO
 TEST(CelDecimalTimestampTest, AvroLogicalDecimalIntoCel) {
     const char *schema = R"json({
         "type": "record", "name": "DecimalRecord",
@@ -180,3 +186,4 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampIntoCel) {
                                                    datum, false);
     EXPECT_TRUE(violations.empty());
 }
+#endif  // SCHEMAREGISTRY_TEST_WITH_AVRO
