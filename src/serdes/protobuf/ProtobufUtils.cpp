@@ -129,6 +129,14 @@ ProtobufVariant transformRecursive(
             for (int i = 0; i < descriptor->field_count(); ++i) {
                 const google::protobuf::FieldDescriptor* fd =
                     descriptor->field(i);
+                if (fd == descriptor->map_key()) {
+                    // A map field arrives as a list of entry messages, so the walk
+                    // reaches the entry's key as well as its value. A key is part of
+                    // the map's identity rather than a value to transform - rewriting
+                    // it would move the entry - and the validation walk never
+                    // evaluates anything on it either.
+                    continue;
+                }
                 auto field = transformFieldWithContext(ctx, fd, descriptor,
                                                        result.get());
                 if (field.has_value()) {
@@ -223,16 +231,29 @@ std::optional<ProtobufVariant> transformFieldWithContext(
     ctx.enterField(*temp_serde_value, fd->full_name(), fd->name(),
                    getFieldType(fd), getInlineTags(fd));
 
-    if (fd->containing_oneof() &&
+    // Skip-on-null, as in the validation walk: a field with explicit presence that is
+    // unset has no value to transform, and writing one back would materialize it -
+    // turning an absent message or unset optional scalar into a present one carrying a
+    // transformed default. has_presence covers oneof members too.
+    if (fd->has_presence() &&
         !message->GetReflection()->HasField(*message, fd)) {
-        // Skip oneof fields that are not set
         ctx.exitField();
         return std::nullopt;
     }
 
     try {
         ProtobufVariant value = getMessageFieldValue(message, fd);
-        ProtobufVariant new_value = transformRecursive(ctx, desc, value);
+        // Descend with the field's own message type. Walking a nested message
+        // against the containing descriptor applies the parent's fields to the
+        // child, which the reflection API rejects outright. A map field arrives as
+        // a list of entry messages, so its message type - the entry type - is the
+        // right descriptor for those too.
+        const google::protobuf::Descriptor* child_desc = desc;
+        if (fd->type() == google::protobuf::FieldDescriptor::TYPE_MESSAGE ||
+            fd->type() == google::protobuf::FieldDescriptor::TYPE_GROUP) {
+            child_desc = fd->message_type();
+        }
+        ProtobufVariant new_value = transformRecursive(ctx, child_desc, value);
 
         // Check for condition rules
         auto rule_kind = ctx.getRule().getKind();
@@ -698,22 +719,63 @@ void setMessageField(google::protobuf::Message* message,
     }
 }
 
+namespace {
+
+// confluent.Meta is installed on every options message as extension field 1088.
+constexpr int kMetaExtensionNumber = 1088;
+
+// Recovers a Meta that the descriptor's pool left unresolved, by parsing it out of the
+// options' unknown fields.
+std::optional<confluent::Meta> parseMetaFromUnknownFields(
+    const google::protobuf::UnknownFieldSet& unknown) {
+    for (int i = 0; i < unknown.field_count(); ++i) {
+        const auto& field = unknown.field(i);
+        if (field.number() != kMetaExtensionNumber ||
+            field.type() !=
+                google::protobuf::UnknownField::TYPE_LENGTH_DELIMITED) {
+            continue;
+        }
+        confluent::Meta meta;
+        if (meta.ParseFromString(field.length_delimited())) {
+            return meta;
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+std::optional<confluent::Meta> getMessageMeta(
+    const google::protobuf::Descriptor* message_desc) {
+    if (!message_desc) {
+        return std::nullopt;
+    }
+    const google::protobuf::MessageOptions& options = message_desc->options();
+    if (options.HasExtension(confluent::message_meta)) {
+        return options.GetExtension(confluent::message_meta);
+    }
+    return parseMetaFromUnknownFields(options.unknown_fields());
+}
+
+std::optional<confluent::Meta> getFieldMeta(
+    const google::protobuf::FieldDescriptor* field_desc) {
+    if (!field_desc) {
+        return std::nullopt;
+    }
+    const google::protobuf::FieldOptions& options = field_desc->options();
+    if (options.HasExtension(confluent::field_meta)) {
+        return options.GetExtension(confluent::field_meta);
+    }
+    return parseMetaFromUnknownFields(options.unknown_fields());
+}
+
 std::unordered_set<std::string> getInlineTags(
     const google::protobuf::FieldDescriptor* field_desc) {
     std::unordered_set<std::string> tag_set;
 
-    if (!field_desc) {
-        return tag_set;
-    }
-
-    // Try to get the confluent.field_meta extension from the field options
-    const google::protobuf::FieldOptions& options = field_desc->options();
-
-    if (options.HasExtension(confluent::field_meta)) {
-        auto ext = options.GetExtension(confluent::field_meta);
-        const auto& tags =
-            ext.tags();  // Call tags() method to get RepeatedPtrField
-        for (const auto& tag : tags) {
+    auto meta = getFieldMeta(field_desc);
+    if (meta.has_value()) {
+        for (const auto& tag : meta->tags()) {
             tag_set.insert(tag);
         }
     }

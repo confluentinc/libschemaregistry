@@ -2,8 +2,11 @@
 
 #include <utility>
 
+#include "absl/time/time.h"
+#include "confluent/type/decimal.pb.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
+#include "eval/public/structs/cel_proto_wrapper.h"
 
 // Fix for Windows GetMessage macro conflict
 // On Windows, GetMessage is defined as a macro in winuser.h which conflicts
@@ -112,6 +115,32 @@ nlohmann::json toJsonValue(
 
 google::api::expr::runtime::CelValue fromAvroValue(
     const ::avro::GenericDatum &avro, google::protobuf::Arena *arena) {
+    // Logical types are converted to their CEL semantic type so that portable
+    // expressions (decimal(this.amount), timestamp.of(this.ts)) work the same as
+    // in the other clients. Decimal -> confluent.type.Decimal message; timestamp
+    // -> CEL timestamp. Everything else falls through to the base-type switch.
+    switch (avro.logicalType().type()) {
+        case ::avro::LogicalType::DECIMAL: {
+            std::vector<uint8_t> bytes =
+                avro.type() == ::avro::AVRO_FIXED
+                    ? avro.value<::avro::GenericFixed>().value()
+                    : avro.value<std::vector<uint8_t>>();
+            auto *msg =
+                google::protobuf::Arena::Create<confluent::type::Decimal>(arena);
+            msg->set_value(std::string(bytes.begin(), bytes.end()));
+            msg->set_scale(avro.logicalType().scale());
+            return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                msg, arena);
+        }
+        case ::avro::LogicalType::TIMESTAMP_MILLIS:
+            return google::api::expr::runtime::CelValue::CreateTimestamp(
+                absl::FromUnixMillis(avro.value<int64_t>()));
+        case ::avro::LogicalType::TIMESTAMP_MICROS:
+            return google::api::expr::runtime::CelValue::CreateTimestamp(
+                absl::FromUnixMicros(avro.value<int64_t>()));
+        default:
+            break;
+    }
     switch (avro.type()) {
         case ::avro::AVRO_BOOL:
             return google::api::expr::runtime::CelValue::CreateBool(
@@ -470,13 +499,16 @@ google::api::expr::runtime::CelValue fromProtobufValue(
             return google::api::expr::runtime::CelValue::CreateInt64(
                 variant.get<int64_t>());
 
+        // CEL has a distinct unsigned type; narrowing these to Int would wrap
+        // any u64 above int64 max to a negative number, so `this > 0` would
+        // reject valid values.
         case ProtobufVariant::ValueType::U32:
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(variant.get<uint32_t>()));
+            return google::api::expr::runtime::CelValue::CreateUint64(
+                static_cast<uint64_t>(variant.get<uint32_t>()));
 
         case ProtobufVariant::ValueType::U64:
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(variant.get<uint64_t>()));
+            return google::api::expr::runtime::CelValue::CreateUint64(
+                variant.get<uint64_t>());
 
         case ProtobufVariant::ValueType::F32:
             return google::api::expr::runtime::CelValue::CreateDouble(
@@ -514,61 +546,24 @@ google::api::expr::runtime::CelValue fromProtobufValue(
                 return google::api::expr::runtime::CelValue::CreateNull();
             }
 
-            const auto *descriptor = msg->GetDescriptor();
-            if (!descriptor)
-                return google::api::expr::runtime::CelValue::CreateNull();
-            const auto *reflection = msg->GetReflection();
-            if (!reflection)
-                return google::api::expr::runtime::CelValue::CreateNull();
-
-            auto *map_impl = google::protobuf::Arena::Create<
-                google::api::expr::runtime::CelMapBuilder>(arena);
-
-            std::vector<const google::protobuf::FieldDescriptor *> fields;
-            reflection->ListFields(*msg, &fields);
-
-            for (const auto *field : fields) {
-                auto *arena_field_name =
-                    google::protobuf::Arena::Create<std::string>(arena,
-                                                                 field->name());
-                auto cel_key =
-                    google::api::expr::runtime::CelValue::CreateString(
-                        arena_field_name);
-
-                google::api::expr::runtime::CelValue cel_value =
-                    google::api::expr::runtime::CelValue::CreateNull();
-
-                if (field->is_repeated()) {
-                    std::vector<google::api::expr::runtime::CelValue> vec;
-                    int field_size = reflection->FieldSize(*msg, field);
-
-                    for (int i = 0; i < field_size; ++i) {
-                        cel_value = convertProtobufFieldToCel(
-                            *msg, field, reflection, arena, i);
-                        if (!cel_value.IsError()) {
-                            vec.push_back(cel_value);
-                        }
-                    }
-
-                    auto *list_impl = google::protobuf::Arena::Create<
-                        google::api::expr::runtime::ContainerBackedListImpl>(
-                        arena, vec);
-                    cel_value =
-                        google::api::expr::runtime::CelValue::CreateList(
-                            list_impl);
-                } else {
-                    cel_value = convertProtobufFieldToCel(
-                        *msg, field, reflection, arena, -1);
-                }
-
-                if (!cel_value.IsError()) {
-                    auto status = map_impl->Add(cel_key, cel_value);
-                    if (!status.ok()) {
-                    }
-                }
-            }
-
-            return google::api::expr::runtime::CelValue::CreateMap(map_impl);
+            // Hand cel-cpp the message itself rather than a map of its fields.
+            // The engine then answers from the descriptor, which is what the other
+            // clients' engines do and what protovalidate-cc does:
+            //
+            //   - has() follows protobuf presence, so an unset field reads as unset
+            //     rather than as its default. A map cannot express that: the key has
+            //     to be there for `this.count == 0` to resolve, and its being there
+            //     is what has() reports.
+            //   - a well-known type becomes the value it wraps - a Timestamp a CEL
+            //     timestamp, a StringValue a string - which CreateMessage does by
+            //     downcasting. Built as a map it stayed a map of seconds and nanos.
+            //
+            // The copy is arena-allocated because the CelValue holds a bare pointer
+            // and has to stay valid for the whole evaluation, outliving this variant.
+            auto *owned = msg->New(arena);
+            owned->CopyFrom(*msg);
+            return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                owned, arena);
         }
 
         case ProtobufVariant::ValueType::List: {
@@ -604,6 +599,15 @@ google::api::expr::runtime::CelValue fromProtobufValue(
                         } else if constexpr (std::is_same_v<T, bool>) {
                             cel_key = google::api::expr::runtime::CelValue::
                                 CreateBool(k);
+                        } else if constexpr (std::is_unsigned_v<T>) {
+                            // CEL has a distinct unsigned type, and a map key is
+                            // the one value whose type comes from the key field
+                            // rather than from the value itself. Narrowing an
+                            // unsigned key to int64 wraps anything above int64
+                            // max to a negative number, so a rule could neither
+                            // index by such a key nor compare it.
+                            cel_key = google::api::expr::runtime::CelValue::
+                                CreateUint64(static_cast<uint64_t>(k));
                         } else {
                             cel_key = google::api::expr::runtime::CelValue::
                                 CreateInt64(static_cast<int64_t>(k));
@@ -653,13 +657,15 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
             return google::api::expr::runtime::CelValue::CreateInt64(value);
         }
 
+        // As in fromProtobufValue: unsigned values keep CEL's unsigned type, so
+        // that a uint64 above int64 max is not seen as negative.
         case google::protobuf::FieldDescriptor::CPPTYPE_UINT32: {
             uint32_t value =
                 (index >= 0)
                     ? reflection->GetRepeatedUInt32(message, field, index)
                     : reflection->GetUInt32(message, field);
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(value));
+            return google::api::expr::runtime::CelValue::CreateUint64(
+                static_cast<uint64_t>(value));
         }
 
         case google::protobuf::FieldDescriptor::CPPTYPE_UINT64: {
@@ -667,8 +673,7 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
                 (index >= 0)
                     ? reflection->GetRepeatedUInt64(message, field, index)
                     : reflection->GetUInt64(message, field);
-            return google::api::expr::runtime::CelValue::CreateInt64(
-                static_cast<int64_t>(value));
+            return google::api::expr::runtime::CelValue::CreateUint64(value);
         }
 
         case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT: {
@@ -719,7 +724,10 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
                     : reflection->GetMessage(message, field);
 
             if (field->is_map()) {
-                return convertProtobufMapToCel(nested_message, field, arena);
+                // Reached only when a caller asks for a single entry; the whole
+                // map is built by the message binding below, which passes the
+                // containing message.
+                return convertProtobufMapToCel(message, field, arena);
             } else {
                 auto message_copy = std::unique_ptr<google::protobuf::Message>(
                     nested_message.New());
@@ -736,34 +744,41 @@ google::api::expr::runtime::CelValue convertProtobufFieldToCel(
 }
 
 google::api::expr::runtime::CelValue convertProtobufMapToCel(
-    const google::protobuf::Message &map_entry,
-    const google::protobuf::FieldDescriptor * /*map_field*/,
+    const google::protobuf::Message &message,
+    const google::protobuf::FieldDescriptor *map_field,
     google::protobuf::Arena *arena) {
     auto *map_impl = google::protobuf::Arena::Create<
         google::api::expr::runtime::CelMapBuilder>(arena);
 
-    const auto *descriptor = map_entry.GetDescriptor();
-    const auto *reflection = map_entry.GetReflection();
-
-    if (!descriptor || !reflection) {
+    const auto *reflection = message.GetReflection();
+    if (map_field == nullptr || reflection == nullptr ||
+        !map_field->is_map()) {
         return google::api::expr::runtime::CelValue::CreateMap(map_impl);
     }
 
-    const auto *key_field = descriptor->field(0);
-    const auto *value_field = descriptor->field(1);
-
-    if (!key_field || !value_field) {
+    // A protobuf map is a repeated field of two-field entry messages. Aggregate
+    // every entry into a single CEL map, so that `this.scores["foo"]` indexes a
+    // map rather than a list of one-entry maps.
+    const auto *entry_descriptor = map_field->message_type();
+    const auto *key_field = entry_descriptor->map_key();
+    const auto *value_field = entry_descriptor->map_value();
+    if (key_field == nullptr || value_field == nullptr) {
         return google::api::expr::runtime::CelValue::CreateMap(map_impl);
     }
 
-    auto cel_key =
-        convertProtobufFieldToCel(map_entry, key_field, reflection, arena, -1);
-    auto cel_value = convertProtobufFieldToCel(map_entry, value_field,
-                                               reflection, arena, -1);
-
-    if (!cel_key.IsError() && !cel_value.IsError()) {
-        auto status = map_impl->Add(cel_key, cel_value);
-        if (!status.ok()) {
+    int count = reflection->FieldSize(message, map_field);
+    for (int i = 0; i < count; ++i) {
+        const auto &entry =
+            reflection->GetRepeatedMessage(message, map_field, i);
+        const auto *entry_reflection = entry.GetReflection();
+        auto cel_key = convertProtobufFieldToCel(entry, key_field,
+                                                 entry_reflection, arena, -1);
+        auto cel_value = convertProtobufFieldToCel(entry, value_field,
+                                                   entry_reflection, arena, -1);
+        if (!cel_key.IsError() && !cel_value.IsError()) {
+            auto status = map_impl->Add(cel_key, cel_value);
+            if (!status.ok()) {
+            }
         }
     }
 

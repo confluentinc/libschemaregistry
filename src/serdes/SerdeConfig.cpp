@@ -16,7 +16,10 @@ SerializerConfig::SerializerConfig()
       rule_config({}),
       subject_name_strategy_type(SubjectNameStrategyType::Associated),
       subject_name_strategy_config({}),
-      schema_id_serializer(prefixSchemaIdSerializer) {}
+      schema_id_serializer(prefixSchemaIdSerializer),
+      validation_rules_execution(ValidationRulesExecution::Disabled),
+      validation_rules_fail_fast(false),
+      validation_rule_executor(nullptr) {}
 
 SerializerConfig::SerializerConfig(
     bool auto_register_schemas, std::optional<SchemaSelector> use_schema,
@@ -29,7 +32,10 @@ SerializerConfig::SerializerConfig(
       rule_config(rule_config),
       subject_name_strategy_type(SubjectNameStrategyType::Associated),
       subject_name_strategy_config({}),
-      schema_id_serializer(prefixSchemaIdSerializer) {}
+      schema_id_serializer(prefixSchemaIdSerializer),
+      validation_rules_execution(ValidationRulesExecution::Disabled),
+      validation_rules_fail_fast(false),
+      validation_rule_executor(nullptr) {}
 
 SerializerConfig SerializerConfig::createDefault() {
     return SerializerConfig();
