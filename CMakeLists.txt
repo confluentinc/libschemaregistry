@@ -373,6 +373,11 @@ if(SCHEMAREGISTRY_WITH_RULES)
             # HashiCorp Vault SDK for Vault KMS driver
             libvault::vault
     )
+
+    # The CEL is* validators call inet_pton, which on Windows lives in Ws2_32.lib.
+    if(WIN32)
+        target_link_libraries(schemaregistry PRIVATE ws2_32)
+    endif()
 endif()
 
 # Add conditional compile definitions for C++ feature detection
