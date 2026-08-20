@@ -31,15 +31,29 @@ class JsonSerde {
         const schemaregistry::rest::model::Schema &schema,
         std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client);
 
+    /**
+     * The schema's JSON with its references resolved and inlined, parsed once
+     * and cached. Inline validation walks the schema JSON rather than the
+     * compiled schema, and needs references flattened so that rules declared in
+     * a referenced schema are reachable; without that they would be silently
+     * skipped.
+     */
+    std::shared_ptr<const nlohmann::json> getSchemaJson(
+        const schemaregistry::rest::model::Schema &schema,
+        std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client);
+
     // Clear caches
     void clear();
 
   private:
-    // Cache for parsed schemas: Schema -> json_schema
+    // Both caches are keyed by schemaCacheKey(), not by schema text: see there.
     std::unordered_map<
         std::string,
         std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>>
         parsed_schemas_cache_;
+
+    std::unordered_map<std::string, std::shared_ptr<const nlohmann::json>>
+        schema_json_cache_;
 
     mutable std::mutex cache_mutex_;
 
