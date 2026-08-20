@@ -31,6 +31,7 @@ class CelExecutor : public RuleExecutor {
 
   private:
     friend class CelFieldExecutor;
+    friend class CelValidator;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
