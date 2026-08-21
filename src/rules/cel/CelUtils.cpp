@@ -4,6 +4,7 @@
 
 #include "absl/time/time.h"
 #include "confluent/type/decimal.pb.h"
+#include "confluent/type/variant.pb.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
@@ -199,9 +200,32 @@ google::api::expr::runtime::CelValue fromAvroValue(
             return google::api::expr::runtime::CelValue::CreateMap(map_impl);
         }
         case ::avro::AVRO_RECORD: {
+            const auto &record = avro.value<::avro::GenericRecord>();
+            // A confluent.type.Variant record (two bytes fields metadata/value) is
+            // surfaced as a confluent.type.Variant proto message, so the variants.*
+            // functions see it as a first-class Variant - the counterpart of the
+            // decimal logical-type branch above. Recognized by record name, since
+            // avro-cpp does not apply a logical type to a record.
+            if (record.schema()->name().fullname() == "confluent.type.Variant") {
+                std::vector<uint8_t> metadata;
+                std::vector<uint8_t> value;
+                for (size_t i = 0; i < record.schema()->names(); ++i) {
+                    const std::string &fieldName = record.schema()->nameAt(i);
+                    if (fieldName == "metadata") {
+                        metadata = record.fieldAt(i).value<std::vector<uint8_t>>();
+                    } else if (fieldName == "value") {
+                        value = record.fieldAt(i).value<std::vector<uint8_t>>();
+                    }
+                }
+                auto *msg = google::protobuf::Arena::Create<confluent::type::Variant>(
+                    arena);
+                msg->set_metadata(std::string(metadata.begin(), metadata.end()));
+                msg->set_value(std::string(value.begin(), value.end()));
+                return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                    msg, arena);
+            }
             auto *map_impl = google::protobuf::Arena::Create<
                 google::api::expr::runtime::CelMapBuilder>(arena);
-            const auto &record = avro.value<::avro::GenericRecord>();
             for (size_t i = 0; i < record.schema()->names(); ++i) {
                 auto *arena_name = google::protobuf::Arena::Create<std::string>(
                     arena, record.schema()->nameAt(i));

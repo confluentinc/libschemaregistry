@@ -14,12 +14,16 @@
 
 #include "schemaregistry/rules/cel/ExtraFunc.h"
 
+#include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,7 +41,9 @@
 #include "eval/public/structs/cel_proto_wrapper.h"
 #include "google/protobuf/arena.h"
 #include "google/protobuf/message.h"
+#include "confluent/type/variant.pb.h"
 #include "schemaregistry/rules/cel/DecimalUtil.h"
+#include "schemaregistry/serdes/Variant.h"
 
 namespace schemaregistry::rules::cel {
 
@@ -561,6 +567,514 @@ absl::Status registerIsFuncs(cel::CelFunctionRegistry& registry) {
     return absl::OkStatus();
 }
 
+// ---------------------------------------------------------------------------
+// Variant helpers. A CEL Variant is a confluent.type.Variant proto message; the
+// variants.* functions wrap/unwrap it through the schemaregistry::serdes::Variant
+// codec. Mirrors the Decimal helpers above. Null model: CEL null = absent (a miss,
+// out-of-bounds, or non-variant); a Variant whose top type is NULL = present-but-null.
+// ---------------------------------------------------------------------------
+
+using SrVariant = schemaregistry::serdes::Variant;
+using schemaregistry::serdes::VariantType;
+
+cel::CelValue makeCelString(Arena* arena, const std::string& value) {
+    return cel::CelValue::CreateString(Arena::Create<std::string>(arena, value));
+}
+
+bool isVariantMessage(const cel::CelValue& value) {
+    if (!value.IsMessage()) {
+        return false;
+    }
+    const google::protobuf::Message* msg = value.MessageOrDie();
+    return msg != nullptr &&
+           msg->GetDescriptor()->full_name() == "confluent.type.Variant";
+}
+
+// Read a confluent.type.Variant message via reflection (works for the generated
+// class and a runtime DynamicMessage).
+SrVariant variantFromMessage(const google::protobuf::Message& msg) {
+    const auto* desc = msg.GetDescriptor();
+    const auto* refl = msg.GetReflection();
+    std::string metaScratch;
+    std::string valueScratch;
+    const std::string& metadata = refl->GetStringReference(
+        msg, desc->FindFieldByName("metadata"), &metaScratch);
+    const std::string& value = refl->GetStringReference(
+        msg, desc->FindFieldByName("value"), &valueScratch);
+    return SrVariant(std::vector<uint8_t>(value.begin(), value.end()),
+                     std::vector<uint8_t>(metadata.begin(), metadata.end()));
+}
+
+// Wrap a Variant into a CEL value. Uses standaloneValueBytes() so a navigated
+// sub-variant re-encodes as its own self-contained (metadata, value) message.
+cel::CelValue wrapVariant(const SrVariant& variant, Arena* arena) {
+    auto* msg = Arena::Create<confluent::type::Variant>(arena);
+    const std::vector<uint8_t>& metadata = variant.metadataBytes();
+    std::vector<uint8_t> value = variant.standaloneValueBytes();
+    msg->set_metadata(std::string(metadata.begin(), metadata.end()));
+    msg->set_value(std::string(value.begin(), value.end()));
+    return cel::CelProtoWrapper::CreateMessage(msg, arena);
+}
+
+// The coarse label variants.type returns (integer widths -> "int", float/double ->
+// "double", decimal widths -> "decimal", all timestamp variants -> "timestamp").
+const char* variantTypeLabel(VariantType type) {
+    switch (type) {
+        case VariantType::Object: return "object";
+        case VariantType::Array: return "array";
+        case VariantType::Null: return "null";
+        case VariantType::Boolean: return "boolean";
+        case VariantType::Byte:
+        case VariantType::Short:
+        case VariantType::Int:
+        case VariantType::Long: return "int";
+        case VariantType::Float:
+        case VariantType::Double: return "double";
+        case VariantType::Decimal4:
+        case VariantType::Decimal8:
+        case VariantType::Decimal16: return "decimal";
+        case VariantType::Date: return "date";
+        case VariantType::Time: return "time";
+        case VariantType::TimestampTz:
+        case VariantType::TimestampNtz:
+        case VariantType::TimestampNanosTz:
+        case VariantType::TimestampNanosNtz: return "timestamp";
+        case VariantType::String: return "string";
+        case VariantType::Binary: return "bytes";
+        case VariantType::Uuid: return "uuid";
+    }
+    throw std::invalid_argument("unsupported variant type");
+}
+
+// A variants.* navigation receiver: sets *isNull when the arg is CEL null (a
+// passthrough), else returns the Variant if it is a variant message, else nullopt
+// (the caller reports a hard error).
+std::optional<SrVariant> receiverVariant(const cel::CelValue& value, bool* isNull) {
+    *isNull = value.IsNull();
+    if (value.IsNull()) {
+        return std::nullopt;
+    }
+    if (isVariantMessage(value)) {
+        return variantFromMessage(*value.MessageOrDie());
+    }
+    return std::nullopt;
+}
+
+// JSONPath subset (port of the Java/Python VariantPath). Throws std::invalid_argument
+// on a malformed path (the LambdaFunction turns it into a CEL error); a resolution
+// miss returns nullopt. Quoted-key escapes: only "\\" and backslash+quote (option B).
+struct VariantPathSeg {
+    bool isIndex;
+    std::string key;
+    int index;
+};
+
+std::vector<VariantPathSeg> parseVariantPath(const std::string& path) {
+    if (path.empty()) {
+        throw std::invalid_argument("variant path must start with '$'");
+    }
+    if (path[0] != '$') {
+        throw std::invalid_argument("variant path must start with '$', got: " + path);
+    }
+    std::vector<VariantPathSeg> out;
+    size_t pos = 1;
+    while (pos < path.size()) {
+        char ch = path[pos];
+        if (ch == '.') {
+            pos++;
+            if (pos >= path.size() ||
+                !(std::isalpha(static_cast<unsigned char>(path[pos])) || path[pos] == '_')) {
+                throw std::invalid_argument(
+                    "expected identifier (starting with a letter or '_') after '.' in "
+                    "variant path: " + path);
+            }
+            size_t start = pos++;
+            while (pos < path.size() &&
+                   (std::isalnum(static_cast<unsigned char>(path[pos])) || path[pos] == '_')) {
+                pos++;
+            }
+            out.push_back({false, path.substr(start, pos - start), 0});
+        } else if (ch == '[') {
+            pos++;
+            if (pos >= path.size()) {
+                throw std::invalid_argument(
+                    "unexpected end of input after '[' in variant path: " + path);
+            }
+            if (path[pos] == '"' || path[pos] == '\'') {
+                char quote = path[pos++];
+                std::string key;
+                bool closed = false;
+                while (pos < path.size()) {
+                    char c = path[pos++];
+                    if (c == '\\') {
+                        if (pos >= path.size()) {
+                            throw std::invalid_argument(
+                                "unterminated escape at end of quoted key in variant path: " +
+                                path);
+                        }
+                        char esc = path[pos++];
+                        if (esc == '\\' || esc == quote) {
+                            key.push_back(esc);
+                        } else {
+                            throw std::invalid_argument(
+                                "unsupported escape in quoted key of variant path (only '\\\\' "
+                                "and backslash+quote are allowed): " + path);
+                        }
+                    } else if (c == quote) {
+                        closed = true;
+                        break;
+                    } else {
+                        key.push_back(c);
+                    }
+                }
+                if (!closed) {
+                    throw std::invalid_argument(
+                        "unterminated quoted key in variant path: " + path);
+                }
+                out.push_back({false, key, 0});
+            } else {
+                if (path[pos] == '-') {
+                    throw std::invalid_argument(
+                        "negative indices are not supported in variant path: " + path);
+                }
+                size_t start = pos;
+                while (pos < path.size() &&
+                       std::isdigit(static_cast<unsigned char>(path[pos]))) {
+                    pos++;
+                }
+                if (pos == start) {
+                    throw std::invalid_argument(
+                        "expected integer index in variant path: " + path);
+                }
+                try {
+                    long long val = std::stoll(path.substr(start, pos - start));
+                    if (val < 0 || val > INT32_MAX) {
+                        throw std::out_of_range("range");
+                    }
+                    out.push_back({true, "", static_cast<int>(val)});
+                } catch (const std::exception&) {
+                    throw std::invalid_argument(
+                        "index out of int range in variant path: " + path);
+                }
+            }
+            if (pos >= path.size() || path[pos] != ']') {
+                throw std::invalid_argument("expected ']' in variant path: " + path);
+            }
+            pos++;
+        } else {
+            throw std::invalid_argument(
+                std::string("unexpected character '") + ch + "' in variant path: " + path);
+        }
+    }
+    return out;
+}
+
+std::optional<SrVariant> walkVariantPath(const SrVariant& root, const std::string& path) {
+    std::optional<SrVariant> current = root;
+    for (const auto& seg : parseVariantPath(path)) {
+        if (!current) {
+            return std::nullopt;
+        }
+        if (seg.isIndex) {
+            current = current->getVariantType() == VariantType::Array
+                          ? current->getElementAtIndex(seg.index)
+                          : std::nullopt;
+        } else {
+            current = current->getVariantType() == VariantType::Object
+                          ? current->getFieldByKey(seg.key)
+                          : std::nullopt;
+        }
+    }
+    return current;
+}
+
+// Backing for variants.as (strict) and variants.tryAs (soft). Extracts a typed value;
+// on a type mismatch the strict form errors and the soft form returns CEL null. Types
+// with no CEL scalar extraction (object/array/null/date/time/uuid) always error.
+absl::Status variantAsImpl(absl::Span<const cel::CelValue> args, cel::CelValue* out,
+                           Arena* arena, bool nullOnError) {
+    bool isNull = false;
+    auto variant = receiverVariant(args[0], &isNull);
+    if (isNull) {
+        *out = cel::CelValue::CreateNull();
+        return absl::OkStatus();
+    }
+    if (!variant) {
+        *out = err(arena, "variants.as: expected a Variant");
+        return absl::OkStatus();
+    }
+    std::string type(args[1].StringOrDie().value());
+    VariantType vt = variant->getVariantType();
+    bool recognized = true;
+    if (type == "string") {
+        if (vt == VariantType::String) {
+            *out = makeCelString(arena, variant->getString());
+            return absl::OkStatus();
+        }
+    } else if (type == "int") {
+        if (vt == VariantType::Byte || vt == VariantType::Short ||
+            vt == VariantType::Int || vt == VariantType::Long) {
+            *out = cel::CelValue::CreateInt64(variant->getLong());
+            return absl::OkStatus();
+        }
+    } else if (type == "double") {
+        if (vt == VariantType::Float || vt == VariantType::Double) {
+            *out = cel::CelValue::CreateDouble(variant->getDouble());
+            return absl::OkStatus();
+        }
+    } else if (type == "boolean") {
+        if (vt == VariantType::Boolean) {
+            *out = cel::CelValue::CreateBool(variant->getBoolean());
+            return absl::OkStatus();
+        }
+    } else if (type == "decimal") {
+        if (vt == VariantType::Decimal4 || vt == VariantType::Decimal8 ||
+            vt == VariantType::Decimal16) {
+            std::vector<uint8_t> unscaled;
+            int scale = 0;
+            variant->getDecimalParts(unscaled, scale);
+            *out = wrapDecimal(
+                DecimalUtil::fromUnscaledBytes(
+                    std::string(unscaled.begin(), unscaled.end()), scale),
+                arena);
+            return absl::OkStatus();
+        }
+    } else if (type == "timestamp") {
+        if (vt == VariantType::TimestampTz || vt == VariantType::TimestampNtz ||
+            vt == VariantType::TimestampNanosTz || vt == VariantType::TimestampNanosNtz) {
+            int64_t raw = variant->getLong();
+            int64_t micros = (vt == VariantType::TimestampTz ||
+                              vt == VariantType::TimestampNtz)
+                                 ? raw
+                                 : raw / 1000;
+            *out = cel::CelValue::CreateTimestamp(absl::FromUnixMicros(micros));
+            return absl::OkStatus();
+        }
+    } else if (type == "bytes") {
+        if (vt == VariantType::Binary) {
+            std::vector<uint8_t> bin = variant->getBinary();
+            auto* arenaBytes = Arena::Create<std::string>(arena);
+            arenaBytes->assign(bin.begin(), bin.end());
+            *out = cel::CelValue::CreateBytes(arenaBytes);
+            return absl::OkStatus();
+        }
+    } else if (type == "object" || type == "array" || type == "null" ||
+               type == "date" || type == "time" || type == "uuid") {
+        // Not extractable as a CEL scalar - always an error, even in the soft form.
+        *out = err(arena, "variants.as: type '" + type +
+                              "' is not supported for extraction (use variants.type/"
+                              "variants.path/variants.field/variants.index instead)");
+        return absl::OkStatus();
+    } else {
+        recognized = false;
+    }
+
+    if (!recognized) {
+        if (nullOnError) {
+            *out = cel::CelValue::CreateNull();
+        } else {
+            *out = err(arena, "variants.as: unknown type '" + type +
+                                  "' (expected one of: string, int, double, boolean, "
+                                  "decimal, timestamp, bytes)");
+        }
+        return absl::OkStatus();
+    }
+
+    // Recognized type string, but the variant's actual type does not match.
+    if (nullOnError) {
+        *out = cel::CelValue::CreateNull();
+    } else {
+        *out = err(arena, "variants.as: variant is not " + type + "-typed");
+    }
+    return absl::OkStatus();
+}
+
+absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
+    // variant(dyn) - runtime dispatch on the actual value.
+    absl::Status s = reg(
+        registry, "variant", false, {T::kAny},
+        [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+            if (isVariantMessage(args[0])) {
+                *out = wrapVariant(variantFromMessage(*args[0].MessageOrDie()), arena);
+            } else if (args[0].IsString()) {
+                *out = err(arena,
+                           "variant: cannot convert string to Variant; use "
+                           "variants.parseJson(s) or variants.tryParseJson(s)");
+            } else if (args[0].IsNull()) {
+                *out = err(arena, "variant: cannot convert null to Variant");
+            } else {
+                *out = err(arena, "variant: cannot convert value to Variant");
+            }
+            return absl::OkStatus();
+        });
+    if (!s.ok()) return s;
+
+    // variant(bytes, bytes) = (value, metadata).
+    s = reg(registry, "variant", false, {T::kBytes, T::kBytes},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                auto value = args[0].BytesOrDie().value();
+                auto metadata = args[1].BytesOrDie().value();
+                SrVariant variant(std::vector<uint8_t>(value.begin(), value.end()),
+                                  std::vector<uint8_t>(metadata.begin(), metadata.end()));
+                *out = wrapVariant(variant, arena);
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.parseJson(string) - strict (a parse failure surfaces as a CEL error).
+    s = reg(registry, "variants.parseJson", false, {T::kString},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                *out = wrapVariant(
+                    SrVariant::parseJson(std::string(args[0].StringOrDie().value())), arena);
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.tryParseJson(string) - soft (CEL null on any failure).
+    s = reg(registry, "variants.tryParseJson", false, {T::kString},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                try {
+                    *out = wrapVariant(
+                        SrVariant::parseJson(std::string(args[0].StringOrDie().value())),
+                        arena);
+                } catch (const std::exception&) {
+                    *out = cel::CelValue::CreateNull();
+                }
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.type(dyn) -> string label (CEL null passes through).
+    s = reg(registry, "variants.type", false, {T::kAny},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                bool isNull = false;
+                auto variant = receiverVariant(args[0], &isNull);
+                if (isNull) {
+                    *out = cel::CelValue::CreateNull();
+                } else if (!variant) {
+                    *out = err(arena, "variants.type: expected a Variant");
+                } else {
+                    *out = makeCelString(arena, variantTypeLabel(variant->getVariantType()));
+                }
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.isNull(dyn) -> true iff a Variant whose top type is NULL (never errors).
+    s = reg(registry, "variants.isNull", false, {T::kAny},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* /*arena*/) {
+                bool result =
+                    isVariantMessage(args[0]) &&
+                    variantFromMessage(*args[0].MessageOrDie()).getVariantType() ==
+                        VariantType::Null;
+                *out = cel::CelValue::CreateBool(result);
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.path(dyn, string) -> Variant or CEL null on a miss.
+    s = reg(registry, "variants.path", false, {T::kAny, T::kString},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                bool isNull = false;
+                auto variant = receiverVariant(args[0], &isNull);
+                if (isNull) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                if (!variant) {
+                    *out = err(arena, "variants.path: expected a Variant");
+                    return absl::OkStatus();
+                }
+                auto result =
+                    walkVariantPath(*variant, std::string(args[1].StringOrDie().value()));
+                *out = result ? wrapVariant(*result, arena) : cel::CelValue::CreateNull();
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.field(dyn, string) -> Variant or CEL null on a miss / non-object.
+    s = reg(registry, "variants.field", false, {T::kAny, T::kString},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                bool isNull = false;
+                auto variant = receiverVariant(args[0], &isNull);
+                if (isNull) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                if (!variant) {
+                    *out = err(arena, "variants.field: expected a Variant");
+                    return absl::OkStatus();
+                }
+                if (variant->getVariantType() != VariantType::Object) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                auto result =
+                    variant->getFieldByKey(std::string(args[1].StringOrDie().value()));
+                *out = result ? wrapVariant(*result, arena) : cel::CelValue::CreateNull();
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.index(dyn, int) -> Variant or CEL null on out-of-bounds / non-array.
+    s = reg(registry, "variants.index", false, {T::kAny, T::kInt64},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                bool isNull = false;
+                auto variant = receiverVariant(args[0], &isNull);
+                if (isNull) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                if (!variant) {
+                    *out = err(arena, "variants.index: expected a Variant");
+                    return absl::OkStatus();
+                }
+                if (variant->getVariantType() != VariantType::Array) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                int64_t idx = args[1].Int64OrDie();
+                if (idx < 0 || idx > INT32_MAX) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                auto result = variant->getElementAtIndex(static_cast<int>(idx));
+                *out = result ? wrapVariant(*result, arena) : cel::CelValue::CreateNull();
+                return absl::OkStatus();
+            });
+    if (!s.ok()) return s;
+
+    // variants.as(dyn, string) - strict typed extraction.
+    s = reg(registry, "variants.as", false, {T::kAny, T::kString},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                return variantAsImpl(args, out, arena, /*nullOnError=*/false);
+            });
+    if (!s.ok()) return s;
+
+    // variants.tryAs(dyn, string) - soft typed extraction (CEL null on mismatch).
+    s = reg(registry, "variants.tryAs", false, {T::kAny, T::kString},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                return variantAsImpl(args, out, arena, /*nullOnError=*/true);
+            });
+    if (!s.ok()) return s;
+
+    // variants.toJson(dyn) -> JSON string (CEL null passes through).
+    s = reg(registry, "variants.toJson", false, {T::kAny},
+            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                bool isNull = false;
+                auto variant = receiverVariant(args[0], &isNull);
+                if (isNull) {
+                    *out = cel::CelValue::CreateNull();
+                } else if (!variant) {
+                    *out = err(arena, "variants.toJson: expected a Variant");
+                } else {
+                    *out = makeCelString(arena, variant->toJson());
+                }
+                return absl::OkStatus();
+            });
+    return s;
+}
+
 }  // namespace
 
 absl::Status RegisterExtraFuncs(cel::CelFunctionRegistry& registry, Arena* /*regArena*/) {
@@ -568,7 +1082,9 @@ absl::Status RegisterExtraFuncs(cel::CelFunctionRegistry& registry, Arena* /*reg
     if (!s.ok()) return s;
     s = registerDecimal(registry);
     if (!s.ok()) return s;
-    return registerTimestamp(registry);
+    s = registerTimestamp(registry);
+    if (!s.ok()) return s;
+    return registerVariant(registry);
 }
 
 }  // namespace schemaregistry::rules::cel

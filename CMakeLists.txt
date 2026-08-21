@@ -204,6 +204,7 @@ target_sources(schemaregistry PRIVATE ${BASE_HEADERS} ${BASE_SOURCES})
 # Core serdes sources (always needed - base serialization framework)
 # Also include JsonValue as it is used for schema migration rules
 file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
+                              "include/schemaregistry/serdes/Variant.h"
                               "include/schemaregistry/serdes/SerdeConfig.h"
                               "include/schemaregistry/serdes/SerdeError.h"
                               "include/schemaregistry/serdes/SerdeTypes.h"
@@ -212,6 +213,7 @@ file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
                               "include/schemaregistry/serdes/WildcardMatcher.h"
                               "src/internal/schemaregistry/serdes/json/JsonValue.h")
 file(GLOB CORE_SERDES_SOURCES "src/serdes/Serde.cpp"
+                              "src/serdes/Variant.cpp"
                               "src/serdes/SerdeConfig.cpp"
                               "src/serdes/SerdeError.cpp"
                               "src/serdes/SerdeTypes.cpp"
