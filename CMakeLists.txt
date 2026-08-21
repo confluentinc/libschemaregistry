@@ -80,7 +80,7 @@ if (SCHEMAREGISTRY_WITH_AVRO)
     FetchContent_Declare(
         unofficial-avro-cpp
         GIT_REPOSITORY https://github.com/apache/avro.git
-        GIT_TAG        release-1.12.0
+        GIT_TAG        release-1.12.2
         EXCLUDE_FROM_ALL
         SOURCE_SUBDIR  lang/c++
     )
