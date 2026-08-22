@@ -308,6 +308,24 @@ TEST(VariantTest, BuilderTypedScalarsRoundTrip) {
     EXPECT_EQ(v.getElementAtIndex(3)->getType(), VariantType::Date);
 }
 
+TEST(VariantTest, LargeDataRegionUses4ByteOffsets) {
+    // Regression: a container whose data region exceeds 0xFFFFFF (16 MiB)
+    // requires 4-byte offsets. A single string element of length 16777216
+    // pushes the array's data region past the 3-byte cap, exercising the
+    // 4-byte size path. (~16 MiB alloc; takes a couple seconds.)
+    constexpr size_t len = 16777216;  // 0x1000000
+    VariantBuilder b;
+    b.startArray();
+    b.appendString(std::string(len, 'a'));
+    b.endArray();
+    Variant v = b.build();
+
+    EXPECT_EQ(v.getType(), VariantType::Array);
+    EXPECT_EQ(v.numArrayElements(), 1);
+    ASSERT_TRUE(v.getElementAtIndex(0).has_value());
+    EXPECT_EQ(v.getElementAtIndex(0)->getString().size(), len);
+}
+
 TEST(VariantTest, BuilderMisuseThrows) {
     // build() with an open container.
     {

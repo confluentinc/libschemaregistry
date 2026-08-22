@@ -829,7 +829,8 @@ namespace {
 int integerSize(int64_t v) {
     if (v <= 0xFF) return 1;
     if (v <= 0xFFFF) return 2;
-    return 3;
+    if (v <= 0xFFFFFF) return 3;
+    return 4;
 }
 
 void appendUintLE(std::vector<uint8_t> &out, int64_t v, int numBytes) {
