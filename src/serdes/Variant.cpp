@@ -17,6 +17,7 @@
 #include "schemaregistry/serdes/Variant.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -255,6 +256,30 @@ std::string formatDouble(double d) {
         if (std::strtod(buf, nullptr) == d) break;
     }
     return buf;
+}
+
+std::string formatFloat(float f) {
+    if (std::isnan(f) || std::isinf(f)) {
+        throw VariantException("cannot render non-finite float as JSON");
+    }
+    if (f == std::floor(f) && std::abs(f) < 1e16f) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%lld.0",
+                      static_cast<long long>(f));
+        return buf;
+    }
+    // Shortest decimal that round-trips to the same float32. std::to_chars with
+    // no format guarantees the shortest round-trippable representation.
+    char buf[64];
+    auto res = std::to_chars(buf, buf + sizeof(buf), f);
+    std::string s(buf, res.ptr);
+    // Mirror formatDouble's integer ".0" convention for any finite, non-scientific
+    // result that lacks a decimal point (defensive; integers handled above).
+    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+        s.find('E') == std::string::npos) {
+        s += ".0";
+    }
+    return s;
 }
 
 std::string formatUuid(const std::vector<uint8_t> &data, int64_t start) {
@@ -760,7 +785,7 @@ void Variant::writeJson(std::string &out) const {
             out.append(std::to_string(getLong()));
             break;
         case VariantType::Float:
-            out.append(formatDouble(getFloat()));
+            out.append(formatFloat(getFloat()));
             break;
         case VariantType::Double:
             out.append(formatDouble(getDouble()));
@@ -1178,12 +1203,78 @@ struct VariantBuilder::Impl {
         value.insert(value.begin() + start, header.begin(), header.end());
     }
 
-    void finishWritingObject(int start, std::vector<FieldEntry> &fields) {
-        int numFields = static_cast<int>(fields.size());
+    // Collapse duplicate keys (last-wins), compacting retained values leftward
+    // in the shared value buffer. Called after fields are sorted by key (so
+    // duplicates are adjacent) and before the object header is computed. Values
+    // are laid out in the value buffer in insertion order; each
+    // FieldEntry.offset is the byte position (relative to `start`) where that
+    // field's value begins, recorded before the value was written, so a field's
+    // value length is the gap to the next-inserted offset (the last runs to the
+    // end of the object's data). The SAX JSON parser passes duplicate object
+    // keys through, so without this an object could carry duplicate field ids -
+    // a spec violation that strict readers reject.
+    void dedupObjectFields(int start, std::vector<FieldEntry> &fields) {
+        int n = static_cast<int>(fields.size());
+        if (n <= 1) return;
+        int dataSize = static_cast<int>(value.size()) - start;
+        // value length per (unique) offset, from the sorted set of all offsets
+        std::vector<int> offsets;
+        offsets.reserve(n);
+        for (const auto &f : fields) offsets.push_back(f.offset);
+        std::sort(offsets.begin(), offsets.end());
+        std::unordered_map<int, int> lenAt;
+        for (int i = 0; i < n; i++) {
+            int next = (i + 1 < n) ? offsets[i + 1] : dataSize;
+            lenAt[offsets[i]] = next - offsets[i];
+        }
+        // collapse adjacent equal ids, keeping the entry with the greater
+        // offset (the last write for that key)
+        int distinctPos = 0;
+        for (int i = 1; i < n; i++) {
+            if (fields[i].id == fields[distinctPos].id) {
+                if (fields[distinctPos].offset < fields[i].offset) {
+                    fields[distinctPos] = fields[i];
+                }
+            } else {
+                distinctPos++;
+                fields[distinctPos] = fields[i];
+            }
+        }
+        if (distinctPos + 1 == n) return;  // no duplicates
+        fields.resize(distinctPos + 1);
+        // compact retained values leftward, recompute offsets, truncate buffer
+        std::sort(fields.begin(), fields.end(),
+                  [](const FieldEntry &a, const FieldEntry &b) {
+                      return a.offset < b.offset;
+                  });
+        int curr = 0;
+        for (auto &f : fields) {
+            int o = f.offset;
+            int l = lenAt[o];
+            if (curr != o) {
+                // leftward move (curr <= o); forward std::copy is overlap-safe
+                std::copy(value.begin() + start + o,
+                          value.begin() + start + o + l,
+                          value.begin() + start + curr);
+            }
+            f.offset = curr;
+            curr += l;
+        }
+        value.resize(start + curr);
+        // restore key order for header emission
         std::sort(fields.begin(), fields.end(),
                   [](const FieldEntry &a, const FieldEntry &b) {
                       return a.key < b.key;
                   });
+    }
+
+    void finishWritingObject(int start, std::vector<FieldEntry> &fields) {
+        std::sort(fields.begin(), fields.end(),
+                  [](const FieldEntry &a, const FieldEntry &b) {
+                      return a.key < b.key;
+                  });
+        dedupObjectFields(start, fields);
+        int numFields = static_cast<int>(fields.size());
         int maxId = 0;
         for (const auto &f : fields) maxId = std::max(maxId, f.id);
         int dataSize = static_cast<int>(value.size()) - start;
