@@ -178,6 +178,34 @@ TEST(VariantTest, ObjectNavigation) {
     EXPECT_TRUE(f2.second.getBoolean());
 }
 
+TEST(VariantTest, DuplicateKeysLastWins) {
+    // The SAX JSON parser passes duplicate object keys through; the codec must
+    // dedup them last-wins. The differently-sized duplicate value for "a"
+    // exercises the leftward repacking of the value buffer.
+    Variant v = parse("{\"b\":1,\"a\":\"x\",\"a\":\"second-longer-value\",\"c\":3}");
+    EXPECT_EQ(v.numObjectFields(), 3);
+
+    auto a = v.getFieldByKey("a");
+    ASSERT_TRUE(a.has_value());
+    EXPECT_EQ(a->getString(), "second-longer-value");
+
+    auto b = v.getFieldByKey("b");
+    ASSERT_TRUE(b.has_value());
+    EXPECT_EQ(b->getLong(), 1);
+
+    auto c = v.getFieldByKey("c");
+    ASSERT_TRUE(c.has_value());
+    EXPECT_EQ(c->getLong(), 3);
+}
+
+TEST(VariantTest, DuplicateKeysSimple) {
+    Variant v = parse("{\"a\":1,\"a\":2}");
+    EXPECT_EQ(v.numObjectFields(), 1);
+    auto a = v.getFieldByKey("a");
+    ASSERT_TRUE(a.has_value());
+    EXPECT_EQ(a->getLong(), 2);
+}
+
 TEST(VariantTest, ArrayNavigation) {
     Variant v = parse("[10,20,30]");
     EXPECT_EQ(v.numArrayElements(), 3);
@@ -306,6 +334,23 @@ TEST(VariantTest, BuilderTypedScalarsRoundTrip) {
     EXPECT_EQ(v.getElementAtIndex(2)->getUuid(),
               "00112233-4455-6677-8899-aabbccddeeff");
     EXPECT_EQ(v.getElementAtIndex(3)->getType(), VariantType::Date);
+}
+
+TEST(VariantTest, FloatToJsonUsesShortestFloat32) {
+    // Regression: FLOAT must render the shortest decimal that round-trips to the
+    // same float32 (matching Java Float.toString / Apache Arrow), not the
+    // double-widened shortest string (e.g. "0.10000000149011612").
+    VariantBuilder b1;
+    b1.appendFloat(0.1f);
+    EXPECT_EQ(b1.build().toJson(), "0.1");
+
+    VariantBuilder b2;
+    b2.appendFloat(0.3f);
+    EXPECT_EQ(b2.build().toJson(), "0.3");
+
+    VariantBuilder b3;
+    b3.appendFloat(2.0f);
+    EXPECT_EQ(b3.build().toJson(), "2.0");  // integer ".0" preserved
 }
 
 TEST(VariantTest, LargeDataRegionUses4ByteOffsets) {
