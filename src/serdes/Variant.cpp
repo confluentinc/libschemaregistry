@@ -348,7 +348,7 @@ std::vector<uint8_t> Variant::standaloneValueBytes() const {
     return std::vector<uint8_t>(v.begin() + pos_, v.end());
 }
 
-VariantType Variant::getVariantType() const {
+VariantType Variant::getType() const {
     const auto &value = *value_;
     checkIndex(pos_, value.size());
     int basicType = value[pos_] & kBasicTypeMask;
@@ -429,6 +429,41 @@ bool Variant::getBoolean() const {
     return ti == kTTrue;
 }
 
+int8_t Variant::getByte() const {
+    int ti = primitiveInfo();
+    const auto &value = *value_;
+    if (ti != kTInt1) throw VariantException("variant is not a byte");
+    return static_cast<int8_t>(readSignedLong(value, pos_ + 1, 1));
+}
+
+int16_t Variant::getShort() const {
+    int ti = primitiveInfo();
+    const auto &value = *value_;
+    switch (ti) {
+        case kTInt1:
+            return static_cast<int16_t>(readSignedLong(value, pos_ + 1, 1));
+        case kTInt2:
+            return static_cast<int16_t>(readSignedLong(value, pos_ + 1, 2));
+        default:
+            throw VariantException("variant is not a short");
+    }
+}
+
+int32_t Variant::getInt() const {
+    int ti = primitiveInfo();
+    const auto &value = *value_;
+    switch (ti) {
+        case kTInt1:
+            return static_cast<int32_t>(readSignedLong(value, pos_ + 1, 1));
+        case kTInt2:
+            return static_cast<int32_t>(readSignedLong(value, pos_ + 1, 2));
+        case kTInt4:
+            return static_cast<int32_t>(readSignedLong(value, pos_ + 1, 4));
+        default:
+            throw VariantException("variant is not an int");
+    }
+}
+
 int64_t Variant::getLong() const {
     int ti = primitiveInfo();
     const auto &value = *value_;
@@ -452,12 +487,18 @@ int64_t Variant::getLong() const {
     }
 }
 
+float Variant::getFloat() const {
+    int ti = primitiveInfo();
+    const auto &value = *value_;
+    if (ti != kTFloat) throw VariantException("variant is not a float");
+    return readFloatLE(value, pos_ + 1);
+}
+
 double Variant::getDouble() const {
     int ti = primitiveInfo();
     const auto &value = *value_;
-    if (ti == kTFloat) return readFloatLE(value, pos_ + 1);
     if (ti == kTDouble) return readDoubleLE(value, pos_ + 1);
-    throw VariantException("variant is not a float/double");
+    throw VariantException("variant is not a double");
 }
 
 void Variant::getDecimalParts(std::vector<uint8_t> &unscaledBigEndian,
@@ -514,7 +555,7 @@ std::vector<uint8_t> Variant::getBinary() const {
                                 value.begin() + start + length);
 }
 
-std::string Variant::getUuidString() const {
+std::string Variant::getUuid() const {
     int ti = primitiveInfo();
     const auto &value = *value_;
     if (ti != kTUuid) throw VariantException("variant is not a uuid");
@@ -579,7 +620,7 @@ void Variant::arrayInfo(int &numFields, int &offsetSize, int &offsetStart,
     dataStart = offsetStart + (numFields + 1) * offsetSize;
 }
 
-int Variant::numObjectElements() const {
+int Variant::numObjectFields() const {
     int n, idSize, offsetSize, idStart, offsetStart, dataStart;
     objectInfo(n, idSize, offsetSize, idStart, offsetStart, dataStart);
     return n;
@@ -678,11 +719,11 @@ std::string Variant::toJson() const {
 }
 
 void Variant::writeJson(std::string &out) const {
-    VariantType t = getVariantType();
+    VariantType t = getType();
     switch (t) {
         case VariantType::Object: {
             out.push_back('{');
-            int n = numObjectElements();
+            int n = numObjectFields();
             for (int i = 0; i < n; i++) {
                 if (i > 0) out.push_back(',');
                 auto field = getFieldAtIndex(i);
@@ -719,6 +760,8 @@ void Variant::writeJson(std::string &out) const {
             out.append(std::to_string(getLong()));
             break;
         case VariantType::Float:
+            out.append(formatDouble(getFloat()));
+            break;
         case VariantType::Double:
             out.append(formatDouble(getDouble()));
             break;
@@ -771,7 +814,7 @@ void Variant::writeJson(std::string &out) const {
         }
         case VariantType::Uuid:
             out.push_back('"');
-            out.append(getUuidString());
+            out.append(getUuid());
             out.push_back('"');
             break;
         default:
@@ -779,7 +822,7 @@ void Variant::writeJson(std::string &out) const {
     }
 }
 
-// ---- builder (JSON -> value + metadata bytes) ----
+// ---- builder (streaming writer + JSON bridge) ----
 
 namespace {
 
@@ -812,189 +855,118 @@ struct FieldEntry {
     int offset;
 };
 
-// Builds value + metadata bytes from parsed JSON, following Java number
-// handling: a fractional JSON number becomes a DOUBLE; an integer becomes the
-// smallest int1/2/4/8 that fits, or a scale-0 decimal when wider than 64 bits.
-class VariantBuilder {
-  public:
-    void build(const std::string &json, std::vector<uint8_t> &valueOut,
-               std::vector<uint8_t> &metadataOut) {
-        bool ok = nlohmann::json::sax_parse(json, this);
-        if (!ok) {
-            throw VariantException("malformed JSON for variant");
-        }
-        finish(valueOut, metadataOut);
-    }
+}  // namespace
 
-    // ---- nlohmann SAX callbacks ----
-
-    bool null() {
-        beforeValue();
-        value_.push_back(primitiveHeader(kTNull));
-        return true;
-    }
-
-    bool boolean(bool val) {
-        beforeValue();
-        value_.push_back(primitiveHeader(val ? kTTrue : kTFalse));
-        return true;
-    }
-
-    bool number_integer(int64_t val) {
-        beforeValue();
-        appendInt(val);
-        return true;
-    }
-
-    bool number_unsigned(uint64_t val) {
-        beforeValue();
-        if (val <= static_cast<uint64_t>(INT64_MAX)) {
-            appendInt(static_cast<int64_t>(val));
-        } else {
-            appendDecimalFromDigits(false, std::to_string(val), 0);
-        }
-        return true;
-    }
-
-    bool number_float(double val, const std::string &s) {
-        beforeValue();
-        // nlohmann emits number_float for integer literals that overflow 64
-        // bits; the raw token distinguishes them from true fractional numbers.
-        bool fractional = s.find('.') != std::string::npos ||
-                          s.find('e') != std::string::npos ||
-                          s.find('E') != std::string::npos;
-        if (!fractional) {
-            bool negative = !s.empty() && s[0] == '-';
-            std::string digits = negative ? s.substr(1) : s;
-            appendDecimalFromDigits(negative, digits, 0);
-        } else {
-            appendDouble(val);
-        }
-        return true;
-    }
-
-    bool string(std::string &val) {
-        beforeValue();
-        appendString(val);
-        return true;
-    }
-
-    bool binary(nlohmann::json::binary_t & /*val*/) {
-        throw VariantException("unsupported JSON value: binary");
-    }
-
-    bool start_object(std::size_t /*elements*/) {
-        beforeValue();
-        Ctx c;
-        c.isObject = true;
-        c.start = static_cast<int>(value_.size());
-        stack_.push_back(std::move(c));
-        return true;
-    }
-
-    bool key(std::string &val) {
-        stack_.back().pendingKey = val;
-        return true;
-    }
-
-    bool end_object() {
-        Ctx c = std::move(stack_.back());
-        stack_.pop_back();
-        finishWritingObject(c.start, c.fields);
-        return true;
-    }
-
-    bool start_array(std::size_t /*elements*/) {
-        beforeValue();
-        Ctx c;
-        c.isObject = false;
-        c.start = static_cast<int>(value_.size());
-        stack_.push_back(std::move(c));
-        return true;
-    }
-
-    bool end_array() {
-        Ctx c = std::move(stack_.back());
-        stack_.pop_back();
-        finishWritingArray(c.start, c.offsets);
-        return true;
-    }
-
-    bool parse_error(std::size_t /*position*/, const std::string & /*token*/,
-                     const nlohmann::json::exception & /*ex*/) {
-        return false;
-    }
-
-  private:
+// VariantBuilder::Impl holds the streaming core: the value byte stream, the
+// metadata key dictionary, and the nesting stack. Each append*() records its
+// slot in the parent container (or the root) via beforeValue(), then emits the
+// value bytes; a container's header is inserted on end*(). This is the same
+// machinery the JSON path uses - Variant::parseJson drives it through a SAX
+// handler, so builder output is byte-identical to parseJson.
+struct VariantBuilder::Impl {
     struct Ctx {
         bool isObject = false;
         int start = 0;
         std::vector<FieldEntry> fields;  // objects
         std::vector<int> offsets;        // arrays
+        bool hasPendingKey = false;
         std::string pendingKey;
+        int pendingId = 0;
     };
 
-    // Record the position of the child about to be written into its parent.
+    std::vector<uint8_t> value;
+    std::unordered_map<std::string, int> dictionary;
+    std::vector<std::vector<uint8_t>> dictionaryKeys;
+    std::vector<Ctx> stack;
+    bool rootWritten = false;
+
+    // ---- nesting-stack bookkeeping ----
+
+    // Register the slot the value about to be written occupies in its parent
+    // container (or the root). Must be called before emitting any value bytes.
     void beforeValue() {
-        if (stack_.empty()) return;
-        Ctx &c = stack_.back();
+        if (stack.empty()) {
+            if (rootWritten) {
+                throw VariantException("VariantBuilder: multiple root values");
+            }
+            rootWritten = true;
+            return;
+        }
+        Ctx &c = stack.back();
         if (c.isObject) {
-            int id = addKey(c.pendingKey);
+            if (!c.hasPendingKey) {
+                throw VariantException(
+                    "VariantBuilder: value appended without a preceding "
+                    "appendKey");
+            }
             c.fields.push_back(FieldEntry{
-                c.pendingKey, id, static_cast<int>(value_.size()) - c.start});
+                c.pendingKey, c.pendingId,
+                static_cast<int>(value.size()) - c.start});
+            c.hasPendingKey = false;
         } else {
-            c.offsets.push_back(static_cast<int>(value_.size()) - c.start);
+            c.offsets.push_back(static_cast<int>(value.size()) - c.start);
         }
     }
 
     int addKey(const std::string &key) {
-        auto it = dictionary_.find(key);
-        if (it != dictionary_.end()) return it->second;
-        int id = static_cast<int>(dictionaryKeys_.size());
-        dictionary_[key] = id;
-        dictionaryKeys_.push_back(
-            std::vector<uint8_t>(key.begin(), key.end()));
+        auto it = dictionary.find(key);
+        if (it != dictionary.end()) return it->second;
+        int id = static_cast<int>(dictionaryKeys.size());
+        dictionary[key] = id;
+        dictionaryKeys.push_back(std::vector<uint8_t>(key.begin(), key.end()));
         return id;
     }
 
-    void appendString(const std::string &s) {
-        if (static_cast<int>(s.size()) > kMaxShortStrSize) {
-            value_.push_back(primitiveHeader(kTLongStr));
-            appendUintLE(value_, static_cast<int64_t>(s.size()), kU32Size);
-        } else {
-            value_.push_back(
-                static_cast<uint8_t>((s.size() << 2) | kShortStr));
-        }
-        value_.insert(value_.end(), s.begin(), s.end());
+    // ---- pure emit helpers (no slot bookkeeping) ----
+
+    void writeIntWidth(int code, int64_t v, int width) {
+        value.push_back(primitiveHeader(code));
+        appendLongLE(value, v, width);
     }
 
-    void appendInt(int64_t i) {
-        if (i >= -128 && i <= 127) {
-            value_.push_back(primitiveHeader(kTInt1));
-            appendLongLE(value_, i, 1);
-        } else if (i >= -32768 && i <= 32767) {
-            value_.push_back(primitiveHeader(kTInt2));
-            appendLongLE(value_, i, 2);
-        } else if (i >= -2147483648LL && i <= 2147483647LL) {
-            value_.push_back(primitiveHeader(kTInt4));
-            appendLongLE(value_, i, 4);
-        } else {
-            value_.push_back(primitiveHeader(kTInt8));
-            appendLongLE(value_, i, 8);
+    void writeFloat(float f) {
+        value.push_back(primitiveHeader(kTFloat));
+        uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        for (int i = 0; i < 4; i++) {
+            value.push_back(static_cast<uint8_t>((bits >> (8 * i)) & 0xFF));
         }
     }
 
-    void appendDouble(double d) {
-        value_.push_back(primitiveHeader(kTDouble));
+    void writeDouble(double d) {
+        value.push_back(primitiveHeader(kTDouble));
         uint64_t bits;
         std::memcpy(&bits, &d, sizeof(bits));
         for (int i = 0; i < 8; i++) {
-            value_.push_back(static_cast<uint8_t>((bits >> (8 * i)) & 0xFF));
+            value.push_back(static_cast<uint8_t>((bits >> (8 * i)) & 0xFF));
         }
     }
 
-    // Append a decimal from a magnitude digit string + sign at the given scale.
-    void appendDecimalFromDigits(bool negative, std::string digits, int scale) {
+    void writeString(const std::string &s) {
+        if (static_cast<int>(s.size()) > kMaxShortStrSize) {
+            value.push_back(primitiveHeader(kTLongStr));
+            appendUintLE(value, static_cast<int64_t>(s.size()), kU32Size);
+        } else {
+            value.push_back(static_cast<uint8_t>((s.size() << 2) | kShortStr));
+        }
+        value.insert(value.end(), s.begin(), s.end());
+    }
+
+    // Smallest-width integer (the JSON classification).
+    void writeIntAuto(int64_t i) {
+        if (i >= -128 && i <= 127) {
+            writeIntWidth(kTInt1, i, 1);
+        } else if (i >= -32768 && i <= 32767) {
+            writeIntWidth(kTInt2, i, 2);
+        } else if (i >= -2147483648LL && i <= 2147483647LL) {
+            writeIntWidth(kTInt4, i, 4);
+        } else {
+            writeIntWidth(kTInt8, i, 8);
+        }
+    }
+
+    // Emit a decimal from a magnitude digit string + sign at the given scale.
+    void writeDecimalDigits(bool negative, std::string digits, int scale) {
         // Normalize leading zeros (BigInteger.ToString has none).
         size_t nz = digits.find_first_not_of('0');
         if (nz == std::string::npos) {
@@ -1016,13 +988,12 @@ class VariantBuilder {
         } else {
             throw VariantException("decimal exceeds maximum precision (38)");
         }
-        value_.push_back(primitiveHeader(code));
-        value_.push_back(static_cast<uint8_t>(scale));
+        value.push_back(primitiveHeader(code));
+        value.push_back(static_cast<uint8_t>(scale));
         appendTwosComplementLE(negative, digits, width);
     }
 
-    // Append width bytes of little-endian two's-complement for the value
-    // (+/-)digits.
+    // Append width bytes of little-endian two's-complement for (+/-)digits.
     void appendTwosComplementLE(bool negative, const std::string &digits,
                                 int width) {
         std::vector<uint8_t> le;  // little-endian magnitude bytes
@@ -1051,11 +1022,147 @@ class VariantBuilder {
                 carry = v >> 8;
             }
         }
-        value_.insert(value_.end(), out.begin(), out.end());
+        value.insert(value.end(), out.begin(), out.end());
     }
 
+    // ---- streaming scalar appends (slot + emit) ----
+
+    void appendNull() {
+        beforeValue();
+        value.push_back(primitiveHeader(kTNull));
+    }
+    void appendBoolean(bool b) {
+        beforeValue();
+        value.push_back(primitiveHeader(b ? kTTrue : kTFalse));
+    }
+    void appendByte(int8_t v) { beforeValue(); writeIntWidth(kTInt1, v, 1); }
+    void appendShort(int16_t v) { beforeValue(); writeIntWidth(kTInt2, v, 2); }
+    void appendInt(int32_t v) { beforeValue(); writeIntWidth(kTInt4, v, 4); }
+    void appendLong(int64_t v) { beforeValue(); writeIntWidth(kTInt8, v, 8); }
+    void appendFloat(float f) { beforeValue(); writeFloat(f); }
+    void appendDouble(double d) { beforeValue(); writeDouble(d); }
+    void appendString(const std::string &s) { beforeValue(); writeString(s); }
+
+    void appendBinary(const std::vector<uint8_t> &bytes) {
+        beforeValue();
+        value.push_back(primitiveHeader(kTBinary));
+        appendUintLE(value, static_cast<int64_t>(bytes.size()), kU32Size);
+        value.insert(value.end(), bytes.begin(), bytes.end());
+    }
+
+    void appendUuid(const std::vector<uint8_t> &uuid16) {
+        if (uuid16.size() != 16) {
+            throw VariantException("uuid must be 16 bytes");
+        }
+        beforeValue();
+        value.push_back(primitiveHeader(kTUuid));
+        value.insert(value.end(), uuid16.begin(), uuid16.end());
+    }
+
+    void appendDate(int32_t d) { beforeValue(); writeIntWidth(kTDate, d, 4); }
+    void appendTime(int64_t m) { beforeValue(); writeIntWidth(kTTime, m, 8); }
+    void appendTimestampTz(int64_t m) {
+        beforeValue();
+        writeIntWidth(kTTimestamp, m, 8);
+    }
+    void appendTimestampNtz(int64_t m) {
+        beforeValue();
+        writeIntWidth(kTTimestampNtz, m, 8);
+    }
+    void appendTimestampNanosTz(int64_t n) {
+        beforeValue();
+        writeIntWidth(kTTimestampNanos, n, 8);
+    }
+    void appendTimestampNanosNtz(int64_t n) {
+        beforeValue();
+        writeIntWidth(kTTimestampNanosNtz, n, 8);
+    }
+
+    // Decimal from two's-complement big-endian bytes + scale.
+    void appendDecimalBytes(const std::vector<uint8_t> &be, int scale) {
+        beforeValue();
+        bool negative = !be.empty() && (be[0] & 0x80) != 0;
+        std::vector<uint8_t> le(be.rbegin(), be.rend());
+        if (negative) {
+            int carry = 1;
+            for (size_t i = 0; i < le.size(); i++) {
+                int v = static_cast<uint8_t>(~le[i]) + carry;
+                le[i] = static_cast<uint8_t>(v & 0xFF);
+                carry = v >> 8;
+            }
+        }
+        std::string digits = leMagnitudeToDecimal(le);
+        writeDecimalDigits(negative, digits, scale);
+    }
+
+    // JSON-path helpers (slot + emit) for auto-width int and decimal digits.
+    void appendIntAutoJson(int64_t i) { beforeValue(); writeIntAuto(i); }
+    void appendDecimalDigitsJson(bool negative, std::string digits, int scale) {
+        beforeValue();
+        writeDecimalDigits(negative, std::move(digits), scale);
+    }
+
+    // ---- containers ----
+
+    void startObject() {
+        beforeValue();
+        Ctx c;
+        c.isObject = true;
+        c.start = static_cast<int>(value.size());
+        stack.push_back(std::move(c));
+    }
+
+    void appendKey(const std::string &key) {
+        if (stack.empty() || !stack.back().isObject) {
+            throw VariantException(
+                "VariantBuilder: appendKey called outside an object");
+        }
+        Ctx &c = stack.back();
+        if (c.hasPendingKey) {
+            throw VariantException(
+                "VariantBuilder: appendKey called twice without a value");
+        }
+        c.pendingId = addKey(key);
+        c.pendingKey = key;
+        c.hasPendingKey = true;
+    }
+
+    void endObject() {
+        if (stack.empty() || !stack.back().isObject) {
+            throw VariantException(
+                "VariantBuilder: endObject with no matching startObject");
+        }
+        if (stack.back().hasPendingKey) {
+            throw VariantException(
+                "VariantBuilder: endObject with a dangling appendKey");
+        }
+        Ctx c = std::move(stack.back());
+        stack.pop_back();
+        finishWritingObject(c.start, c.fields);
+    }
+
+    void startArray() {
+        beforeValue();
+        Ctx c;
+        c.isObject = false;
+        c.start = static_cast<int>(value.size());
+        stack.push_back(std::move(c));
+    }
+
+    void endArray() {
+        if (stack.empty() || stack.back().isObject) {
+            throw VariantException(
+                "VariantBuilder: endArray with no matching startArray");
+        }
+        Ctx c = std::move(stack.back());
+        stack.pop_back();
+        finishWritingArray(c.start, c.offsets);
+    }
+
+    // ---- container header insertion + finalize ----
+
     void finishWritingArray(int start, const std::vector<int> &offsets) {
-        int dataSize = static_cast<int>(value_.size()) - start;
+        int dataSize = static_cast<int>(value.size()) - start;
         int numOffsets = static_cast<int>(offsets.size());
         bool largeSize = numOffsets > 0xFF;
         int sizeBytes = largeSize ? kU32Size : 1;
@@ -1067,7 +1174,7 @@ class VariantBuilder {
         appendUintLE(header, numOffsets, sizeBytes);
         for (int offset : offsets) appendUintLE(header, offset, offsetSize);
         appendUintLE(header, dataSize, offsetSize);
-        value_.insert(value_.begin() + start, header.begin(), header.end());
+        value.insert(value.begin() + start, header.begin(), header.end());
     }
 
     void finishWritingObject(int start, std::vector<FieldEntry> &fields) {
@@ -1078,7 +1185,7 @@ class VariantBuilder {
                   });
         int maxId = 0;
         for (const auto &f : fields) maxId = std::max(maxId, f.id);
-        int dataSize = static_cast<int>(value_.size()) - start;
+        int dataSize = static_cast<int>(value.size()) - start;
         bool largeSize = numFields > 0xFF;
         int sizeBytes = largeSize ? kU32Size : 1;
         int idSize = integerSize(maxId);
@@ -1092,14 +1199,14 @@ class VariantBuilder {
         for (const auto &f : fields) appendUintLE(header, f.id, idSize);
         for (const auto &f : fields) appendUintLE(header, f.offset, offsetSize);
         appendUintLE(header, dataSize, offsetSize);
-        value_.insert(value_.begin() + start, header.begin(), header.end());
+        value.insert(value.begin() + start, header.begin(), header.end());
     }
 
     void finish(std::vector<uint8_t> &valueOut,
                 std::vector<uint8_t> &metadataOut) {
-        int numKeys = static_cast<int>(dictionaryKeys_.size());
+        int numKeys = static_cast<int>(dictionaryKeys.size());
         int dictStringSize = 0;
-        for (const auto &k : dictionaryKeys_)
+        for (const auto &k : dictionaryKeys)
             dictStringSize += static_cast<int>(k.size());
         int offsetSize = integerSize(std::max(dictStringSize, numKeys));
 
@@ -1108,31 +1215,167 @@ class VariantBuilder {
             static_cast<uint8_t>(kVersion | ((offsetSize - 1) << 6)));
         appendUintLE(metadata, numKeys, offsetSize);
         int currentOffset = 0;
-        for (const auto &k : dictionaryKeys_) {
+        for (const auto &k : dictionaryKeys) {
             appendUintLE(metadata, currentOffset, offsetSize);
             currentOffset += static_cast<int>(k.size());
         }
         appendUintLE(metadata, currentOffset, offsetSize);
-        for (const auto &k : dictionaryKeys_)
+        for (const auto &k : dictionaryKeys)
             metadata.insert(metadata.end(), k.begin(), k.end());
 
-        valueOut = std::move(value_);
+        valueOut = value;
         metadataOut = std::move(metadata);
     }
-
-    std::vector<uint8_t> value_;
-    std::unordered_map<std::string, int> dictionary_;
-    std::vector<std::vector<uint8_t>> dictionaryKeys_;
-    std::vector<Ctx> stack_;
 };
 
-}  // namespace
+// SAX handler that drives a VariantBuilder::Impl from an nlohmann JSON stream,
+// so parseJson reuses the exact streaming machinery.
+struct VariantJsonSaxHandler {
+    VariantBuilder::Impl &impl;
+
+    explicit VariantJsonSaxHandler(VariantBuilder &b) : impl(*b.impl_) {}
+
+    bool null() {
+        impl.appendNull();
+        return true;
+    }
+    bool boolean(bool val) {
+        impl.appendBoolean(val);
+        return true;
+    }
+    bool number_integer(std::int64_t val) {
+        impl.appendIntAutoJson(val);
+        return true;
+    }
+    bool number_unsigned(std::uint64_t val) {
+        if (val <= static_cast<uint64_t>(INT64_MAX)) {
+            impl.appendIntAutoJson(static_cast<int64_t>(val));
+        } else {
+            impl.appendDecimalDigitsJson(false, std::to_string(val), 0);
+        }
+        return true;
+    }
+    bool number_float(double val, const std::string &s) {
+        // nlohmann emits number_float for integer literals that overflow 64
+        // bits; the raw token distinguishes them from true fractional numbers.
+        bool fractional = s.find('.') != std::string::npos ||
+                          s.find('e') != std::string::npos ||
+                          s.find('E') != std::string::npos;
+        if (!fractional) {
+            bool negative = !s.empty() && s[0] == '-';
+            std::string digits = negative ? s.substr(1) : s;
+            impl.appendDecimalDigitsJson(negative, digits, 0);
+        } else {
+            impl.appendDouble(val);
+        }
+        return true;
+    }
+    bool string(std::string &val) {
+        impl.appendString(val);
+        return true;
+    }
+    bool binary(nlohmann::json::binary_t & /*val*/) {
+        throw VariantException("unsupported JSON value: binary");
+    }
+    bool start_object(std::size_t /*elements*/) {
+        impl.startObject();
+        return true;
+    }
+    bool key(std::string &val) {
+        impl.appendKey(val);
+        return true;
+    }
+    bool end_object() {
+        impl.endObject();
+        return true;
+    }
+    bool start_array(std::size_t /*elements*/) {
+        impl.startArray();
+        return true;
+    }
+    bool end_array() {
+        impl.endArray();
+        return true;
+    }
+    bool parse_error(std::size_t /*position*/, const std::string & /*token*/,
+                     const nlohmann::json::exception & /*ex*/) {
+        return false;
+    }
+};
+
+// ---- VariantBuilder public API (forwards to Impl) ----
+
+VariantBuilder::VariantBuilder() : impl_(std::make_unique<Impl>()) {}
+VariantBuilder::~VariantBuilder() = default;
+
+void VariantBuilder::appendNull() { impl_->appendNull(); }
+void VariantBuilder::appendBoolean(bool b) { impl_->appendBoolean(b); }
+void VariantBuilder::appendByte(int8_t v) { impl_->appendByte(v); }
+void VariantBuilder::appendShort(int16_t v) { impl_->appendShort(v); }
+void VariantBuilder::appendInt(int32_t v) { impl_->appendInt(v); }
+void VariantBuilder::appendLong(int64_t v) { impl_->appendLong(v); }
+void VariantBuilder::appendFloat(float f) { impl_->appendFloat(f); }
+void VariantBuilder::appendDouble(double d) { impl_->appendDouble(d); }
+void VariantBuilder::appendDecimal(const std::vector<uint8_t> &unscaledBigEndian,
+                                   int scale) {
+    impl_->appendDecimalBytes(unscaledBigEndian, scale);
+}
+void VariantBuilder::appendString(const std::string &s) {
+    impl_->appendString(s);
+}
+void VariantBuilder::appendBinary(const std::vector<uint8_t> &bytes) {
+    impl_->appendBinary(bytes);
+}
+void VariantBuilder::appendUuid(const std::vector<uint8_t> &uuid16) {
+    impl_->appendUuid(uuid16);
+}
+void VariantBuilder::appendDate(int32_t daysSinceEpoch) {
+    impl_->appendDate(daysSinceEpoch);
+}
+void VariantBuilder::appendTime(int64_t microsSinceMidnight) {
+    impl_->appendTime(microsSinceMidnight);
+}
+void VariantBuilder::appendTimestampTz(int64_t micros) {
+    impl_->appendTimestampTz(micros);
+}
+void VariantBuilder::appendTimestampNtz(int64_t micros) {
+    impl_->appendTimestampNtz(micros);
+}
+void VariantBuilder::appendTimestampNanosTz(int64_t nanos) {
+    impl_->appendTimestampNanosTz(nanos);
+}
+void VariantBuilder::appendTimestampNanosNtz(int64_t nanos) {
+    impl_->appendTimestampNanosNtz(nanos);
+}
+void VariantBuilder::startObject() { impl_->startObject(); }
+void VariantBuilder::appendKey(const std::string &key) {
+    impl_->appendKey(key);
+}
+void VariantBuilder::endObject() { impl_->endObject(); }
+void VariantBuilder::startArray() { impl_->startArray(); }
+void VariantBuilder::endArray() { impl_->endArray(); }
+
+Variant VariantBuilder::build() {
+    if (!impl_->stack.empty()) {
+        throw VariantException(
+            "VariantBuilder: build called with an open container");
+    }
+    if (!impl_->rootWritten) {
+        throw VariantException("VariantBuilder: build called with no value");
+    }
+    std::vector<uint8_t> value, metadata;
+    impl_->finish(value, metadata);
+    return Variant(std::move(value), std::move(metadata));
+}
 
 Variant Variant::parseJson(const std::string &json) {
     VariantBuilder builder;
-    std::vector<uint8_t> value, metadata;
-    builder.build(json, value, metadata);
-    return Variant(std::move(value), std::move(metadata));
+    VariantJsonSaxHandler handler(builder);
+    bool ok = nlohmann::json::sax_parse(json, &handler);
+    if (!ok) {
+        throw VariantException("malformed JSON for variant");
+    }
+    return builder.build();
 }
 
 }  // namespace schemaregistry::serdes

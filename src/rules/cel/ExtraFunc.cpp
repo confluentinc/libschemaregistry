@@ -776,11 +776,11 @@ std::optional<SrVariant> walkVariantPath(const SrVariant& root, const std::strin
             return std::nullopt;
         }
         if (seg.isIndex) {
-            current = current->getVariantType() == VariantType::Array
+            current = current->getType() == VariantType::Array
                           ? current->getElementAtIndex(seg.index)
                           : std::nullopt;
         } else {
-            current = current->getVariantType() == VariantType::Object
+            current = current->getType() == VariantType::Object
                           ? current->getFieldByKey(seg.key)
                           : std::nullopt;
         }
@@ -804,7 +804,7 @@ absl::Status variantAsImpl(absl::Span<const cel::CelValue> args, cel::CelValue* 
         return absl::OkStatus();
     }
     std::string type(args[1].StringOrDie().value());
-    VariantType vt = variant->getVariantType();
+    VariantType vt = variant->getType();
     bool recognized = true;
     if (type == "string") {
         if (vt == VariantType::String) {
@@ -818,7 +818,12 @@ absl::Status variantAsImpl(absl::Span<const cel::CelValue> args, cel::CelValue* 
             return absl::OkStatus();
         }
     } else if (type == "double") {
-        if (vt == VariantType::Float || vt == VariantType::Double) {
+        if (vt == VariantType::Float) {
+            *out = cel::CelValue::CreateDouble(
+                static_cast<double>(variant->getFloat()));
+            return absl::OkStatus();
+        }
+        if (vt == VariantType::Double) {
             *out = cel::CelValue::CreateDouble(variant->getDouble());
             return absl::OkStatus();
         }
@@ -954,7 +959,7 @@ absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
                 } else if (!variant) {
                     *out = err(arena, "variants.type: expected a Variant");
                 } else {
-                    *out = makeCelString(arena, variantTypeLabel(variant->getVariantType()));
+                    *out = makeCelString(arena, variantTypeLabel(variant->getType()));
                 }
                 return absl::OkStatus();
             });
@@ -965,7 +970,7 @@ absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
             [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* /*arena*/) {
                 bool result =
                     isVariantMessage(args[0]) &&
-                    variantFromMessage(*args[0].MessageOrDie()).getVariantType() ==
+                    variantFromMessage(*args[0].MessageOrDie()).getType() ==
                         VariantType::Null;
                 *out = cel::CelValue::CreateBool(result);
                 return absl::OkStatus();
@@ -1005,7 +1010,7 @@ absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
                     *out = err(arena, "variants.field: expected a Variant");
                     return absl::OkStatus();
                 }
-                if (variant->getVariantType() != VariantType::Object) {
+                if (variant->getType() != VariantType::Object) {
                     *out = cel::CelValue::CreateNull();
                     return absl::OkStatus();
                 }
@@ -1029,7 +1034,7 @@ absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
                     *out = err(arena, "variants.index: expected a Variant");
                     return absl::OkStatus();
                 }
-                if (variant->getVariantType() != VariantType::Array) {
+                if (variant->getType() != VariantType::Array) {
                     *out = cel::CelValue::CreateNull();
                     return absl::OkStatus();
                 }

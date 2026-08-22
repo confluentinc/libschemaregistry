@@ -98,9 +98,18 @@ class Variant {
      */
     std::vector<uint8_t> standaloneValueBytes() const;
 
-    VariantType getVariantType() const;
+    VariantType getType() const;
 
     bool getBoolean() const;
+
+    /** The signed 8-bit integer of an INT8 value (exact width; no widening). */
+    int8_t getByte() const;
+
+    /** The signed 16-bit integer of an INT8/INT16 value (widens within 16 bits). */
+    int16_t getShort() const;
+
+    /** The signed 32-bit integer of an INT8/INT16/INT32 value (widens within 32 bits). */
+    int32_t getInt() const;
 
     /**
      * The raw integer for any integer-backed type (byte/short/int/long, date
@@ -109,6 +118,10 @@ class Variant {
      */
     int64_t getLong() const;
 
+    /** The 32-bit float of a FLOAT value (exact; does not read DOUBLE). */
+    float getFloat() const;
+
+    /** The 64-bit double of a DOUBLE value (exact; does not widen FLOAT). */
     double getDouble() const;
 
     /**
@@ -127,7 +140,7 @@ class Variant {
     std::vector<uint8_t> getBinary() const;
 
     /** The UUID as its canonical big-endian hex string. */
-    std::string getUuidString() const;
+    std::string getUuid() const;
 
     std::string getString() const;
 
@@ -140,7 +153,7 @@ class Variant {
     /** The array element at index, or nullopt if out of bounds. */
     std::optional<Variant> getElementAtIndex(int index) const;
 
-    int numObjectElements() const;
+    int numObjectFields() const;
 
     int numArrayElements() const;
 
@@ -172,6 +185,81 @@ class Variant {
     Buffer value_;
     Buffer metadata_;
     size_t pos_;
+};
+
+/**
+ * A flat, streaming writer that builds a Variant programmatically. A single
+ * builder maintains an internal nesting stack (the arrow-dotnet flat
+ * streaming-writer shape): each append*() targets the current slot - the root,
+ * the next array element, or the current object field value (after
+ * appendKey()). Object fields are sorted by key on endObject() (canonical
+ * order) and their keys accumulate into the metadata dictionary. build()
+ * finalizes and returns a Variant.
+ *
+ * Output is byte-identical to Variant::parseJson() for the equivalent document:
+ * parseJson() is itself implemented on top of this builder. Integer widths are
+ * the caller's choice here (appendByte .. appendLong), whereas the JSON path
+ * selects the smallest width that fits; pick the matching method to reproduce a
+ * parsed document exactly.
+ *
+ * Misuse (an unbalanced startX/endX, appendKey() outside an object, a value
+ * append without a preceding appendKey() inside an object, or build() with an
+ * open container) throws VariantException.
+ */
+class VariantBuilder {
+  public:
+    VariantBuilder();
+    ~VariantBuilder();
+
+    // Scalars - append into the current slot.
+    void appendNull();
+    void appendBoolean(bool b);
+    void appendByte(int8_t v);
+    void appendShort(int16_t v);
+    void appendInt(int32_t v);
+    void appendLong(int64_t v);
+    void appendFloat(float f);
+    void appendDouble(double d);
+    /**
+     * Append a decimal from its unscaled value (two's-complement big-endian
+     * bytes) and scale. The narrowest of DECIMAL4/8/16 that holds the precision
+     * is chosen, matching the JSON path.
+     */
+    void appendDecimal(const std::vector<uint8_t> &unscaledBigEndian, int scale);
+    /** Append a string (auto short-string when <= 63 UTF-8 bytes). */
+    void appendString(const std::string &s);
+    /** Append an opaque binary blob. */
+    void appendBinary(const std::vector<uint8_t> &bytes);
+    /** Append a UUID from its 16 canonical big-endian bytes. */
+    void appendUuid(const std::vector<uint8_t> &uuid16);
+    /** Append a DATE (days since the Unix epoch). */
+    void appendDate(int32_t daysSinceEpoch);
+    /** Append a TIME_NTZ (microseconds since midnight). */
+    void appendTime(int64_t microsSinceMidnight);
+    /** Append a TIMESTAMP with time zone (microseconds since the Unix epoch). */
+    void appendTimestampTz(int64_t micros);
+    /** Append a TIMESTAMP without time zone (microseconds since the Unix epoch). */
+    void appendTimestampNtz(int64_t micros);
+    /** Append a nanosecond TIMESTAMP with time zone (nanoseconds since epoch). */
+    void appendTimestampNanosTz(int64_t nanos);
+    /** Append a nanosecond TIMESTAMP without time zone (nanoseconds since epoch). */
+    void appendTimestampNanosNtz(int64_t nanos);
+
+    // Containers - flat, internal nesting stack.
+    void startObject();
+    void appendKey(const std::string &key);
+    void endObject();
+    void startArray();
+    void endArray();
+
+    /** Finalize and return the built Variant. */
+    Variant build();
+
+  private:
+    friend struct VariantJsonSaxHandler;  // JSON bridge (parseJson)
+
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace schemaregistry::serdes
