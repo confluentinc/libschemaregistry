@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <clocale>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -351,6 +352,37 @@ TEST(VariantTest, FloatToJsonUsesShortestFloat32) {
     VariantBuilder b3;
     b3.appendFloat(2.0f);
     EXPECT_EQ(b3.build().toJson(), "2.0");  // integer ".0" preserved
+}
+
+TEST(VariantTest, DoubleToJsonIsLocaleIndependent) {
+    // Regression (Bug #18): formatDouble must emit a '.' decimal separator
+    // regardless of the active C locale. Previously it used
+    // snprintf("%.*g")+strtod, which under a comma-radix locale (e.g. de_DE)
+    // produced invalid JSON like "3,14".
+    Variant fractional = prim(kTDouble, f64(3.14));
+    Variant integral = prim(kTDouble, f64(2.0));
+
+    // Default (C) locale: shortest round-trip, '.' separator, integer ".0".
+    EXPECT_EQ(fractional.toJson(), "3.14");
+    EXPECT_EQ(integral.toJson(), "2.0");
+
+    // Try a comma-radix locale. If it isn't installed, setlocale returns
+    // nullptr and we skip the locale-specific assertion (test stays robust).
+    const char *saved = std::setlocale(LC_ALL, nullptr);
+    std::string savedLocale = saved ? saved : "C";
+    const char *applied = std::setlocale(LC_ALL, "de_DE.UTF-8");
+    if (applied == nullptr) {
+        applied = std::setlocale(LC_ALL, "de_DE");
+    }
+    if (applied != nullptr) {
+        EXPECT_EQ(fractional.toJson(), "3.14");
+        EXPECT_EQ(integral.toJson(), "2.0");
+        // Restore the previous locale so other tests are unaffected.
+        std::setlocale(LC_ALL, savedLocale.c_str());
+    } else {
+        GTEST_SKIP()
+            << "de_DE locale not installed; skipping comma-radix assertion";
+    }
 }
 
 TEST(VariantTest, LargeDataRegionUses4ByteOffsets) {

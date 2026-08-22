@@ -249,13 +249,19 @@ std::string formatDouble(double d) {
                       static_cast<long long>(d));
         return buf;
     }
-    // Shortest round-tripping decimal representation.
+    // Shortest decimal that round-trips to the same double. std::to_chars with
+    // no format guarantees the shortest round-trippable representation and is
+    // locale-independent (unlike snprintf("%.*g")+strtod).
     char buf[64];
-    for (int prec = 1; prec <= 17; prec++) {
-        std::snprintf(buf, sizeof(buf), "%.*g", prec, d);
-        if (std::strtod(buf, nullptr) == d) break;
+    auto res = std::to_chars(buf, buf + sizeof(buf), d);
+    std::string s(buf, res.ptr);
+    // Mirror the integer ".0" convention for any finite, non-scientific result
+    // that lacks a decimal point (defensive; integers handled above).
+    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+        s.find('E') == std::string::npos) {
+        s += ".0";
     }
-    return buf;
+    return s;
 }
 
 std::string formatFloat(float f) {
