@@ -240,9 +240,11 @@ std::string formatDate(int64_t days) {
 // (Scientific-notation edge cases for very large/small magnitudes are a known
 // minor divergence from Java's Double.toString.)
 std::string formatDouble(double d) {
-    if (std::isnan(d) || std::isinf(d)) {
-        throw VariantException("cannot render non-finite double as JSON");
-    }
+    // Non-finite values render as bare (unquoted) JSON tokens, matching the
+    // Java contract (which diverges from Spark's quoted rendering). std::to_chars
+    // and snprintf("%g") emit lowercase nan/inf, so special-case explicitly.
+    if (std::isnan(d)) return "NaN";
+    if (std::isinf(d)) return d > 0 ? "Infinity" : "-Infinity";
     if (d == std::floor(d) && std::abs(d) < 1e16) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%lld.0",
@@ -265,9 +267,11 @@ std::string formatDouble(double d) {
 }
 
 std::string formatFloat(float f) {
-    if (std::isnan(f) || std::isinf(f)) {
-        throw VariantException("cannot render non-finite float as JSON");
-    }
+    // Non-finite values render as bare (unquoted) JSON tokens, matching the
+    // Java contract (which diverges from Spark's quoted rendering). std::to_chars
+    // and snprintf("%g") emit lowercase nan/inf, so special-case explicitly.
+    if (std::isnan(f)) return "NaN";
+    if (std::isinf(f)) return f > 0 ? "Infinity" : "-Infinity";
     if (f == std::floor(f) && std::abs(f) < 1e16f) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%lld.0",

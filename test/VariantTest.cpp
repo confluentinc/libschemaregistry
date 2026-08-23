@@ -10,7 +10,9 @@
 #include <gtest/gtest.h>
 
 #include <clocale>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -151,6 +153,97 @@ TEST(VariantTest, FloatAndDoubleAreExact) {
     EXPECT_DOUBLE_EQ(prim(kTDouble, f64(2.5)).getDouble(), 2.5);
     EXPECT_THROW(prim(kTFloat, f32(2.5f)).getDouble(), VariantException);
     EXPECT_THROW(prim(kTDouble, f64(2.5)).getFloat(), VariantException);
+}
+
+// Non-finite double/float are STORED in the binary and render as bare
+// (unquoted) JSON tokens: NaN / Infinity / -Infinity, matching the Java
+// contract (which diverges from Spark's quoted rendering).
+TEST(VariantTest, NonFiniteDoubleRendersAsBareword) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    // Raw binary -> toJson bareword (double).
+    EXPECT_EQ(prim(kTDouble, f64(nan)).toJson(), "NaN");
+    EXPECT_EQ(prim(kTDouble, f64(inf)).toJson(), "Infinity");
+    EXPECT_EQ(prim(kTDouble, f64(-inf)).toJson(), "-Infinity");
+
+    // Builder accepts and stores non-finite doubles (no guard/throw).
+    {
+        VariantBuilder b;
+        b.appendDouble(nan);
+        Variant v = b.build();
+        EXPECT_EQ(v.getType(), VariantType::Double);
+        EXPECT_TRUE(std::isnan(v.getDouble()));
+        EXPECT_EQ(v.toJson(), "NaN");
+    }
+    {
+        VariantBuilder b;
+        b.appendDouble(inf);
+        Variant v = b.build();
+        EXPECT_EQ(v.getDouble(), inf);
+        EXPECT_EQ(v.toJson(), "Infinity");
+    }
+    {
+        VariantBuilder b;
+        b.appendDouble(-inf);
+        Variant v = b.build();
+        EXPECT_EQ(v.getDouble(), -inf);
+        EXPECT_EQ(v.toJson(), "-Infinity");
+    }
+}
+
+TEST(VariantTest, NonFiniteFloatRendersAsBareword) {
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+
+    // Raw binary -> toJson bareword (float).
+    EXPECT_EQ(prim(kTFloat, f32(nan)).toJson(), "NaN");
+    EXPECT_EQ(prim(kTFloat, f32(inf)).toJson(), "Infinity");
+    EXPECT_EQ(prim(kTFloat, f32(-inf)).toJson(), "-Infinity");
+
+    // Builder accepts and stores non-finite floats (no guard/throw).
+    {
+        VariantBuilder b;
+        b.appendFloat(nan);
+        Variant v = b.build();
+        EXPECT_EQ(v.getType(), VariantType::Float);
+        EXPECT_TRUE(std::isnan(v.getFloat()));
+        EXPECT_EQ(v.toJson(), "NaN");
+    }
+    {
+        VariantBuilder b;
+        b.appendFloat(inf);
+        EXPECT_EQ(b.build().toJson(), "Infinity");
+    }
+    {
+        VariantBuilder b;
+        b.appendFloat(-inf);
+        EXPECT_EQ(b.build().toJson(), "-Infinity");
+    }
+}
+
+// Non-finite JSON *input* is an accepted parity gap: nlohmann's parser
+// (parser.hpp) unconditionally rejects a number literal that overflows to a
+// non-finite double (error 406 "number overflow", e.g. 1e400) and also rejects
+// the bareword tokens NaN / Infinity / -Infinity. There is no parse flag to
+// relax this, and the contract forbids hand-rolling a scanner, so these inputs
+// surface as the typed VariantException (soft failure) rather than parsing to a
+// stored non-finite value. Java accepts them; C++ does not. The output side
+// (binary non-finite -> bareword JSON) is fully supported (tests above).
+TEST(VariantTest, NonFiniteJsonInputIsRejectedGap) {
+    EXPECT_THROW(Variant::parseJson("1e400"), VariantException);
+    EXPECT_THROW(Variant::parseJson("-1e400"), VariantException);
+    EXPECT_THROW(Variant::parseJson("NaN"), VariantException);
+    EXPECT_THROW(Variant::parseJson("Infinity"), VariantException);
+    EXPECT_THROW(Variant::parseJson("-Infinity"), VariantException);
+}
+
+// Empty / whitespace-only input is a soft parse failure: parseJson throws the
+// typed VariantException (which variants.tryParseJson maps to CEL null).
+TEST(VariantTest, EmptyAndWhitespaceParseJsonThrows) {
+    EXPECT_THROW(Variant::parseJson(""), VariantException);
+    EXPECT_THROW(Variant::parseJson("   "), VariantException);
+    EXPECT_THROW(Variant::parseJson("\t\n "), VariantException);
 }
 
 // ---- object / array navigation ----

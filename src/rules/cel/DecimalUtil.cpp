@@ -33,6 +33,20 @@ decimal::Context &DecimalUtil::context() {
     return ctx;
 }
 
+// (Practically) unbounded precision for add/sub/mul — java.math.BigDecimal computes these
+// exactly (no MathContext), and Python uses decimal.Context(prec=MAX_PREC, Emax=MAX_EMAX,
+// Emin=MIN_EMIN). Using the 38-digit context() here would cap the result and diverge from
+// the other clients. MaxContext() traps only on Invalid_operation, so exact add/sub/mul
+// never raise.
+decimal::Context &DecimalUtil::exactContext() {
+    static thread_local decimal::Context ctx = [] {
+        decimal::Context c = decimal::MaxContext();
+        c.round(decimal::ROUND_HALF_UP);
+        return c;
+    }();
+    return ctx;
+}
+
 void DecimalUtil::bytesToMagnitude(const std::string &bytes, uint8_t &sign, uint64_t &hi,
                                    uint64_t &lo) {
     const bool negative =

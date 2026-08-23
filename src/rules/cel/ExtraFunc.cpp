@@ -187,6 +187,18 @@ absl::optional<decimal::Decimal> toDecimalDyn(const cel::CelValue& v, std::strin
     return absl::nullopt;
 }
 
+// Narrow a CEL int (i64) scale argument down to the i32 that BigDecimal-style scale requires,
+// matching Java's requireIntScale (Math.toIntExact). Throws on out-of-range so the
+// LambdaFunction wrapper reports a CEL error, rather than silently keeping the low 32 bits
+// (e.g. 2^32 -> 0) and producing a wildly wrong Decimal.
+int32_t requireIntScale(int64_t scale, const char* functionName) {
+    if (scale < INT32_MIN || scale > INT32_MAX) {
+        throw std::invalid_argument(std::string(functionName) +
+                                    ": scale out of int range: " + std::to_string(scale));
+    }
+    return static_cast<int32_t>(scale);
+}
+
 // ---------------------------------------------------------------------------
 // Decimal function registration.
 // ---------------------------------------------------------------------------
@@ -209,8 +221,9 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
     // decimal(bytes, int)
     s = reg(registry, "decimal", false, {T::kBytes, T::kInt64},
             [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
-                auto d = DecimalUtil::fromUnscaledBytes(std::string(args[0].BytesOrDie().value()),
-                                                        static_cast<int32_t>(args[1].Int64OrDie()));
+                auto d = DecimalUtil::fromUnscaledBytes(
+                    std::string(args[0].BytesOrDie().value()),
+                    requireIntScale(args[1].Int64OrDie(), "decimal(bytes, scale)"));
                 *out = wrapDecimal(d, arena);
                 return absl::OkStatus();
             });
@@ -256,13 +269,16 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
                     return absl::OkStatus();
                 });
         };
-    if (s = bin("decimals.add", [](auto a, auto b, std::string*) { return a.add(b, DecimalUtil::context()); });
+    // add/sub/mul use the exact (unbounded-precision) context so results are not capped at
+    // 38 digits — matching Java's exact BigDecimal add/subtract/multiply. div/sqrt below
+    // deliberately keep the 38-digit context() (the shared cross-client contract).
+    if (s = bin("decimals.add", [](auto a, auto b, std::string*) { return a.add(b, DecimalUtil::exactContext()); });
         !s.ok())
         return s;
-    if (s = bin("decimals.sub", [](auto a, auto b, std::string*) { return a.sub(b, DecimalUtil::context()); });
+    if (s = bin("decimals.sub", [](auto a, auto b, std::string*) { return a.sub(b, DecimalUtil::exactContext()); });
         !s.ok())
         return s;
-    if (s = bin("decimals.mul", [](auto a, auto b, std::string*) { return a.mul(b, DecimalUtil::context()); });
+    if (s = bin("decimals.mul", [](auto a, auto b, std::string*) { return a.mul(b, DecimalUtil::exactContext()); });
         !s.ok())
         return s;
     if (s = bin("decimals.div",
@@ -322,11 +338,13 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
                });
         !s.ok())
         return s;
-    if (s = un("decimals.neg", [](auto a, std::string*) { return a.minus(DecimalUtil::context()); }); !s.ok())
+    // neg/abs use copy_negate/copy_abs — exact sign flips with no rounding/precision cap
+    // (matching Java BigDecimal.negate/abs and Python's copy_negate/copy_abs). Applying the
+    // 38-digit context() here would round a >38-digit operand produced by an earlier exact
+    // add/sub/mul.
+    if (s = un("decimals.neg", [](auto a, std::string*) { return a.copy_negate(); }); !s.ok())
         return s;
-    if (s = un("decimals.abs",
-               [](auto a, std::string*) { return decimalIsZero(a) || a.sign() > 0 ? a : a.minus(DecimalUtil::context()); });
-        !s.ok())
+    if (s = un("decimals.abs", [](auto a, std::string*) { return a.copy_abs(); }); !s.ok())
         return s;
     if (s = un("decimals.floor", [](auto a, std::string*) { return a.floor(DecimalUtil::context()); }); !s.ok())
         return s;
@@ -374,7 +392,7 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
                     return absl::OkStatus();
                 }
                 *out = wrapDecimal(roundTo(decimalFromMessage(*args[0].MessageOrDie()),
-                                           static_cast<int32_t>(args[1].Int64OrDie()),
+                                           requireIntScale(args[1].Int64OrDie(), "decimals.round"),
                                            MPD_ROUND_HALF_UP),
                                    arena);
                 return absl::OkStatus();
@@ -405,7 +423,7 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
                     return absl::OkStatus();
                 }
                 *out = wrapDecimal(truncTo(decimalFromMessage(*args[0].MessageOrDie()),
-                                           static_cast<int32_t>(args[1].Int64OrDie())),
+                                           requireIntScale(args[1].Int64OrDie(), "decimals.trunc")),
                                    arena);
                 return absl::OkStatus();
             });
@@ -848,11 +866,17 @@ absl::Status variantAsImpl(absl::Span<const cel::CelValue> args, cel::CelValue* 
         if (vt == VariantType::TimestampTz || vt == VariantType::TimestampNtz ||
             vt == VariantType::TimestampNanosTz || vt == VariantType::TimestampNanosNtz) {
             int64_t raw = variant->getLong();
-            int64_t micros = (vt == VariantType::TimestampTz ||
-                              vt == VariantType::TimestampNtz)
-                                 ? raw
-                                 : raw / 1000;
-            *out = cel::CelValue::CreateTimestamp(absl::FromUnixMicros(micros));
+            // Micros variants carry epoch micros; nanos variants carry epoch nanos.
+            // absl::Time keeps sub-microsecond resolution, so preserve nanos in full and
+            // let absl floor-divide for negatives — matching Java's fromEpochMicros /
+            // fromEpochNanos, which use Math.floorDiv into a seconds+nanos proto Timestamp.
+            // A raw/1000 truncation would drop the sub-micro nanos and mis-round negative
+            // timestamps toward zero.
+            absl::Time t = (vt == VariantType::TimestampTz ||
+                            vt == VariantType::TimestampNtz)
+                               ? absl::FromUnixMicros(raw)
+                               : absl::FromUnixNanos(raw);
+            *out = cel::CelValue::CreateTimestamp(t);
             return absl::OkStatus();
         }
     } else if (type == "bytes") {
@@ -901,12 +925,14 @@ absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
         [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
             if (isVariantMessage(args[0])) {
                 *out = wrapVariant(variantFromMessage(*args[0].MessageOrDie()), arena);
+            } else if (args[0].IsNull()) {
+                // CEL null passes through as CEL null (matching the navigation accessors
+                // and the Java reference), rather than erroring.
+                *out = cel::CelValue::CreateNull();
             } else if (args[0].IsString()) {
                 *out = err(arena,
                            "variant: cannot convert string to Variant; use "
                            "variants.parseJson(s) or variants.tryParseJson(s)");
-            } else if (args[0].IsNull()) {
-                *out = err(arena, "variant: cannot convert null to Variant");
             } else {
                 *out = err(arena, "variant: cannot convert value to Variant");
             }

@@ -35,8 +35,15 @@ namespace schemaregistry::rules::cel {
  */
 class DecimalUtil {
    public:
-    /** The shared arithmetic context: 38 significant digits, ROUND_HALF_UP (= Java MathContext). */
+    /** The shared arithmetic context: 38 significant digits, ROUND_HALF_UP (= Java MathContext).
+     *  Used by div/sqrt and the rounding family. */
     static decimal::Context &context();
+
+    /** An exact/(practically) unbounded-precision context for the operations Java computes
+     *  exactly via java.math.BigDecimal defaults (add/sub/mul). Mirrors Python's
+     *  _EXACT_CONTEXT (prec=MAX_PREC). Capping these at 38 digits would diverge from the
+     *  other clients. */
+    static decimal::Context &exactContext();
 
     /** Decode a confluent.type.Decimal message into a Decimal (scale preserved). */
     static decimal::Decimal fromProto(const confluent::type::Decimal &d);
