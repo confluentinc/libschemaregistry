@@ -1,7 +1,7 @@
 /**
  * CelDecimalTimestampTest
  *
- * Tests the CEL Decimal (decimal / decimals.*) and Timestamp (timestamp.of)
+ * Tests the CEL Decimal (decimal / decimals.*) and Timestamp (timestamp)
  * function families, plus marshalling each of the four schema-side shapes into
  * CEL: an Avro logical timestamp, a Protobuf WKT timestamp, an Avro logical
  * decimal, and a Protobuf confluent.type.Decimal.
@@ -244,13 +244,30 @@ TEST(CelDecimalTimestampTest, TimestampBareIntIsEpochSeconds) {
     // A seconds value beyond year 9999 overflows (proof the argument is scaled as seconds,
     // not millis -- as millis this would be a valid 2001 timestamp).
     EXPECT_TRUE(errContains(R"(timestamp(999999999999) == timestamp(0))", "timestamp overflow"));
-    // The explicit timestamp.of(value, unit) family is unaffected by the above: it still
-    // requires a unit for a raw int, and each unit scales as named.
-    EXPECT_TRUE(evalBool(R"(timestamp.of(1700000000000, "millis") == timestamp(1700000000))"));
-    EXPECT_TRUE(evalBool(R"(timestamp.of(1700000000, "seconds") == timestamp(1700000000))"));
-    EXPECT_TRUE(evalBool(R"(timestamp.of(1700000000000000, "micros") == timestamp(1700000000))"));
-    EXPECT_TRUE(errContains(R"(timestamp.of(1700000000) == timestamp(0))",
-                            "raw int needs a unit"));
+    // The two-argument timestamp(value, precision) form is unaffected by the above: it honors
+    // the explicit precision, so each precision scales as named.
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000, 0) == timestamp(1700000000))"));
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000000, 3) == timestamp(1700000000))"));
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000000000, 6) == timestamp(1700000000))"));
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000000000000, 9) == timestamp(1700000000))"));
+    // Sub-second precision survives, and the same integer differs across the two arities.
+    EXPECT_TRUE(evalBool(
+        R"(timestamp(1700000000123, 3) == timestamp("2023-11-14T22:13:20.123Z"))"));
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000, 3) != timestamp(1700000000))"));
+    // With the unit a number rather than a name, rejecting anything outside {0, 3, 6, 9} is
+    // the only thing between a typo and a silently wrong instant.
+    for (const char* expr : {R"(timestamp(1700000000, 1) == timestamp(0))",
+                             R"(timestamp(1700000000, 2) == timestamp(0))",
+                             R"(timestamp(1700000000, 4) == timestamp(0))",
+                             R"(timestamp(1700000000, 7) == timestamp(0))",
+                             R"(timestamp(1700000000, 10) == timestamp(0))",
+                             R"(timestamp(1700000000, -3) == timestamp(0))"}) {
+        EXPECT_TRUE(errContains(expr, "unknown precision")) << expr;
+    }
+    // The namespaced form is gone: `timestamp.of` no longer resolves, which cel-cpp reports
+    // at compile time rather than as an evaluation error.
+    EXPECT_TRUE(errContains(R"(timestamp.of(1700000000000, 3) == timestamp(1700000000))",
+                            "No overload found"));
 }
 
 // ---- is* validators (member-style) ----
@@ -319,7 +336,7 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampIntoCel) {
     const char *schema = R"json({
         "type": "record", "name": "TsRecord",
         "confluent:rules": [
-            {"name": "r", "expr": "timestamp.of(this.ts) < now"}
+            {"name": "r", "expr": "timestamp(this.ts) < now"}
         ],
         "fields": [
             {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}}
@@ -334,5 +351,82 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampIntoCel) {
     auto violations = schemaregistry::serdes::avro::utils::validateMessage(validator, nlohmann::json::parse(schema), {},
                                                    datum, false);
     EXPECT_TRUE(violations.empty());
+}
+
+// Cross-client parity: an Avro `decimal` logical type is usable as a Decimal with **no
+// `decimal(...)` call**, and the wrapped form keeps working alongside it. fromAvroValue applies
+// the schema's scale and builds a confluent.type.Decimal message, which is this client's in-CEL
+// decimal representation, so decimals.* (declared over {kMessage, kMessage}) accept it directly.
+TEST(CelDecimalTimestampTest, AvroLogicalDecimalNeedsNoConstructor) {
+    auto evalDecimal = [](const std::string &expr) {
+        std::string schema = R"json({
+            "type": "record", "name": "DecimalRecord",
+            "confluent:rules": [
+                {"name": "r", "expr": ")json" + expr + R"json("}
+            ],
+            "fields": [
+                {"name": "amount", "type": {"type": "bytes", "logicalType": "decimal",
+                                            "precision": 8, "scale": 2}}
+            ]
+        })json";
+        auto valid_schema = ::avro::compileJsonSchemaFromString(schema);
+        ::avro::GenericDatum datum(valid_schema);
+        // 12.34 = unscaled 1234 = 0x04d2 at the schema's scale of 2.
+        datum.value<::avro::GenericRecord>().fieldAt(0).value<std::vector<uint8_t>>() = {0x04,
+                                                                                        0xd2};
+        CelValidator validator;
+        return schemaregistry::serdes::avro::utils::validateMessage(
+                   validator, nlohmann::json::parse(schema), {}, datum, false)
+            .empty();
+    };
+
+    // Bare: no constructor call on the field.
+    EXPECT_TRUE(evalDecimal(R"(decimals.eq(this.amount, decimal(\"12.34\")))"));
+    EXPECT_TRUE(evalDecimal(R"(decimals.gt(this.amount, decimal(\"10.00\")))"));
+    // The wrapped form must keep working (decimal(...) re-entry).
+    EXPECT_TRUE(evalDecimal(R"(decimals.eq(decimal(this.amount), decimal(\"12.34\")))"));
+    // `==` is numeric on it: 12.34 equals 12.340 despite the differing scale. That holds only
+    // because registerEquality overrides _==_ for a pair of Decimal messages — plain proto
+    // message equality is structural and would answer false on the differing scale.
+    EXPECT_TRUE(evalDecimal(R"(this.amount == decimal(\"12.340\"))"));
+    // The schema's scale is applied, not guessed: as scale 0 this would be 1234.
+    EXPECT_TRUE(evalDecimal(R"(decimals.lt(this.amount, decimal(\"100\")))"));
+    // Negative control: a false comparison must fail.
+    EXPECT_FALSE(evalDecimal(R"(decimals.gt(this.amount, decimal(\"100\")))"));
+}
+
+// Cross-client parity: an Avro timestamp logical type is usable as a timestamp with **no
+// constructor call at all**. fromAvroValue converts it straight to a CEL timestamp, so it is
+// comparable against `now` and carries the timestamp accessors. Every one of the seven clients
+// has this test; the constructor is only needed for a plain numeric field whose unit the schema
+// cannot supply.
+TEST(CelDecimalTimestampTest, AvroLogicalTimestampNeedsNoConstructor) {
+    auto evalTs = [](const std::string &expr, int64_t millis) {
+        std::string schema = R"json({
+            "type": "record", "name": "TsRecord",
+            "confluent:rules": [
+                {"name": "r", "expr": ")json" + expr + R"json("}
+            ],
+            "fields": [
+                {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}}
+            ]
+        })json";
+        auto valid_schema = ::avro::compileJsonSchemaFromString(schema);
+        ::avro::GenericDatum datum(valid_schema);
+        datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() = millis;
+        CelValidator validator;
+        return schemaregistry::serdes::avro::utils::validateMessage(
+                   validator, nlohmann::json::parse(schema), {}, datum, false)
+            .empty();
+    };
+
+    const int64_t past = 1577836800000LL;    // 2020-01-01
+    const int64_t future = 4102444800000LL;  // 2100-01-01
+    // Bare comparison against `now`, plus the negative control that proves it really compares.
+    EXPECT_TRUE(evalTs("this.ts < now", past));
+    EXPECT_FALSE(evalTs("this.ts < now", future));
+    // The schema's millis unit is applied, not guessed, and the accessors work directly.
+    EXPECT_TRUE(evalTs("this.ts == timestamp(\\\"2023-11-14T22:13:20.123Z\\\")", 1700000000123LL));
+    EXPECT_TRUE(evalTs("this.ts.getFullYear() == 2023", 1700000000123LL));
 }
 #endif  // SCHEMAREGISTRY_TEST_WITH_AVRO
