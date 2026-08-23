@@ -117,7 +117,7 @@ nlohmann::json toJsonValue(
 google::api::expr::runtime::CelValue fromAvroValue(
     const ::avro::GenericDatum &avro, google::protobuf::Arena *arena) {
     // Logical types are converted to their CEL semantic type so that portable
-    // expressions (decimal(this.amount), timestamp.of(this.ts)) work the same as
+    // expressions (decimal(this.amount), timestamp(this.ts)) work the same as
     // in the other clients. Decimal -> confluent.type.Decimal message; timestamp
     // -> CEL timestamp. Everything else falls through to the base-type switch.
     switch (avro.logicalType().type()) {

@@ -527,56 +527,47 @@ absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
 // ---------------------------------------------------------------------------
 
 absl::Status registerTimestamp(cel::CelFunctionRegistry& registry) {
-    // timestamp.of(dyn)
-    absl::Status s =
-        reg(registry, "timestamp.of", false, {T::kAny},
-            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
-                const cel::CelValue& v = args[0];
-                if (v.IsTimestamp()) {
-                    *out = v;  // already a CEL timestamp (incl. pre-converted Avro / proto WKT)
-                } else if (v.IsString()) {
-                    absl::Time t;
-                    std::string parse_err;
-                    if (absl::ParseTime(absl::RFC3339_full, std::string(v.StringOrDie().value()),
-                                        &t, &parse_err)) {
-                        *out = cel::CelValue::CreateTimestamp(t);
-                    } else {
-                        *out = err(arena, "timestamp.of: cannot parse RFC 3339: " + parse_err);
-                    }
-                } else if (v.IsInt64() || v.IsUint64()) {
-                    *out = err(arena,
-                               "timestamp.of: raw int needs a unit; use "
-                               "timestamp.of(value, \"millis\"|\"micros\"|\"nanos\"|\"seconds\")");
-                } else {
-                    *out = err(arena, "timestamp.of: cannot convert value to Timestamp");
-                }
-                return absl::OkStatus();
-            });
-    if (!s.ok()) return s;
-
-    // timestamp.of(int, string)
-    s = reg(registry, "timestamp.of", false, {T::kInt64, T::kString},
-            [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
-                int64_t value = args[0].Int64OrDie();
-                std::string unit(args[1].StringOrDie().value());
-                absl::Time t;
-                if (unit == "millis") {
-                    t = absl::FromUnixMillis(value);
-                } else if (unit == "micros") {
-                    t = absl::FromUnixMicros(value);
-                } else if (unit == "nanos") {
-                    t = absl::FromUnixNanos(value);
-                } else if (unit == "seconds") {
+    // One overload on the *standard* timestamp constructor, rather than a timestamp.of
+    // namespace of our own: timestamp(int, int), an epoch value at a Flink-style decimal
+    // precision (0 seconds, 3 millis, 6 micros, 9 nanos). Arity 2 collides with nothing in
+    // cel-cpp's standard library, so timestamp(string), timestamp(int) (epoch seconds) and
+    // timestamp(timestamp) all keep their standard implementations.
+    //
+    // Nothing is needed for the one-argument non-int cases: fromAvroValue converts a timestamp
+    // logical type straight to a CEL timestamp and CelProtoWrapper downcasts the proto WKT to
+    // one, so both already satisfy the standard identity overload with no wrapper.
+    return reg(
+        registry, "timestamp", false, {T::kInt64, T::kInt64},
+        [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+            int64_t value = args[0].Int64OrDie();
+            int64_t precision = args[1].Int64OrDie();
+            absl::Time t;
+            // Precisions outside {0, 3, 6, 9} are rejected rather than generalized to "any p
+            // means 10^-p": with the unit a number rather than a name, that check is the only
+            // thing between a typo and a silently wrong instant.
+            switch (precision) {
+                case 0:
                     t = absl::FromUnixSeconds(value);
-                } else {
-                    *out = err(arena, "timestamp.of: unknown unit '" + unit +
-                                          "'; expected millis, micros, nanos, seconds");
+                    break;
+                case 3:
+                    t = absl::FromUnixMillis(value);
+                    break;
+                case 6:
+                    t = absl::FromUnixMicros(value);
+                    break;
+                case 9:
+                    t = absl::FromUnixNanos(value);
+                    break;
+                default:
+                    *out = err(arena, "timestamp: unknown precision " +
+                                          std::to_string(precision) +
+                                          "; expected 0 (seconds), 3 (millis), 6 (micros) or "
+                                          "9 (nanos)");
                     return absl::OkStatus();
-                }
-                *out = cel::CelValue::CreateTimestamp(t);
-                return absl::OkStatus();
-            });
-    return s;
+            }
+            *out = cel::CelValue::CreateTimestamp(t);
+            return absl::OkStatus();
+        });
 }
 
 // ---------------------------------------------------------------------------

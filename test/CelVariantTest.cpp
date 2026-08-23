@@ -164,13 +164,13 @@ TEST(CelVariantTest, VariantAsTimestampPreservesNanos) {
     EXPECT_TRUE(evalNanosTsTz(
         1577836800123456789LL,
         "variants.as(variant(this), 'timestamp') == "
-        "timestamp.of('2020-01-01T00:00:00.123456789Z')"));
+        "timestamp('2020-01-01T00:00:00.123456789Z')"));
     // Negative: -1500 ns = 1969-12-31T23:59:59.999998500Z (floor-divides to seconds=-1,
     // nanos=999998500). The buggy raw/1000 path would yield -1000 ns instead.
     EXPECT_TRUE(evalNanosTsTz(
         -1500LL,
         "variants.as(variant(this), 'timestamp') == "
-        "timestamp.of('1969-12-31T23:59:59.9999985Z')"));
+        "timestamp('1969-12-31T23:59:59.9999985Z')"));
 }
 
 // ---- Marshalling: the two schema-side shapes into CEL ----
