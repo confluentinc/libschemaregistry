@@ -119,9 +119,9 @@ JsonSerde::getParsedSchema(
     std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
     std::lock_guard<std::mutex> lock(cache_mutex_);
 
-    // Create cache key from schema content
-    auto schema_str = schema.getSchema();
-    std::string cache_key = schema_str.value_or("");
+    // Keyed on the whole schema: what gets compiled below is the schema with
+    // its references flattened in, so the references are part of its identity.
+    std::string cache_key = schemaCacheKey(schema);
 
     auto it = parsed_schemas_cache_.find(cache_key);
     if (it != parsed_schemas_cache_.end()) {
@@ -136,7 +136,7 @@ JsonSerde::getParsedSchema(
     // Parse main schema
     nlohmann::json parsed_schema;
     try {
-        parsed_schema = nlohmann::json::parse(cache_key);
+        parsed_schema = nlohmann::json::parse(schema.getSchema().value_or(""));
     } catch (const nlohmann::json::parse_error &e) {
         throw JsonError("Failed to parse JSON schema: " +
                         std::string(e.what()));
@@ -157,9 +157,43 @@ JsonSerde::getParsedSchema(
     return compiled_schema;
 }
 
+std::shared_ptr<const nlohmann::json> JsonSerde::getSchemaJson(
+    const schemaregistry::rest::model::Schema& schema,
+    std::shared_ptr<schemaregistry::rest::ISchemaRegistryClient> client) {
+    auto schema_str = schema.getSchema();
+    if (!schema_str.has_value()) {
+        return nullptr;
+    }
+
+    // Keyed on the whole schema for the same reason getParsedSchema is: the
+    // flattened document below inlines what the references resolve to, inline
+    // validation rules included.
+    const std::string cache_key = schemaCacheKey(schema);
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    auto it = schema_json_cache_.find(cache_key);
+    if (it != schema_json_cache_.end()) {
+        return it->second;
+    }
+
+    // Resolve and inline references the same way getParsedSchema does, so that a $ref
+    // into a referenced schema becomes a local pointer the walker can follow, and so
+    // that the schema text is not re-parsed for every message.
+    std::unordered_set<std::string> visited;
+    auto resolved_refs =
+        schema_resolution::resolveNamedSchema(schema, client, visited);
+    auto flattened = flattenSchemaReferences(
+        nlohmann::json::parse(schema_str.value()), resolved_refs);
+
+    auto parsed = std::make_shared<const nlohmann::json>(std::move(flattened));
+    schema_json_cache_[cache_key] = parsed;
+    return parsed;
+}
+
 void JsonSerde::clear() {
     std::lock_guard<std::mutex> lock(cache_mutex_);
     parsed_schemas_cache_.clear();
+    schema_json_cache_.clear();
 }
 
 void JsonSerde::resolveNamedSchema(
@@ -260,6 +294,11 @@ class JsonSerializer::Impl {
             // Get parsed schema
             parsed_schema = getParsedSchema(target_schema);
 
+            if (base_->validationEnabled(
+                    ValidationRulesExecution::BeforeDomainRules)) {
+                validateInlineRules(target_schema, mutable_value);
+            }
+
             // Create field transformer lambda
             auto field_transformer =
                 [this, &parsed_schema](
@@ -289,12 +328,23 @@ class JsonSerializer::Impl {
                 throw JsonError(
                     "Unexpected serde value type returned from rule execution");
             }
+
+            if (base_->validationEnabled(
+                    ValidationRulesExecution::AfterDomainRules)) {
+                validateInlineRules(target_schema, mutable_value);
+            }
         } else {
             // Use provided schema
             if (!schema_.has_value()) {
                 throw JsonError("Schema needs to be set for auto-registration");
             }
             target_schema = schema_.value();
+
+            // No domain rules run on this path, so there is a single validation
+            // point regardless of the configured phase.
+            if (base_->validationEnabled(std::nullopt)) {
+                validateInlineRules(target_schema, mutable_value);
+            }
 
             // Register or get schema
             if (base_->getConfig().auto_register_schemas) {
@@ -362,6 +412,24 @@ class JsonSerializer::Impl {
     }
 
     void close() { serde_->clear(); }
+
+    // Evaluate the schema's inline validation rules against value, throwing a
+    // single error listing every violation found.
+    void validateInlineRules(
+        const schemaregistry::rest::model::Schema& target_schema,
+        const nlohmann::json& value) {
+        // The schema JSON is resolved and cached, so this neither re-parses the schema
+        // text per message nor loses rules declared in a referenced schema.
+        auto schema_json = serde_->getSchemaJson(
+            target_schema, base_->getSerde().getClient());
+        if (!schema_json) {
+            return;
+        }
+        auto executor = base_->validationExecutor();
+        raiseValidationViolations(utils::validateMessage(
+            *executor, *schema_json, value,
+            base_->getConfig().validation_rules_fail_fast));
+    }
 
     std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>
     getParsedSchema(const schemaregistry::rest::model::Schema &schema) {
