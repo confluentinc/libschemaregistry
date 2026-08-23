@@ -41,6 +41,22 @@ std::vector<std::shared_ptr<RuleExecutor>> RuleRegistry::getExecutors() const {
     return result;
 }
 
+void RuleRegistry::registerValidationExecutor(
+    std::shared_ptr<ValidationRuleExecutor> executor) {
+    if (!executor) {
+        throw std::invalid_argument("Cannot register null validation executor");
+    }
+
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    validation_executor_ = std::move(executor);
+}
+
+std::shared_ptr<ValidationRuleExecutor> RuleRegistry::getValidationExecutor()
+    const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return validation_executor_;
+}
+
 void RuleRegistry::registerAction(std::shared_ptr<RuleAction> action) {
     if (!action) {
         throw std::invalid_argument("Cannot register null action");
@@ -104,6 +120,7 @@ void RuleRegistry::clear() {
     rule_executors_.clear();
     rule_actions_.clear();
     rule_overrides_.clear();
+    validation_executor_.reset();
 }
 
 // Global registry implementation
@@ -125,6 +142,15 @@ std::shared_ptr<RuleExecutor> getRuleExecutor(const std::string &type) {
 
 std::vector<std::shared_ptr<RuleExecutor>> getRuleExecutors() {
     return getInstance().getExecutors();
+}
+
+void registerValidationRuleExecutor(
+    std::shared_ptr<ValidationRuleExecutor> executor) {
+    getInstance().registerValidationExecutor(std::move(executor));
+}
+
+std::shared_ptr<ValidationRuleExecutor> getValidationRuleExecutor() {
+    return getInstance().getValidationExecutor();
 }
 
 void registerRuleAction(std::shared_ptr<RuleAction> action) {
