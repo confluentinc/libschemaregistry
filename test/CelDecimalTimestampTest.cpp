@@ -225,6 +225,34 @@ TEST(CelDecimalTimestampTest, DecimalFromBytesAndScale) {
     EXPECT_TRUE(evalBool(R"(decimals.eq(decimal(b"\x04\xd2", 2), decimal("12.34")))"));
 }
 
+// CROSS-CLIENT CONTRACT: the standard CEL `timestamp(<int>)` conversion interprets a bare
+// integer as epoch SECONDS (never millis), matching cel-go / cel-java and cel-cpp's own
+// `{kInt64}` overload in runtime/standard/type_conversion_functions.cc, which calls
+// absl::FromUnixSeconds. This test pins that so the meaning can't drift to millis.
+TEST(CelDecimalTimestampTest, TimestampBareIntIsEpochSeconds) {
+    // 1700000000 seconds == 2023-11-14T22:13:20Z.
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000) == timestamp("2023-11-14T22:13:20Z"))"));
+    EXPECT_TRUE(evalBool(R"(string(timestamp(1700000000)) == "2023-11-14T22:13:20Z")"));
+    // ...and is NOT the millis reading of the same integer (1700000000 ms == 1970-01-20T16:13:20Z).
+    EXPECT_FALSE(evalBool(R"(timestamp(1700000000) == timestamp("1970-01-20T16:13:20Z"))"));
+    // Component accessors agree.
+    EXPECT_TRUE(evalBool(R"(timestamp(1700000000).getFullYear() == 2023)"));
+    // Negative / pre-epoch ints go backwards from the epoch in seconds.
+    EXPECT_TRUE(evalBool(R"(timestamp(-1) == timestamp("1969-12-31T23:59:59Z"))"));
+    EXPECT_TRUE(evalBool(R"(timestamp(-86400) == timestamp("1969-12-31T00:00:00Z"))"));
+    EXPECT_TRUE(evalBool(R"(timestamp(0) == timestamp("1970-01-01T00:00:00Z"))"));
+    // A seconds value beyond year 9999 overflows (proof the argument is scaled as seconds,
+    // not millis -- as millis this would be a valid 2001 timestamp).
+    EXPECT_TRUE(errContains(R"(timestamp(999999999999) == timestamp(0))", "timestamp overflow"));
+    // The explicit timestamp.of(value, unit) family is unaffected by the above: it still
+    // requires a unit for a raw int, and each unit scales as named.
+    EXPECT_TRUE(evalBool(R"(timestamp.of(1700000000000, "millis") == timestamp(1700000000))"));
+    EXPECT_TRUE(evalBool(R"(timestamp.of(1700000000, "seconds") == timestamp(1700000000))"));
+    EXPECT_TRUE(evalBool(R"(timestamp.of(1700000000000000, "micros") == timestamp(1700000000))"));
+    EXPECT_TRUE(errContains(R"(timestamp.of(1700000000) == timestamp(0))",
+                            "raw int needs a unit"));
+}
+
 // ---- is* validators (member-style) ----
 
 TEST(CelDecimalTimestampTest, IsValidators) {
