@@ -112,6 +112,36 @@ TEST(CelVariantTest, VariantFunctions) {
         kDoc));
 }
 
+// BUG P: dotted identifiers in a variant path must accept non-ASCII (UTF-8) key
+// characters, matching Java's Character.isLetter/isLetterOrDigit. The C++ parser
+// approximates by accepting any byte >= 0x80 as an identifier character, so keys like
+// "café", "über", "naïve", and CJK resolve. ASCII paths and quoted keys are unaffected.
+TEST(CelVariantTest, VariantPathUnicodeIdentifiers) {
+    constexpr const char *kUnicodeDoc =
+        R"({"café":1,"über":2,"naïve":3,"中文":4,"ascii_1":5})";
+    // Dotted non-ASCII identifiers now resolve instead of raising a CEL error.
+    EXPECT_TRUE(evalWith(
+        "variants.as(variants.path(variants.parseJson(this), '$.café'), 'int') == 1",
+        kUnicodeDoc));
+    EXPECT_TRUE(evalWith(
+        "variants.as(variants.path(variants.parseJson(this), '$.über'), 'int') == 2",
+        kUnicodeDoc));
+    EXPECT_TRUE(evalWith(
+        "variants.as(variants.path(variants.parseJson(this), '$.naïve'), 'int') == 3",
+        kUnicodeDoc));
+    EXPECT_TRUE(evalWith(
+        "variants.as(variants.path(variants.parseJson(this), '$.中文'), 'int') == 4",
+        kUnicodeDoc));
+    // ASCII dotted identifiers still work (incl. digits/underscore in continuation).
+    EXPECT_TRUE(evalWith(
+        "variants.as(variants.path(variants.parseJson(this), '$.ascii_1'), 'int') == 5",
+        kUnicodeDoc));
+    // The quoted form still resolves a non-ASCII key too.
+    EXPECT_TRUE(evalWith(
+        "variants.as(variants.path(variants.parseJson(this), '$[\"café\"]'), 'int') == 1",
+        kUnicodeDoc));
+}
+
 // Empty / whitespace-only input is a soft failure: variants.tryParseJson maps
 // the typed parse error to CEL null (rather than surfacing a CEL error).
 TEST(CelVariantTest, TryParseJsonEmptyIsNull) {

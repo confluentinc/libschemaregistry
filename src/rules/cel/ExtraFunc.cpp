@@ -297,7 +297,12 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
                         *e = "decimals.mod: division by zero";
                         return absl::nullopt;
                     }
-                    return a.rem(b, DecimalUtil::context());
+                    // Use the exact (unbounded-precision) context — Java's decimals.mod uses
+                    // BigDecimal.remainder(...) with no MathContext (exact). The 38-digit
+                    // context() would trap (Division_impossible) when the integer quotient
+                    // exceeds 38 digits, e.g. mod(1E40, 3), turning a valid result into a
+                    // CEL error. exactContext() (MaxContext) computes the remainder exactly.
+                    return a.rem(b, DecimalUtil::exactContext());
                 });
         !s.ok())
         return s;
@@ -700,15 +705,28 @@ std::vector<VariantPathSeg> parseVariantPath(const std::string& path) {
         char ch = path[pos];
         if (ch == '.') {
             pos++;
+            // Identifier characters. The path is UTF-8; without ICU (not a dependency here)
+            // we cannot do full Unicode letter classification like Java's
+            // Character.isLetter/isLetterOrDigit, so we approximate: any byte >= 0x80 (a
+            // UTF-8 lead/continuation byte of a non-ASCII codepoint) is accepted as an
+            // identifier character, in addition to the ASCII letters/digits/'_'. This is
+            // broader than Java's Character.isLetter (it also admits e.g. non-ASCII symbols),
+            // but it covers all real-world identifier keys such as "café", "über", CJK, etc.
+            auto isIdentStart = [](unsigned char b) {
+                return std::isalpha(b) || b == '_' || b >= 0x80;
+            };
+            auto isIdentCont = [](unsigned char b) {
+                return std::isalnum(b) || b == '_' || b >= 0x80;
+            };
             if (pos >= path.size() ||
-                !(std::isalpha(static_cast<unsigned char>(path[pos])) || path[pos] == '_')) {
+                !isIdentStart(static_cast<unsigned char>(path[pos]))) {
                 throw std::invalid_argument(
                     "expected identifier (starting with a letter or '_') after '.' in "
                     "variant path: " + path);
             }
             size_t start = pos++;
             while (pos < path.size() &&
-                   (std::isalnum(static_cast<unsigned char>(path[pos])) || path[pos] == '_')) {
+                   isIdentCont(static_cast<unsigned char>(path[pos]))) {
                 pos++;
             }
             out.push_back({false, path.substr(start, pos - start), 0});
