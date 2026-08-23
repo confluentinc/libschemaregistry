@@ -54,6 +54,23 @@ bool evalWith(const std::string &expr, const std::string &jsonStr) {
     return std::holds_alternative<bool>(result) && std::get<bool>(result);
 }
 
+// Evaluate a boolean rule with `this` bound to a proto Variant message wrapping a single
+// nanosecond-precision timestamp value (nanoseconds since the Unix epoch).
+bool evalNanosTsTz(int64_t nanos, const std::string &expr) {
+    VariantBuilder builder;
+    builder.appendTimestampNanosTz(nanos);
+    Variant parsed = builder.build();
+    auto msg = std::make_unique<confluent::type::Variant>();
+    msg->set_metadata(std::string(parsed.metadataBytes().begin(),
+                                  parsed.metadataBytes().end()));
+    msg->set_value(std::string(parsed.valueBytes().begin(), parsed.valueBytes().end()));
+    CelValidator validator;
+    auto value = protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(msg)));
+    auto result = validator.execute(rule(expr), *value);
+    EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+    return std::holds_alternative<bool>(result) && std::get<bool>(result);
+}
+
 }  // namespace
 
 // ---- variants.* over a parsed JSON string bound as `this` ----
@@ -86,6 +103,44 @@ TEST(CelVariantTest, VariantFunctions) {
     EXPECT_TRUE(evalWith(
         R"(variants.toJson(variants.field(variants.parseJson(this), 'nested')) == '{"x":1}')",
         kDoc));
+    // variant(null) passes CEL null through as CEL null (no error), and navigation over it
+    // is still CEL null - so a null argument (here a missing field) composes cleanly.
+    EXPECT_TRUE(evalWith("variant(null) == null", kDoc));
+    EXPECT_TRUE(evalWith(
+        "variants.field(variant(variants.field(variants.parseJson(this), 'missing')), 'k') == "
+        "null",
+        kDoc));
+}
+
+// Empty / whitespace-only input is a soft failure: variants.tryParseJson maps
+// the typed parse error to CEL null (rather than surfacing a CEL error).
+TEST(CelVariantTest, TryParseJsonEmptyIsNull) {
+    EXPECT_TRUE(evalWith("variants.tryParseJson('') == null", kDoc));
+    EXPECT_TRUE(evalWith("variants.tryParseJson('   ') == null", kDoc));
+    // CEL escape sequences so the whitespace reaches parseJson as tab/newline.
+    EXPECT_TRUE(evalWith("variants.tryParseJson('\\t\\n ') == null", kDoc));
+    // A well-formed document still parses.
+    EXPECT_TRUE(
+        evalWith("variants.type(variants.tryParseJson('{\"x\":1}')) == 'object'", kDoc));
+}
+
+// ITEM #27: variants.as('timestamp') on a NANOS variant must preserve full nanosecond
+// resolution and floor-divide for negatives (matching Java's fromEpochNanos, which uses
+// Math.floorDiv into seconds+nanos). A raw/1000 truncation would drop sub-microsecond
+// nanos and mis-round negative timestamps toward zero. The RFC-3339 literals are an
+// independent oracle (parsed by absl, not through the nanos->Time path under test).
+TEST(CelVariantTest, VariantAsTimestampPreservesNanos) {
+    // Positive: 2020-01-01T00:00:00Z (1577836800 s) + 123456789 ns.
+    EXPECT_TRUE(evalNanosTsTz(
+        1577836800123456789LL,
+        "variants.as(variant(this), 'timestamp') == "
+        "timestamp.of('2020-01-01T00:00:00.123456789Z')"));
+    // Negative: -1500 ns = 1969-12-31T23:59:59.999998500Z (floor-divides to seconds=-1,
+    // nanos=999998500). The buggy raw/1000 path would yield -1000 ns instead.
+    EXPECT_TRUE(evalNanosTsTz(
+        -1500LL,
+        "variants.as(variant(this), 'timestamp') == "
+        "timestamp.of('1969-12-31T23:59:59.9999985Z')"));
 }
 
 // ---- Marshalling: the two schema-side shapes into CEL ----

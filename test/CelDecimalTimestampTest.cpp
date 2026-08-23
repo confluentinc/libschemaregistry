@@ -53,6 +53,24 @@ bool evalBool(const std::string &expr) {
     return std::holds_alternative<bool>(result) && std::get<bool>(result);
 }
 
+// Execute a rule that is expected to fail, asserting the error message contains
+// the given fragment (a CEL error surfaces from execute() as a thrown exception).
+testing::AssertionResult errContains(const std::string &expr, const std::string &fragment) {
+    CelValidator validator;
+    auto value = json::makeJsonValue(nlohmann::json{{"x", 1}});
+    try {
+        validator.execute(rule(expr), *value);
+        return testing::AssertionFailure() << "expected an error, none thrown: " << expr;
+    } catch (const std::exception &e) {
+        std::string what = e.what();
+        if (what.find(fragment) != std::string::npos) {
+            return testing::AssertionSuccess();
+        }
+        return testing::AssertionFailure()
+               << "error did not contain '" << fragment << "': " << what;
+    }
+}
+
 }  // namespace
 
 // ---- Decimal operators (cross-client pinned values) ----
@@ -97,6 +115,42 @@ TEST(CelDecimalTimestampTest, DecimalStringForms) {
     EXPECT_TRUE(evalBool(R"(string(decimals.ceil(decimal("2.1"))) == "3")"));
     // string(Decimal) is plain (never scientific); scale preserved.
     EXPECT_TRUE(evalBool(R"(string(decimal("1.50")) == "1.50")"));
+}
+
+// ITEM A: add/sub/mul (and neg/abs) are exact/uncapped like Java's BigDecimal — the
+// result is NOT rounded to the 38-digit div/sqrt precision. Each result below has 39
+// significant digits, so a 38-digit cap would drop the trailing "1" (…001 -> …000).
+// (Values are kept below 2^127 so they still round-trip through the 16-byte
+// confluent.type.Decimal wire form.)
+TEST(CelDecimalTimestampTest, ArithmeticExactUncapped) {
+    // add: 10^38 + 1 = a 39-significant-digit sum.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.add(decimal("100000000000000000000000000000000000000"), decimal("1"))) == "100000000000000000000000000000000000001")"));
+    // sub: (10^38 + 2) - 1 = 10^38 + 1 (39 significant digits).
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.sub(decimal("100000000000000000000000000000000000002"), decimal("1"))) == "100000000000000000000000000000000000001")"));
+    // mul: (10^19 + 1)^2 = a 39-significant-digit product.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.mul(decimal("10000000000000000001"), decimal("10000000000000000001"))) == "100000000000000000020000000000000000001")"));
+    // neg/abs preserve the full coefficient of a >38-digit operand (no cap/rounding).
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.neg(decimals.add(decimal("100000000000000000000000000000000000000"), decimal("1")))) == "-100000000000000000000000000000000000001")"));
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.abs(decimals.sub(decimal("-100000000000000000000000000000000000002"), decimal("-1")))) == "100000000000000000000000000000000000001")"));
+    // Contract check: div/sqrt still cap at 38 significant digits (HALF_UP) — unchanged.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.div(decimal("2"), decimal("3"))) == "0.66666666666666666666666666666666666667")"));
+}
+
+// ITEM F: a scale argument outside int32 range must raise an error (Java's requireIntScale
+// / Math.toIntExact), not silently wrap to the low 32 bits. 3000000000 > INT32_MAX.
+TEST(CelDecimalTimestampTest, ScaleArgOutOfIntRangeErrors) {
+    EXPECT_TRUE(errContains(R"(decimals.round(decimal("1.5"), 3000000000))",
+                            "scale out of int range"));
+    EXPECT_TRUE(errContains(R"(decimals.trunc(decimal("1.5"), 3000000000))",
+                            "scale out of int range"));
+    EXPECT_TRUE(errContains(R"(decimals.eq(decimal(b"\x01", 3000000000), decimal("1")))",
+                            "scale out of int range"));
 }
 
 TEST(CelDecimalTimestampTest, DecimalFromBytesAndScale) {
