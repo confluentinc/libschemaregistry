@@ -142,6 +142,25 @@ TEST(CelDecimalTimestampTest, ArithmeticExactUncapped) {
         R"(string(decimals.div(decimal("2"), decimal("3"))) == "0.66666666666666666666666666666666666667")"));
 }
 
+// BUG K: decimals.mod must be exact like Java's BigDecimal.remainder (no MathContext).
+// The remainder is computed from an integer quotient; when that quotient exceeds 38 digits
+// the 38-digit context would trap (Division_impossible) and surface a CEL error. Using the
+// exact (MaxContext) context makes mod succeed and return the true remainder.
+// 10^40 mod 3 == 1 (10 ≡ 1 mod 3, so 10^40 ≡ 1), with an integer quotient of ~40 digits.
+TEST(CelDecimalTimestampTest, ModExactLargeQuotient) {
+    EXPECT_TRUE(evalBool(
+        R"(decimals.eq(decimals.mod(decimal("1E40"), decimal("3")), decimal("1")))"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.mod(decimal("1E40"), decimal("3"))) == "1")"));
+    // Normal (small-quotient) mod cases remain unchanged.
+    EXPECT_TRUE(
+        evalBool(R"(decimals.eq(decimals.mod(decimal("10"), decimal("3")), decimal("1")))"));
+    EXPECT_TRUE(
+        evalBool(R"(decimals.eq(decimals.mod(decimal("10.5"), decimal("3")), decimal("1.5")))"));
+    // Remainder takes the sign of the dividend (SQL MOD semantics).
+    EXPECT_TRUE(
+        evalBool(R"(decimals.eq(decimals.mod(decimal("-10"), decimal("3")), decimal("-1")))"));
+}
+
 // ITEM F: a scale argument outside int32 range must raise an error (Java's requireIntScale
 // / Math.toIntExact), not silently wrap to the low 32 bits. 3000000000 > INT32_MAX.
 TEST(CelDecimalTimestampTest, ScaleArgOutOfIntRangeErrors) {
