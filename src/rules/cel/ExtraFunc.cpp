@@ -18,6 +18,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -38,6 +39,7 @@
 #include "absl/time/time.h"
 #include "eval/public/cel_function.h"
 #include "eval/public/cel_value.h"
+#include "eval/public/equality_function_registrar.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
 #include "google/protobuf/arena.h"
 #include "google/protobuf/message.h"
@@ -455,16 +457,69 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
                     return absl::OkStatus();
                 }
                 auto d = decimalFromMessage(*args[0].MessageOrDie());
-                double val = 0.0;
-                try {
-                    val = std::stod(d.format("f"));
-                } catch (const std::out_of_range&) {
-                    val = d.sign() < 0 ? -HUGE_VAL : HUGE_VAL;
-                }
+                // Use strtod, not std::stod: std::stod throws std::out_of_range on BOTH
+                // overflow AND underflow, so a tiny magnitude (e.g. 1e-320) would wrongly
+                // become ±Infinity. strtod never throws — on overflow it returns ±HUGE_VAL
+                // (±Infinity) and sets errno=ERANGE; on underflow it returns the nearest
+                // subnormal or 0.0. That matches Java's BigDecimal.doubleValue():
+                // 1e-400 -> 0.0, 1e-320 -> a tiny subnormal, 1e400 -> +Infinity,
+                // -1e400 -> -Infinity. format("f") is plain (non-scientific) notation.
+                double val = std::strtod(d.format("f").c_str(), nullptr);
                 *out = cel::CelValue::CreateDouble(val);
                 return absl::OkStatus();
             });
     return s;
+}
+
+// ---------------------------------------------------------------------------
+// Numeric equality for Decimal.
+//
+// A CEL Decimal is a confluent.type.Decimal proto message (unscaled value bytes +
+// scale). cel-cpp's default `==` on two messages does field-by-field proto equality
+// (google::protobuf::util::MessageDifferencer), which is SCALE-SENSITIVE: decimal("2.0")
+// (value=0x14/scale=1) and decimal("2.00") (value=0xC8/scale=2) are different messages
+// and would compare unequal. Java/Python/the other clients treat decimal `==` as NUMERIC
+// (matching decimals.eq), so 2.0 == 2.00.
+//
+// Mechanism: cel-cpp's flat_expr_builder installs its built-in heterogeneous-equality
+// evaluation step ONLY when the registry has no custom `_==_` overload (it probes with
+// FindOverloads(kEqual, {kAny, kAny}), and kAny matches any registered shape). Registering
+// `_==_`/`_!=_` here therefore *replaces* the built-in step entirely, so this overload must
+// handle EVERY operand type: two Decimals compare numerically; everything else delegates to
+// cel-cpp's own CelValueEqualImpl — the very routine the built-in step used — preserving
+// standard heterogeneous equality (ints, strings, lists, maps, cross-numeric, messages, …).
+// ---------------------------------------------------------------------------
+
+absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
+    auto equality = [&registry](const char* name, bool negate) {
+        return reg(
+            registry, name, false, {T::kAny, T::kAny},
+            [name, negate](absl::Span<const cel::CelValue> args, cel::CelValue* out,
+                           Arena* arena) {
+                const cel::CelValue& a = args[0];
+                const cel::CelValue& b = args[1];
+                if (isDecimalMessage(a) && isDecimalMessage(b)) {
+                    bool eq = decimalCompare(decimalFromMessage(*a.MessageOrDie()),
+                                             decimalFromMessage(*b.MessageOrDie())) == 0;
+                    *out = cel::CelValue::CreateBool(negate ? !eq : eq);
+                    return absl::OkStatus();
+                }
+                // Delegate to cel-cpp's general equality (returns nullopt only when the
+                // comparison is undefined, e.g. an error/unknown operand — which the
+                // dispatcher normally short-circuits before reaching here).
+                absl::optional<bool> eq = cel::CelValueEqualImpl(a, b);
+                if (!eq.has_value()) {
+                    *out = cel::CreateNoMatchingOverloadError(arena, name);
+                    return absl::OkStatus();
+                }
+                *out = cel::CelValue::CreateBool(negate ? !*eq : *eq);
+                return absl::OkStatus();
+            });
+    };
+    absl::Status s;
+    if (s = equality("_==_", /*negate=*/false); !s.ok()) return s;
+    if (s = equality("_!=_", /*negate=*/true); !s.ok()) return s;
+    return absl::OkStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1185,8 @@ absl::Status RegisterExtraFuncs(cel::CelFunctionRegistry& registry, Arena* /*reg
     absl::Status s = registerIsFuncs(registry);
     if (!s.ok()) return s;
     s = registerDecimal(registry);
+    if (!s.ok()) return s;
+    s = registerEquality(registry);
     if (!s.ok()) return s;
     s = registerTimestamp(registry);
     if (!s.ok()) return s;

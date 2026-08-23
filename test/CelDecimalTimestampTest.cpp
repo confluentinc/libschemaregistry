@@ -172,6 +172,54 @@ TEST(CelDecimalTimestampTest, ScaleArgOutOfIntRangeErrors) {
                             "scale out of int range"));
 }
 
+// FIX 1: double(decimal) must distinguish underflow from overflow. std::stod threw
+// std::out_of_range on BOTH, so tiny magnitudes wrongly became ±Infinity. strtod returns
+// the nearest subnormal/0.0 on underflow and ±Infinity on overflow — matching Java's
+// BigDecimal.doubleValue().
+TEST(CelDecimalTimestampTest, DoubleUnderflowOverflow) {
+    // Total underflow -> 0.0 (was +Infinity).
+    EXPECT_TRUE(evalBool(R"(double(decimal("1e-400")) == 0.0)"));
+    // Partial underflow -> a tiny positive subnormal, NOT 0.0 and NOT Infinity.
+    EXPECT_TRUE(evalBool(R"(double(decimal("1e-320")) > 0.0)"));
+    EXPECT_TRUE(evalBool(R"(double(decimal("1e-320")) < 1.0e-300)"));
+    // Genuine overflow -> ±Infinity (larger/smaller than any finite double ~1.8e308).
+    EXPECT_TRUE(evalBool(R"(double(decimal("1e400")) > 1.7e308)"));
+    EXPECT_TRUE(evalBool(R"(double(decimal("-1e400")) < -1.7e308)"));
+    // A representable magnitude still round-trips exactly.
+    EXPECT_TRUE(evalBool(R"(double(decimal("100.50")) == 100.5)"));
+}
+
+// FIX 2: CEL `==` on two Decimals must be NUMERIC (scale-insensitive), matching decimals.eq
+// — not proto-message equality (which is scale/encoding-sensitive: 2.0 has value=20/scale=1,
+// 2.00 has value=200/scale=2, so message equality would report them unequal).
+TEST(CelDecimalTimestampTest, DecimalNumericEquality) {
+    EXPECT_TRUE(evalBool(R"(decimal("2.0") == decimal("2.00"))"));
+    EXPECT_TRUE(evalBool(R"(decimal("2.0") == decimal("2.0"))"));
+    EXPECT_FALSE(evalBool(R"(decimal("2.0") == decimal("2.1"))"));
+    // != negates.
+    EXPECT_FALSE(evalBool(R"(decimal("2.0") != decimal("2.00"))"));
+    EXPECT_TRUE(evalBool(R"(decimal("2.0") != decimal("2.1"))"));
+    // Consistent with decimals.eq for a differently-scaled equal pair.
+    EXPECT_TRUE(evalBool(R"((decimal("2.0") == decimal("2.00")) == decimals.eq(decimal("2.0"), decimal("2.00")))"));
+}
+
+// Registering a custom `_==_`/`_!=_` disables cel-cpp's built-in equality step, so confirm
+// standard heterogeneous equality for all the other types still works via our delegation to
+// CelValueEqualImpl.
+TEST(CelDecimalTimestampTest, EqualityStillWorksForOtherTypes) {
+    EXPECT_TRUE(evalBool(R"(1 == 1)"));
+    EXPECT_FALSE(evalBool(R"(1 == 2)"));
+    EXPECT_TRUE(evalBool(R"(1 != 2)"));
+    EXPECT_TRUE(evalBool(R"("abc" == "abc")"));
+    EXPECT_FALSE(evalBool(R"("abc" == "abd")"));
+    EXPECT_TRUE(evalBool(R"(true == true)"));
+    EXPECT_TRUE(evalBool(R"(1 == 1.0)"));           // heterogeneous int/double
+    EXPECT_TRUE(evalBool(R"([1, 2, 3] == [1, 2, 3])"));
+    EXPECT_FALSE(evalBool(R"([1, 2] == [1, 2, 3])"));
+    EXPECT_TRUE(evalBool(R"({"a": 1} == {"a": 1})"));
+    EXPECT_TRUE(evalBool(R"(b"\x01\x02" == b"\x01\x02")"));
+}
+
 TEST(CelDecimalTimestampTest, DecimalFromBytesAndScale) {
     // 12.34 = unscaled 1234 (0x04D2) at scale 2.
     EXPECT_TRUE(evalBool(R"(decimals.eq(decimal(b"\x04\xd2", 2), decimal("12.34")))"));
