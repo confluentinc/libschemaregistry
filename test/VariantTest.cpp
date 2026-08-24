@@ -222,20 +222,47 @@ TEST(VariantTest, NonFiniteFloatRendersAsBareword) {
     }
 }
 
-// Non-finite JSON *input* is an accepted parity gap: nlohmann's parser
-// (parser.hpp) unconditionally rejects a number literal that overflows to a
-// non-finite double (error 406 "number overflow", e.g. 1e400) and also rejects
-// the bareword tokens NaN / Infinity / -Infinity. There is no parse flag to
-// relax this, and the contract forbids hand-rolling a scanner, so these inputs
-// surface as the typed VariantException (soft failure) rather than parsing to a
-// stored non-finite value. Java accepts them; C++ does not. The output side
-// (binary non-finite -> bareword JSON) is fully supported (tests above).
-TEST(VariantTest, NonFiniteJsonInputIsRejectedGap) {
-    EXPECT_THROW(Variant::parseJson("1e400"), VariantException);
-    EXPECT_THROW(Variant::parseJson("-1e400"), VariantException);
-    EXPECT_THROW(Variant::parseJson("NaN"), VariantException);
-    EXPECT_THROW(Variant::parseJson("Infinity"), VariantException);
-    EXPECT_THROW(Variant::parseJson("-Infinity"), VariantException);
+// Non-finite JSON *input*, which used to be an accepted parity gap. nlohmann's parser
+// (parser.hpp) rejects both the bareword tokens NaN / Infinity / -Infinity and any number
+// literal that overflows to a non-finite double (error 406 "number overflow", e.g. 1e400), and
+// exposes no flag to relax either. Java (Jackson under ALLOW_NON_NUMERIC_NUMBERS), Python, C#,
+// Rust, Go and JavaScript all accept them, so parseJson now rewrites them to a placeholder
+// number ahead of the parse and restores them in the SAX handler.
+TEST(VariantTest, NonFiniteJsonInputParses) {
+    // Barewords, at the top level and nested, round-tripping back through toJson.
+    EXPECT_EQ(Variant::parseJson("NaN").toJson(), "NaN");
+    EXPECT_EQ(Variant::parseJson("Infinity").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("-Infinity").toJson(), "-Infinity");
+    EXPECT_EQ(Variant::parseJson("{\"a\":NaN}").toJson(), "{\"a\":NaN}");
+    EXPECT_EQ(Variant::parseJson("[NaN,Infinity,-Infinity]").toJson(),
+              "[NaN,Infinity,-Infinity]");
+    EXPECT_EQ(Variant::parseJson("[ NaN , 1 ]").toJson(), "[NaN,1]");
+    EXPECT_EQ(Variant::parseJson("NaN").getType(), VariantType::Double);
+
+    // Magnitude overflow reads as +/-Infinity rather than failing the parse.
+    EXPECT_EQ(Variant::parseJson("1e400").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("-1e400").toJson(), "-Infinity");
+    EXPECT_EQ(Variant::parseJson("1e400").getType(), VariantType::Double);
+
+    // The rewrite is string-aware: none of these barewords is a number.
+    EXPECT_EQ(Variant::parseJson("\"NaN\"").toJson(), "\"NaN\"");
+    EXPECT_EQ(Variant::parseJson("{\"a\":\"Infinity\"}").toJson(), "{\"a\":\"Infinity\"}");
+    EXPECT_EQ(Variant::parseJson("{\"NaN\":1}").toJson(), "{\"NaN\":1}");
+    EXPECT_EQ(Variant::parseJson("[\"NaN\",NaN]").toJson(), "[\"NaN\",NaN]");
+
+    // Ordinary numbers are untouched, including the big-integer literals that reach the decimal
+    // path through number_float. An enormous *integer* must not become Infinity: Java stores an
+    // integer literal as an int or a scale-0 decimal, never a double.
+    EXPECT_EQ(Variant::parseJson("1.5").toJson(), "1.5");
+    EXPECT_EQ(Variant::parseJson("1e30").toJson(), "1e+30");
+    EXPECT_EQ(Variant::parseJson("12345678901234567890123456").toJson(),
+              "12345678901234567890123456");
+
+    // Spelling and case are exact, matching Jackson: every one of these stays a parse error.
+    for (const char *bad : {"nan", "NAN", "INFINITY", "inf", "Inf", "NaNny", "Infinityx",
+                            "+Infinity"}) {
+        EXPECT_THROW(Variant::parseJson(bad), VariantException) << bad;
+    }
 }
 
 // Empty / whitespace-only input is a soft parse failure: parseJson throws the
