@@ -299,6 +299,81 @@ TEST(CelDecimalTimestampTest, ProtoConfluentTypeDecimalIntoCel) {
     EXPECT_TRUE(std::get<bool>(result));
 }
 
+// Cross-client parity: a bare confluent.type.Decimal field is usable with decimals.*, ==,
+// string() and double() with **no decimal(...) call** on it. The discriminating case is the
+// scale-differing equality: a client comparing decimals by their protobuf encoding (unscaled
+// bytes plus scale, field by field) answers false for decimal("12.340"), because 12.34 and
+// 12.340 are the same number in two different encodings.
+TEST(CelDecimalTimestampTest, ProtoDecimalNeedsNoConstructor) {
+    auto evalDecimal = [](const std::string &expr) {
+        // 12.34 = unscaled 1234 (0x04D2) at scale 2.
+        auto dec = std::make_unique<confluent::type::Decimal>();
+        dec->set_value(std::string("\x04\xd2", 2));
+        dec->set_scale(2);
+        CelValidator validator;
+        auto value =
+            protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(dec)));
+        auto result = validator.execute(rule(expr), *value);
+        EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        return std::holds_alternative<bool>(result) && std::get<bool>(result);
+    };
+
+    // Bare: no constructor call on the field.
+    EXPECT_TRUE(evalDecimal(R"(decimals.eq(this, decimal("12.34")))"));
+    EXPECT_TRUE(evalDecimal(R"(decimals.gt(this, decimal("10.00")))"));
+    // The wrapped form must keep working (decimal(...) re-entry).
+    EXPECT_TRUE(evalDecimal(R"(decimals.eq(decimal(this), decimal("12.34")))"));
+    // `==` is numeric on it: 12.34 equals 12.340 despite the differing scale.
+    EXPECT_TRUE(evalDecimal(R"(this == decimal("12.340"))"));
+    EXPECT_FALSE(evalDecimal(R"(this != decimal("12.340"))"));
+    EXPECT_TRUE(evalDecimal(R"(decimals.lt(this, decimal("100")))"));
+    // Negative control: a false comparison must still be false.
+    EXPECT_FALSE(evalDecimal(R"(decimals.gt(this, decimal("100")))"));
+    EXPECT_TRUE(evalDecimal(R"(string(this) == "12.34")"));
+    EXPECT_TRUE(evalDecimal(R"(double(this) == 12.34)"));
+}
+
+// A Decimal inside a list or map compares numerically too, and `in` follows the same equality.
+// Making the operands' own == numeric is not enough on its own: the general implementation
+// recurses into containers with its own equality, so a Decimal nested one level deep was compared
+// by its encoding and `[a] == [b]` disagreed with `a == b` on the very same values.
+TEST(CelDecimalTimestampTest, ContainerEqualityIsNumericForNestedDecimals) {
+    auto ev = [](const std::string &expr) {
+        // 12.34 = unscaled 1234 (0x04D2) at scale 2.
+        auto dec = std::make_unique<confluent::type::Decimal>();
+        dec->set_value(std::string("\x04\xd2", 2));
+        dec->set_scale(2);
+        CelValidator validator;
+        auto value =
+            protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(dec)));
+        auto result = validator.execute(rule(expr), *value);
+        EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        return std::holds_alternative<bool>(result) && std::get<bool>(result);
+    };
+
+    // 12.34 and 12.340 are the same number in two encodings.
+    EXPECT_TRUE(ev(R"(this == decimal("12.340"))"));
+    EXPECT_TRUE(ev(R"([this] == [decimal("12.340")])"));
+    EXPECT_TRUE(ev(R"({'k': this} == {'k': decimal("12.340")})"));
+    EXPECT_TRUE(ev(R"([[this]] == [[decimal("12.340")]])"));
+    // `in` is NOT numeric here - cel-cpp's builtin @in cannot be taken over from the
+    // registry (see registerEquality). Pinned as-is so the divergence from == is explicit,
+    // and so this flips if membership is ever fixed.
+    EXPECT_FALSE(ev(R"(this in [decimal("12.340")])"));
+    EXPECT_TRUE(ev(R"(this in [decimal("12.34")])"));
+    // Negative controls.
+    EXPECT_FALSE(ev(R"([this] == [decimal("9")])"));
+    EXPECT_FALSE(ev(R"([this] == [this, this])"));
+    EXPECT_FALSE(ev(R"(this in [decimal("9")])"));
+    // Decimal-free comparisons keep general semantics - the recursion is gated on a Decimal.
+    EXPECT_TRUE(ev("[1, 2] == [1, 2]"));
+    EXPECT_FALSE(ev("[1, 2] == [2, 1]"));
+    EXPECT_TRUE(ev("{'a': 1} == {'a': 1}"));
+    EXPECT_TRUE(ev("2 in [1, 2]"));
+    EXPECT_FALSE(ev("3 in [1, 2]"));
+    EXPECT_TRUE(ev("'x' in ['x', 'y']"));
+}
+
 TEST(CelDecimalTimestampTest, ProtoWktTimestampIntoCel) {
     auto ts = std::make_unique<google::protobuf::Timestamp>();
     ts->set_seconds(1577836800);  // 2020-01-01T00:00:00Z
