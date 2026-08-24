@@ -3,13 +3,20 @@
 #include <regex>
 
 #include "absl/strings/str_split.h"
-#include "eval/public/activation.h"
-#include "eval/public/builtin_func_registrar.h"
-#include "eval/public/cel_expr_builder_factory.h"
+#include "common/ast_proto.h"
+#include "common/legacy_value.h"
+#include "extensions/strings.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
-#include "eval/public/string_extension_func_registrar.h"
+#include "runtime/activation.h"
+#include "runtime/constant_folding.h"
+#include "runtime/reference_resolver.h"
+#include "runtime/regex_precompilation.h"
+#include "runtime/runtime_options.h"
+#include "runtime/standard_runtime_builder_factory.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
+#include "extensions/math_ext.h"
+#include "extensions/math_ext_macros.h"
 #include "google/protobuf/descriptor.h"
 #include "google/protobuf/message.h"
 #include "nlohmann/json.hpp"
@@ -55,36 +62,69 @@ CelExecutor &CelExecutor::operator=(CelExecutor &&) noexcept = default;
 // Implement the required getType method
 std::string CelExecutor::getType() const { return "CEL"; }
 
-absl::StatusOr<
-    std::unique_ptr<google::api::expr::runtime::CelExpressionBuilder>>
+absl::StatusOr<std::unique_ptr<const ::cel::Runtime>>
 CelExecutor::Impl::newRuleBuilder(google::protobuf::Arena *arena) {
-    google::api::expr::runtime::InterpreterOptions options;
+    ::cel::RuntimeOptions options;
     options.enable_qualified_type_identifiers = true;
     options.enable_timestamp_duration_overflow_errors = true;
+    options.enable_heterogeneous_equality = true;
     options.enable_empty_wrapper_null_unboxing = true;
-    options.enable_regex_precompilation = true;
-    options.constant_folding = true;
-    options.constant_arena = arena;
 
-    std::unique_ptr<google::api::expr::runtime::CelExpressionBuilder> builder =
-        google::api::expr::runtime::CreateCelExpressionBuilder(options);
-    auto register_status = google::api::expr::runtime::RegisterBuiltinFunctions(
-        builder->GetRegistry(), options);
-    if (!register_status.ok()) {
-        return register_status;
+    // CreateStandardRuntimeBuilder registers the whole standard set. Subsetting it - via the
+    // bare CreateRuntimeBuilder plus the individual runtime/standard registrars - was tried in
+    // order to take over `@in` for decimals, and does not work: with
+    // enable_heterogeneous_equality the planner installs its own call handler for @in / in / _in_
+    // (eval/compiler/flat_expr_builder.cc, HandleHeterogeneousEqualityIn) and emits a direct
+    // interpretable, so membership never reaches the function registry at all. Note that _==_ is
+    // treated differently there - the planner only intercepts it when no (any, any) overload is
+    // registered, which is exactly the hole registerEquality uses. There is no equivalent
+    // detection for @in, in 0.11 or in 0.16.
+    auto builder_or = ::cel::CreateStandardRuntimeBuilder(
+        google::protobuf::DescriptorPool::generated_pool(), options);
+    if (!builder_or.ok()) {
+        return builder_or.status();
     }
-    register_status =
-        google::api::expr::runtime::RegisterStringExtensionFunctions(
-            builder->GetRegistry());
-    if (!register_status.ok()) {
-        return register_status;
+    ::cel::RuntimeBuilder builder = std::move(builder_or).value();
+
+    // The modern equivalent of the legacy enable_qualified_identifier_rewrites option. The math
+    // extension's functions are registered under namespaced names (math.abs, math.bitAnd), and
+    // without this the parser's receiver-style call - `abs` with the target `math` - is never
+    // folded into that name and every one of them fails to plan. kAlways, not
+    // kCheckedExpressionOnly: these expressions are parse-only.
+    auto status = ::cel::EnableReferenceResolver(
+        builder, ::cel::ReferenceResolverEnabled::kAlways);
+    if (!status.ok()) {
+        return status;
     }
-    // Register our custom extra functions
-    register_status = RegisterExtraFuncs(*builder->GetRegistry(), arena);
-    if (!register_status.ok()) {
-        return register_status;
+    // Replaces the legacy constant_folding / constant_arena and
+    // enable_regex_precompilation options, which are builder steps in the modern API.
+    status = ::cel::extensions::EnableConstantFolding(builder, arena);
+    if (!status.ok()) {
+        return status;
     }
-    return builder;
+    status = ::cel::extensions::EnableRegexPrecompilation(builder);
+    if (!status.ok()) {
+        return status;
+    }
+
+    status = ::cel::extensions::RegisterStringsFunctions(
+        builder.function_registry(), options);
+    if (!status.ok()) {
+        return status;
+    }
+    status = ::cel::extensions::RegisterMathExtensionFunctions(
+        builder.function_registry(), options);
+    if (!status.ok()) {
+        return status;
+    }
+    // Our custom extra functions. Still legacy CelFunction implementations, which register
+    // directly into the modern registry - see RegisterExtraFuncs.
+    status = RegisterExtraFuncs(builder.function_registry(), arena);
+    if (!status.ok()) {
+        return status;
+    }
+
+    return std::move(builder).Build();
 }
 
 std::unique_ptr<SerdeValue> CelExecutor::transform(
@@ -153,6 +193,15 @@ CelExecutor::Impl::executeRule(
     const absl::flat_hash_map<std::string, google::api::expr::runtime::CelValue>
         &args,
     google::protobuf::Arena *arena) {
+    return evaluate(expr, args, arena);
+}
+
+std::unique_ptr<google::api::expr::runtime::CelValue>
+CelExecutor::Impl::evaluate(
+    const std::string &expr,
+    const absl::flat_hash_map<std::string, google::api::expr::runtime::CelValue>
+        &args,
+    google::protobuf::Arena *arena) {
     // Get or compile the expression (with caching)
     auto parsed_expr_status = getOrCompileExpression(expr);
     if (!parsed_expr_status.ok()) {
@@ -161,24 +210,36 @@ CelExecutor::Impl::executeRule(
     }
     auto parsed_expr = parsed_expr_status.value();
 
-    // Create activation context and add all arguments
-    google::api::expr::runtime::Activation activation;
+    // Bindings arrive as legacy CelValue from the format converters in CelUtils, so each is
+    // adapted on the way in and the result adapted back on the way out. Supported for
+    // protobuf-backed values, which is all this client produces.
+    ::cel::Activation activation;
     for (const auto &pair : args) {
-        activation.InsertValue(pair.first, pair.second);
+        auto modern = ::cel::ModernValue(arena, pair.second);
+        if (!modern.ok()) {
+            throw SerdeError("CEL binding conversion failed for '" + pair.first +
+                             "': " + std::string(modern.status().message()));
+        }
+        activation.InsertOrAssignValue(pair.first, std::move(modern).value());
     }
 
-    // Evaluate the expression using the passed arena
-    auto eval_status = parsed_expr->Evaluate(activation, arena);
+    // Note the argument order: the modern Evaluate takes the arena first.
+    auto eval_status = parsed_expr->Evaluate(arena, activation);
     if (!eval_status.ok()) {
         throw SerdeError("CEL evaluation failed: " +
                          std::string(eval_status.status().message()));
     }
 
+    auto legacy = ::cel::LegacyValue(arena, eval_status.value());
+    if (!legacy.ok()) {
+        throw SerdeError("CEL result conversion failed: " +
+                         std::string(legacy.status().message()));
+    }
     return std::make_unique<google::api::expr::runtime::CelValue>(
-        eval_status.value());
+        std::move(legacy).value());
 }
 
-absl::StatusOr<std::shared_ptr<google::api::expr::runtime::CelExpression>>
+absl::StatusOr<std::shared_ptr<const ::cel::Program>>
 CelExecutor::Impl::getOrCompileExpression(const std::string &expr) {
     // Thread-safe cache lookup
     {
@@ -195,22 +256,36 @@ CelExecutor::Impl::getOrCompileExpression(const std::string &expr) {
         return absl::FailedPreconditionError("CEL runtime not initialized");
     }
 
-    auto pexpr_or = google::api::expr::parser::Parse(expr);
+    // math.greatest and math.least are macros rather than registry functions -
+    // they take a variable number of arguments - so the parser has to know them
+    // as well. Parsing with an explicit macro list replaces the default set, so
+    // the standard macros (has, all, exists, exists_one, map, filter) are
+    // carried along with them.
+    static const std::vector<::cel::Macro> *kMacros = [] {
+        auto *macros = new std::vector<::cel::Macro>(::cel::Macro::AllMacros());
+        auto math = ::cel::extensions::math_macros();
+        macros->insert(macros->end(), math.begin(), math.end());
+        return macros;
+    }();
+
+    auto pexpr_or = google::api::expr::parser::ParseWithMacros(expr, *kMacros);
     if (!pexpr_or.ok()) {
         return pexpr_or.status();
     }
     auto pexpr = std::move(pexpr_or).value();
-    auto expr_or =
-        runtime_->CreateExpression(&pexpr.expr(), &pexpr.source_info());
+    // The modern runtime plans from a cel::Ast rather than from the parsed protobuf, so the
+    // parse result is converted rather than passed by pointer.
+    auto ast_or = ::cel::CreateAstFromParsedExpr(pexpr.expr(), &pexpr.source_info());
+    if (!ast_or.ok()) {
+        return ast_or.status();
+    }
+    auto expr_or = runtime_->CreateProgram(std::move(ast_or).value());
     if (!expr_or.ok()) {
         return expr_or.status();
     }
 
-    auto compiled_expr = std::move(expr_or.value());
-
-    // Cache the compiled expression using shared_ptr
-    std::shared_ptr<google::api::expr::runtime::CelExpression> shared_expr(
-        compiled_expr.release());
+    std::shared_ptr<const ::cel::Program> shared_expr(
+        std::move(expr_or).value().release());
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         expression_cache_[expr] = shared_expr;

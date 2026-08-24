@@ -69,24 +69,35 @@ namespace utils {
         }
 
         case ::avro::AVRO_UNION: {
-            auto union_val = datum.value<::avro::GenericUnion>();
             auto [branch_idx, branch_schema] = resolveUnion(schema, datum);
-            auto transformed =
-                transformFields(ctx, branch_schema, union_val.datum());
 
-            ::avro::GenericDatum result_datum(schema);
-            auto &result = result_datum.value<::avro::GenericUnion>();
+            // GenericDatum resolves a union on the way in: type() reports the
+            // branch's type and value<T>() reaches the branch's value, so the
+            // branch datum to walk is the datum itself. Asking a union datum for
+            // its GenericUnion instead casts the *branch's* value to
+            // GenericUnion, which any_cast rejects, leaving a null to
+            // dereference.
+            auto transformed = transformFields(ctx, branch_schema, datum);
+
+            // The union has to be rebuilt through GenericUnion rather than
+            // through the datum, for the same reason: a GenericDatum holding a
+            // union will not hand its GenericUnion back. This constructor
+            // assigns into the value directly, without that resolution step.
+            ::avro::GenericUnion result(schema.root());
             result.selectBranch(branch_idx);
             result.datum() = transformed;
-
-            return result_datum;
+            return ::avro::GenericDatum(schema.root(), result);
         }
 
         default: {
             // Field-level transformation logic
             auto field_ctx = ctx.currentField();
             if (field_ctx.has_value()) {
-                field_ctx->setFieldType(avroSchemaToFieldType(schema));
+                // The field was entered with the type its schema declares,
+                // which for a union field is only Combined. Narrow it to the
+                // type of the branch the value holds, so that a rule on, say, a
+                // ["null","string"] field sees a string.
+                ctx.setCurrentFieldType(avroSchemaToFieldType(schema));
 
                 auto rule_tags = ctx.getRule().getTags();
                 std::unordered_set<std::string> rule_tags_set;
@@ -308,10 +319,9 @@ nlohmann::json avroToJson(const ::avro::GenericDatum &datum) {
             return json_obj;
         }
 
-        case ::avro::AVRO_UNION: {
-            const auto &union_val = datum.value<::avro::GenericUnion>();
-            return avroToJson(union_val.datum());
-        }
+        // No AVRO_UNION arm: type() reports the type of the branch a union
+        // holds, never AVRO_UNION, so a union datum is already handled by the
+        // arm for the branch it holds.
 
         default:
             throw AvroError("Unsupported Avro type for JSON conversion");
@@ -442,19 +452,66 @@ nlohmann::json avroToJson(const ::avro::GenericDatum &datum) {
     }
 }
 
+namespace {
+
+// The fullname of a record, enum or fixed datum. This is what tells such a
+// datum apart from another union branch of the same Avro type; the remaining
+// types are unnamed, and their type alone identifies the branch.
+std::optional<std::string> datumTypeName(const ::avro::GenericDatum &datum) {
+    switch (datum.type()) {
+        case ::avro::AVRO_RECORD:
+            return datum.value<::avro::GenericRecord>()
+                .schema()
+                ->name()
+                .fullname();
+        case ::avro::AVRO_ENUM:
+            return datum.value<::avro::GenericEnum>()
+                .schema()
+                ->name()
+                .fullname();
+        case ::avro::AVRO_FIXED:
+            return datum.value<::avro::GenericFixed>()
+                .schema()
+                ->name()
+                .fullname();
+        default:
+            return std::nullopt;
+    }
+}
+
+}  // namespace
+
 std::pair<size_t, ::avro::ValidSchema> resolveUnion(
     const ::avro::ValidSchema &union_schema,
     const ::avro::GenericDatum &datum) {
-    if (union_schema.root()->type() != ::avro::AVRO_UNION) {
+    const auto &root = union_schema.root();
+    if (root->type() != ::avro::AVRO_UNION) {
         throw AvroError("Schema is not a union type");
     }
 
-    // Try to find matching branch based on datum type
-    for (size_t i = 0; i < union_schema.root()->leaves(); ++i) {
-        auto branch_schema = union_schema.root()->leafAt(i);
-        if (branch_schema->type() == datum.type()) {
-            return {i, ::avro::ValidSchema(branch_schema)};
+    // A datum that carries a union records the branch it holds, and that is the
+    // only reliable answer. GenericDatum::type() reports the type of the branch
+    // rather than AVRO_UNION, and a type does not identify a branch: a union of
+    // two records is told apart by name alone, so matching on type would return
+    // the first record in the union whichever one the datum holds.
+    if (datum.isUnion() && datum.unionBranch() < root->leaves()) {
+        size_t branch = datum.unionBranch();
+        return {branch, ::avro::ValidSchema(root->leafAt(branch))};
+    }
+
+    // A datum handed in without its union wrapper has to be matched on what it
+    // does carry: its type, and its name where it has one.
+    auto datum_name = datumTypeName(datum);
+    for (size_t i = 0; i < root->leaves(); ++i) {
+        const auto &branch_schema = root->leafAt(i);
+        if (branch_schema->type() != datum.type()) {
+            continue;
         }
+        if (datum_name.has_value() && branch_schema->hasName() &&
+            branch_schema->name().fullname() != *datum_name) {
+            continue;
+        }
+        return {i, ::avro::ValidSchema(branch_schema)};
     }
 
     throw AvroError("No matching union branch found for datum type");
@@ -471,7 +528,8 @@ std::vector<uint8_t> serializeAvroData(
     const ::avro::GenericDatum &datum, const ::avro::ValidSchema &writer_schema,
     const std::vector<::avro::ValidSchema> &named_schemas) {
     try {
-        // If the writer schema is AVRO_BYTES, just return the raw bytes directly
+        // If the writer schema is AVRO_BYTES, just return the raw bytes
+        // directly
         if (writer_schema.root()->type() == ::avro::AVRO_BYTES) {
             return datum.value<std::vector<uint8_t>>();
         }
@@ -501,7 +559,8 @@ std::vector<uint8_t> serializeAvroData(
     const ::avro::ValidSchema *reader_schema,
     const std::vector<::avro::ValidSchema> &named_schemas) {
     try {
-        // If the writer schema is AVRO_BYTES, just return the raw bytes directly
+        // If the writer schema is AVRO_BYTES, just return the raw bytes
+        // directly
         if (writer_schema.root()->type() == ::avro::AVRO_BYTES) {
             ::avro::GenericDatum datum(writer_schema);
             datum.value<std::vector<uint8_t>>() = data;
@@ -601,22 +660,29 @@ void getInlineTagsRecursively(
             std::string record_ns;
             std::string record_name;
 
-            auto ns_it = schema.find("namespace");
-            if (ns_it != schema.end() && ns_it->is_string()) {
-                record_ns = ns_it->get<std::string>();
-            } else {
-                record_ns = impliedNamespace(name);
-                if (record_ns.empty()) {
-                    record_ns = ns;
-                }
-            }
-
             auto name_it = schema.find("name");
             if (name_it != schema.end() && name_it->is_string()) {
                 record_name = name_it->get<std::string>();
+            }
 
-                // Add namespace prefix if needed
-                if (!record_ns.empty() && record_name.find(record_ns) != 0) {
+            if (record_name.find('.') != std::string::npos) {
+                // A name containing a dot is already a fullname; Avro ignores
+                // any namespace attribute for it.
+                record_ns = impliedNamespace(record_name);
+            } else {
+                auto ns_it = schema.find("namespace");
+                if (ns_it != schema.end() && ns_it->is_string()) {
+                    record_ns = ns_it->get<std::string>();
+                } else {
+                    record_ns = impliedNamespace(name);
+                    if (record_ns.empty()) {
+                        record_ns = ns;
+                    }
+                }
+                // The namespace is a prefix to prepend, not a prefix to test
+                // for: a record named "foobar" in namespace "foo" is
+                // "foo.foobar", not "foobar".
+                if (!record_ns.empty() && !record_name.empty()) {
                     record_name = record_ns + "." + record_name;
                 }
             }
@@ -663,10 +729,15 @@ void getInlineTagsRecursively(
  */
 void removeConfluentTags(nlohmann::json &schema) {
     if (schema.is_object()) {
-        // Remove confluent:tags if it exists
+        // Remove the confluent-specific attributes if they exist; the Avro
+        // parser rejects schemas carrying them.
         auto tags_it = schema.find("confluent:tags");
         if (tags_it != schema.end()) {
             schema.erase(tags_it);
+        }
+        auto rules_it = schema.find(VALIDATION_RULES_PROP);
+        if (rules_it != schema.end()) {
+            schema.erase(rules_it);
         }
 
         // Recursively process all values in the object
