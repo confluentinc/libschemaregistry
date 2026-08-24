@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <unordered_map>
 
 #include <nlohmann/json.hpp>
@@ -1335,6 +1336,15 @@ struct VariantBuilder::Impl {
 struct VariantJsonSaxHandler {
     VariantBuilder::Impl &impl;
 
+    // Set by parseJson when the document contained non-finite barewords, which nlohmann's lexer
+    // cannot read: each was rewritten to `nonFinitePlaceholder`, and the values they stand for
+    // are listed in document order. The placeholder is chosen so that it occurs nowhere in the
+    // original text, so a number_float carrying exactly that literal is always one of ours, and
+    // SAX events arrive in document order, so the index tracks the list.
+    std::string nonFinitePlaceholder;
+    std::vector<double> nonFiniteValues;
+    std::size_t nonFiniteIndex = 0;
+
     explicit VariantJsonSaxHandler(VariantBuilder &b) : impl(*b.impl_) {}
 
     bool null() {
@@ -1358,6 +1368,11 @@ struct VariantJsonSaxHandler {
         return true;
     }
     bool number_float(double val, const std::string &s) {
+        if (!nonFinitePlaceholder.empty() && s == nonFinitePlaceholder &&
+            nonFiniteIndex < nonFiniteValues.size()) {
+            impl.appendDouble(nonFiniteValues[nonFiniteIndex++]);
+            return true;
+        }
         // nlohmann emits number_float for integer literals that overflow 64
         // bits; the raw token distinguishes them from true fractional numbers.
         bool fractional = s.find('.') != std::string::npos ||
@@ -1470,10 +1485,171 @@ Variant VariantBuilder::build() {
     return Variant(std::move(value), std::move(metadata));
 }
 
+namespace {
+
+// The bare non-finite tokens every other client's JSON parser accepts: Jackson (Java) under
+// ALLOW_NON_NUMERIC_NUMBERS, Python's json module, System.Text.Json (C#) and serde_json (Rust)
+// all read these, and every client's toJson writes them back out (see the isnan/isinf arms of the
+// double and float renderers above). nlohmann's lexer rejects them and offers no option to allow
+// them, so they are rewritten before parsing and restored by the SAX handler.
+//
+// Matching is case-sensitive and whole-token, exactly as Jackson has it: `nan` and `INFINITY` are
+// rejected by Java, so they must be rejected here too.
+struct NonFiniteLiteral {
+    const char *text;
+    double value;
+};
+
+const NonFiniteLiteral kNonFiniteLiterals[] = {
+    {"-Infinity", -std::numeric_limits<double>::infinity()},
+    {"Infinity", std::numeric_limits<double>::infinity()},
+    {"NaN", std::numeric_limits<double>::quiet_NaN()},
+};
+
+bool isBarewordChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
+// Matches one of the non-finite barewords at `i`, as a whole token. A trailing letter or digit
+// means some longer (and invalid) literal such as `NaNny`, which must be left for the parser to
+// reject rather than silently truncated.
+bool matchNonFiniteBareword(const std::string &json, std::size_t i, std::size_t &len,
+                            double &value) {
+    for (const auto &lit : kNonFiniteLiterals) {
+        std::size_t n = std::strlen(lit.text);
+        if (json.compare(i, n, lit.text) != 0) {
+            continue;
+        }
+        if (i + n < json.size() && isBarewordChar(json[i + n])) {
+            continue;
+        }
+        len = n;
+        value = lit.value;
+        return true;
+    }
+    return false;
+}
+
+// Matches a JSON number literal at `i` whose magnitude overflows a double. nlohmann rejects those
+// outright (error 406, "number overflow") where Java, Go and JavaScript all read `1e400` as
+// +Infinity.
+//
+// Only a *fractional* literal is eligible, because that is the only kind Java stores as a DOUBLE:
+// an integer literal becomes an int or a scale-0 decimal, so an enormous one must keep reaching
+// the existing decimal path (and be rejected there for exceeding precision 38) rather than
+// quietly becoming Infinity here.
+bool matchOverflowingNumber(const std::string &json, std::size_t i, std::size_t &len,
+                            double &value) {
+    if (json[i] != '-' && !isDigit(json[i])) {
+        return false;
+    }
+    std::size_t end = i;
+    bool fractional = false;
+    bool hasExponent = false;
+    while (end < json.size()) {
+        char c = json[end];
+        if (c == 'e' || c == 'E') {
+            hasExponent = true;
+            fractional = true;
+        } else if (c == '.') {
+            fractional = true;
+        } else if (!isDigit(c) && c != '-' && c != '+') {
+            break;
+        }
+        ++end;
+    }
+    std::size_t n = end - i;
+    // DBL_MAX is ~1.8e308, so a literal with no exponent and fewer than 309 integer digits cannot
+    // overflow. Skipping those keeps the ordinary document free of any strtod call.
+    const std::size_t kOverflowFreeDigits = 309;
+    if (!fractional || (!hasExponent && n < kOverflowFreeDigits)) {
+        return false;
+    }
+    std::string token = json.substr(i, n);
+    char *endptr = nullptr;
+    double d = std::strtod(token.c_str(), &endptr);
+    // strtod must have consumed the whole token: anything less means this is not a well-formed
+    // number, and it has to be left for the parser to reject rather than silently replaced.
+    if (endptr != token.c_str() + n || !std::isinf(d)) {
+        return false;
+    }
+    len = n;
+    value = d;
+    return true;
+}
+
+// Rewrites each non-finite bareword, and each number literal that overflows to +/-Infinity, to a
+// placeholder number, appending the value it stands for to `values` in document order. Returns
+// false when there was nothing to rewrite - the overwhelmingly common case - leaving `out`
+// untouched so the caller parses the original text.
+//
+// `out` is materialized only once the first substitution is found, so an ordinary document costs
+// a single scan and no allocation. The placeholder is grown until it occurs nowhere in the
+// original document, which is what makes the association exact: a number_float carrying that
+// literal can only be one this rewrite wrote, never one the document already held.
+bool rewriteNonFinite(const std::string &json, std::string &out, std::string &placeholder,
+                      std::vector<double> &values) {
+    bool rewriting = false;
+    bool inString = false;
+    for (std::size_t i = 0; i < json.size();) {
+        char c = json[i];
+        if (inString) {
+            // A backslash escape is copied whole so an escaped quote does not read as the end of
+            // the string.
+            if (c == '\\' && i + 1 < json.size()) {
+                if (rewriting) {
+                    out.append(json, i, 2);
+                }
+                i += 2;
+                continue;
+            }
+            if (c == '"') {
+                inString = false;
+            }
+        } else if (c == '"') {
+            inString = true;
+        } else {
+            std::size_t len = 0;
+            double value = 0.0;
+            if (matchNonFiniteBareword(json, i, len, value) ||
+                matchOverflowingNumber(json, i, len, value)) {
+                if (!rewriting) {
+                    placeholder = "0.0";
+                    while (json.find(placeholder) != std::string::npos) {
+                        placeholder += '0';
+                    }
+                    out.assign(json, 0, i);
+                    rewriting = true;
+                }
+                out += placeholder;
+                values.push_back(value);
+                i += len;
+                continue;
+            }
+        }
+        if (rewriting) {
+            out += c;
+        }
+        ++i;
+    }
+    return rewriting;
+}
+
+}  // namespace
+
 Variant Variant::parseJson(const std::string &json) {
     VariantBuilder builder;
     VariantJsonSaxHandler handler(builder);
-    bool ok = nlohmann::json::sax_parse(json, &handler);
+    std::string rewritten;
+    std::string placeholder;
+    const std::string *text = &json;
+    if (rewriteNonFinite(json, rewritten, placeholder, handler.nonFiniteValues)) {
+        handler.nonFinitePlaceholder = placeholder;
+        text = &rewritten;
+    }
+    bool ok = nlohmann::json::sax_parse(*text, &handler);
     if (!ok) {
         throw VariantException("malformed JSON for variant");
     }

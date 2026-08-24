@@ -154,6 +154,37 @@ TEST(CelVariantTest, TryParseJsonEmptyIsNull) {
         evalWith("variants.type(variants.tryParseJson('{\"x\":1}')) == 'object'", kDoc));
 }
 
+// The non-finite bareword contract, end to end through the CEL layer. nlohmann rejects both the
+// barewords and a literal that overflows to a non-finite double, so parseJson rewrites them; Java
+// (Jackson), Python, C#, Rust, Go and JavaScript all accept these, and every client's toJson
+// writes them back out as barewords.
+TEST(CelVariantTest, NonFiniteThroughCel) {
+    EXPECT_TRUE(evalWith("variants.type(variants.parseJson('NaN')) == 'double'", kDoc));
+    EXPECT_TRUE(evalWith("variants.type(variants.parseJson('Infinity')) == 'double'", kDoc));
+    EXPECT_TRUE(evalWith("variants.type(variants.parseJson('-Infinity')) == 'double'", kDoc));
+    EXPECT_TRUE(evalWith("variants.toJson(variants.parseJson('NaN')) == 'NaN'", kDoc));
+    EXPECT_TRUE(evalWith("variants.toJson(variants.parseJson('Infinity')) == 'Infinity'", kDoc));
+    EXPECT_TRUE(
+        evalWith("variants.toJson(variants.parseJson('-Infinity')) == '-Infinity'", kDoc));
+    EXPECT_TRUE(evalWith(
+        R"(variants.toJson(variants.parseJson('{"a":NaN}')) == '{"a":NaN}')", kDoc));
+    EXPECT_TRUE(evalWith(
+        R"(variants.toJson(variants.parseJson('[NaN,Infinity,-Infinity]')) == )"
+        R"('[NaN,Infinity,-Infinity]')",
+        kDoc));
+    EXPECT_TRUE(evalWith(
+        R"(variants.type(variants.field(variants.parseJson('{"a":NaN}'), 'a')) == 'double')",
+        kDoc));
+    // Magnitude overflow reads as +/-Infinity rather than failing the parse.
+    EXPECT_TRUE(evalWith("variants.toJson(variants.parseJson('1e400')) == 'Infinity'", kDoc));
+    EXPECT_TRUE(evalWith("variants.toJson(variants.parseJson('-1e400')) == '-Infinity'", kDoc));
+    // A bareword is a successful parse, not a soft failure.
+    EXPECT_TRUE(evalWith("variants.tryParseJson('NaN') != null", kDoc));
+    // Spelling and case are exact, matching Jackson, so these stay soft failures.
+    EXPECT_TRUE(evalWith("variants.tryParseJson('nan') == null", kDoc));
+    EXPECT_TRUE(evalWith("variants.tryParseJson('INFINITY') == null", kDoc));
+}
+
 // ITEM #27: variants.as('timestamp') on a NANOS variant must preserve full nanosecond
 // resolution and floor-divide for negatives (matching Java's fromEpochNanos, which uses
 // Math.floorDiv into seconds+nanos). A raw/1000 truncation would drop sub-microsecond
