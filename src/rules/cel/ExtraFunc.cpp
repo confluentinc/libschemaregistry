@@ -89,10 +89,15 @@ class LambdaFunction : public cel::CelFunction {
 
 using T = cel::CelValue::Type;
 
-absl::Status reg(cel::CelFunctionRegistry& registry, absl::string_view name, bool receiver,
+absl::Status reg(::cel::FunctionRegistry& registry, absl::string_view name, bool receiver,
                  std::vector<T> types, LambdaFunction::Impl impl) {
-    return registry.Register(
-        std::make_unique<LambdaFunction>(name, receiver, std::move(types), std::move(impl)));
+    // The modern registry takes the descriptor separately from the implementation. A legacy
+    // CelFunction supplies both: CelFunctionDescriptor is an alias of ::cel::FunctionDescriptor
+    // and CelFunction derives from ::cel::Function, so no rewrite of the lambdas is needed.
+    auto fn =
+        std::make_unique<LambdaFunction>(name, receiver, std::move(types), std::move(impl));
+    ::cel::FunctionDescriptor descriptor = fn->descriptor();
+    return registry.Register(descriptor, std::move(fn));
 }
 
 cel::CelValue err(Arena* arena, const std::string& msg) {
@@ -205,7 +210,7 @@ int32_t requireIntScale(int64_t scale, const char* functionName) {
 // Decimal function registration.
 // ---------------------------------------------------------------------------
 
-absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
+absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
     // decimal(dyn)
     absl::Status s = reg(registry, "decimal", false, {T::kAny},
                          [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
@@ -568,7 +573,7 @@ absl::optional<bool> decimalAwareEqual(const cel::CelValue& a, const cel::CelVal
     return cel::CelValueEqualImpl(a, b);
 }
 
-absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
+absl::Status registerEquality(::cel::FunctionRegistry& registry) {
     auto equality = [&registry](const char* name, bool negate) {
         return reg(
             registry, name, false, {T::kAny, T::kAny},
@@ -587,13 +592,25 @@ absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
     if (s = equality("_==_", /*negate=*/false); !s.ok()) return s;
     if (s = equality("_!=_", /*negate=*/true); !s.ok()) return s;
 
-    // `in` is deliberately NOT overridden, and so remains structural for a decimal: `a in [b]`
-    // is false for 1.50 against 1.5 while `a == b` is true. cel-cpp's builtin @in is registered
-    // as (any, list) and its registry rejects any overlapping signature outright - (any, any)
-    // included - so there is no way to take it over from here. The equality overloads above only
-    // avoid the same clash because enable_heterogeneous_equality registers the builtin _==_ under
-    // narrower kinds. Fixing membership means changing cel-cpp, or routing its @in through the
-    // registry's equality rather than CelValueEqualImpl.
+    // `in` is NOT overridden here, and cannot be: it stays structural for a decimal, so
+    // `a in [b]` is false for 1.50 against 1.5 while `a == b` is true.
+    //
+    // The reason is the planner, not the registry. With enable_heterogeneous_equality set,
+    // FlatExprVisitor installs its own call handler for @in / in / _in_ and emits a direct
+    // interpretable via CreateInStep (eval/compiler/flat_expr_builder.cc,
+    // HandleHeterogeneousEqualityIn), so membership never reaches the function registry -
+    // registering an overload for it, in any signature, has no effect. Verified identical in
+    // cel-cpp 0.11 and 0.16.
+    //
+    // _==_ escapes that only by accident of a check the same code makes: the planner takes it
+    // over *only if* FindOverloads(kEqual, {kAny, kAny}) comes back empty. The (any, any)
+    // registration above is what keeps that check non-empty, which is why the equality override
+    // works at all - and why removing it would silently hand == back to the planner rather than
+    // producing an error. There is no equivalent check for @in.
+    //
+    // Closing the gap needs one of: an upstream cel-cpp change adding the same detection for
+    // @in (~6 lines, mirroring kEqual), or disabling enable_heterogeneous_equality, which would
+    // change comparison semantics across every rule and is not worth it for this.
     return absl::OkStatus();
 }
 
@@ -601,7 +618,7 @@ absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
 // Timestamp function registration.
 // ---------------------------------------------------------------------------
 
-absl::Status registerTimestamp(cel::CelFunctionRegistry& registry) {
+absl::Status registerTimestamp(::cel::FunctionRegistry& registry) {
     // One overload on the *standard* timestamp constructor, rather than a timestamp.of
     // namespace of our own: timestamp(int, int), an epoch value at a Flink-style decimal
     // precision (0 seconds, 3 millis, 6 micros, 9 nanos). Arity 2 collides with nothing in
@@ -691,7 +708,7 @@ bool validateUuid(std::string_view s) {
     return std::regex_match(s.begin(), s.end(), re);
 }
 
-absl::Status registerIsFuncs(cel::CelFunctionRegistry& registry) {
+absl::Status registerIsFuncs(::cel::FunctionRegistry& registry) {
     auto member = [&registry](const char* name, std::function<bool(std::string_view)> fn) {
         return reg(registry, name, true, {T::kString},
                    [fn](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena*) {
@@ -1057,7 +1074,7 @@ absl::Status variantAsImpl(absl::Span<const cel::CelValue> args, cel::CelValue* 
     return absl::OkStatus();
 }
 
-absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
+absl::Status registerVariant(::cel::FunctionRegistry& registry) {
     // variant(dyn) - runtime dispatch on the actual value.
     absl::Status s = reg(
         registry, "variant", false, {T::kAny},
@@ -1247,7 +1264,7 @@ absl::Status registerVariant(cel::CelFunctionRegistry& registry) {
 
 }  // namespace
 
-absl::Status RegisterExtraFuncs(cel::CelFunctionRegistry& registry, Arena* /*regArena*/) {
+absl::Status RegisterExtraFuncs(::cel::FunctionRegistry& registry, Arena* /*regArena*/) {
     absl::Status s = registerIsFuncs(registry);
     if (!s.ok()) return s;
     s = registerDecimal(registry);
