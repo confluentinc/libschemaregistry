@@ -490,24 +490,91 @@ absl::Status registerDecimal(cel::CelFunctionRegistry& registry) {
 // standard heterogeneous equality (ints, strings, lists, maps, cross-numeric, messages, …).
 // ---------------------------------------------------------------------------
 
+// Whether a value is a Decimal or holds one, at any depth. Only consulted once both operands
+// are containers, so it never runs on the scalar comparison path.
+bool hasDecimal(const cel::CelValue& v, Arena* arena) {
+    if (isDecimalMessage(v)) {
+        return true;
+    }
+    if (v.IsList()) {
+        const cel::CelList* list = v.ListOrDie();
+        for (int i = 0; i < list->size(); ++i) {
+            if (hasDecimal(list->Get(arena, i), arena)) return true;
+        }
+        return false;
+    }
+    if (v.IsMap()) {
+        const cel::CelMap* map = v.MapOrDie();
+        auto keys = map->ListKeys(arena);
+        if (!keys.ok()) return false;
+        for (int i = 0; i < (*keys)->size(); ++i) {
+            auto value = map->Get(arena, (*keys)->Get(arena, i));
+            if (value.has_value() && hasDecimal(*value, arena)) return true;
+        }
+    }
+    return false;
+}
+
+// CEL == with decimals made numeric, at any depth. Returns nullopt when the comparison is
+// undefined, matching cel::CelValueEqualImpl's contract.
+//
+// A Decimal is a confluent.type.Decimal message here, and comparing two of those structurally -
+// field by field over unscaled bytes and scale - calls 12.34 and 12.340 unequal even though they
+// are the same number. Containers are handled too, but only when a decimal is actually inside
+// one: the general implementation recurses with its own equality, so a Decimal nested in a list
+// or map was compared structurally and `[a] == [b]` disagreed with `a == b` on the same values.
+// Gating on hasDecimal leaves every decimal-free comparison on the general path exactly as it
+// was, and each element pair recurses back through here so a non-decimal element inside a
+// decimal-bearing container still gets general semantics.
+absl::optional<bool> decimalAwareEqual(const cel::CelValue& a, const cel::CelValue& b,
+                                       Arena* arena) {
+    if (isDecimalMessage(a) && isDecimalMessage(b)) {
+        return decimalCompare(decimalFromMessage(*a.MessageOrDie()),
+                              decimalFromMessage(*b.MessageOrDie())) == 0;
+    }
+    if (isDecimalMessage(a) || isDecimalMessage(b)) {
+        // A decimal is never equal to a non-decimal.
+        return false;
+    }
+    if (a.IsList() && b.IsList() && (hasDecimal(a, arena) || hasDecimal(b, arena))) {
+        const cel::CelList* al = a.ListOrDie();
+        const cel::CelList* bl = b.ListOrDie();
+        if (al->size() != bl->size()) return false;
+        for (int i = 0; i < al->size(); ++i) {
+            absl::optional<bool> eq =
+                decimalAwareEqual(al->Get(arena, i), bl->Get(arena, i), arena);
+            if (!eq.has_value()) return absl::nullopt;
+            if (!*eq) return false;
+        }
+        return true;
+    }
+    if (a.IsMap() && b.IsMap() && (hasDecimal(a, arena) || hasDecimal(b, arena))) {
+        const cel::CelMap* am = a.MapOrDie();
+        const cel::CelMap* bm = b.MapOrDie();
+        if (am->size() != bm->size()) return false;
+        auto keys = am->ListKeys(arena);
+        if (!keys.ok()) return absl::nullopt;
+        for (int i = 0; i < (*keys)->size(); ++i) {
+            cel::CelValue key = (*keys)->Get(arena, i);
+            auto av = am->Get(arena, key);
+            auto bv = bm->Get(arena, key);
+            if (!av.has_value() || !bv.has_value()) return false;
+            absl::optional<bool> eq = decimalAwareEqual(*av, *bv, arena);
+            if (!eq.has_value()) return absl::nullopt;
+            if (!*eq) return false;
+        }
+        return true;
+    }
+    return cel::CelValueEqualImpl(a, b);
+}
+
 absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
     auto equality = [&registry](const char* name, bool negate) {
         return reg(
             registry, name, false, {T::kAny, T::kAny},
             [name, negate](absl::Span<const cel::CelValue> args, cel::CelValue* out,
                            Arena* arena) {
-                const cel::CelValue& a = args[0];
-                const cel::CelValue& b = args[1];
-                if (isDecimalMessage(a) && isDecimalMessage(b)) {
-                    bool eq = decimalCompare(decimalFromMessage(*a.MessageOrDie()),
-                                             decimalFromMessage(*b.MessageOrDie())) == 0;
-                    *out = cel::CelValue::CreateBool(negate ? !eq : eq);
-                    return absl::OkStatus();
-                }
-                // Delegate to cel-cpp's general equality (returns nullopt only when the
-                // comparison is undefined, e.g. an error/unknown operand — which the
-                // dispatcher normally short-circuits before reaching here).
-                absl::optional<bool> eq = cel::CelValueEqualImpl(a, b);
+                absl::optional<bool> eq = decimalAwareEqual(args[0], args[1], arena);
                 if (!eq.has_value()) {
                     *out = cel::CreateNoMatchingOverloadError(arena, name);
                     return absl::OkStatus();
@@ -519,6 +586,14 @@ absl::Status registerEquality(cel::CelFunctionRegistry& registry) {
     absl::Status s;
     if (s = equality("_==_", /*negate=*/false); !s.ok()) return s;
     if (s = equality("_!=_", /*negate=*/true); !s.ok()) return s;
+
+    // `in` is deliberately NOT overridden, and so remains structural for a decimal: `a in [b]`
+    // is false for 1.50 against 1.5 while `a == b` is true. cel-cpp's builtin @in is registered
+    // as (any, list) and its registry rejects any overlapping signature outright - (any, any)
+    // included - so there is no way to take it over from here. The equality overloads above only
+    // avoid the same clash because enable_heterogeneous_equality registers the builtin _==_ under
+    // narrower kinds. Fixing membership means changing cel-cpp, or routing its @in through the
+    // registry's equality rather than CelValueEqualImpl.
     return absl::OkStatus();
 }
 

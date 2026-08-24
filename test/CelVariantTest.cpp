@@ -190,6 +190,36 @@ TEST(CelVariantTest, ProtoConfluentTypeVariantIntoCel) {
     EXPECT_TRUE(std::get<bool>(result));
 }
 
+// Cross-client parity, Protobuf half: a confluent.type.Variant message is usable with the
+// variants.* accessors with **no variant(...) call**. CelProtoWrapper carries it as a message
+// and variants.* are declared over {kAny}, so they take it directly.
+TEST(CelVariantTest, ProtoVariantNeedsNoConstructor) {
+    auto evalProtoVariant = [](const std::string &expr) {
+        auto parsed = Variant::parseJson(kDoc);
+        auto msg = std::make_unique<confluent::type::Variant>();
+        msg->set_metadata(
+            std::string(parsed.metadataBytes().begin(), parsed.metadataBytes().end()));
+        msg->set_value(std::string(parsed.valueBytes().begin(), parsed.valueBytes().end()));
+        CelValidator validator;
+        auto value = protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(msg)));
+        auto result = validator.execute(rule(expr), *value);
+        EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        return std::holds_alternative<bool>(result) && std::get<bool>(result);
+    };
+
+    // Bare: no constructor call.
+    EXPECT_TRUE(evalProtoVariant("variants.type(this) == 'object'"));
+    EXPECT_TRUE(evalProtoVariant("variants.as(variants.field(this, 'age'), 'int') == 30"));
+    EXPECT_TRUE(evalProtoVariant("variants.as(variants.path(this, '$.age'), 'int') == 30"));
+    // The wrapped form must keep working (variant(...) re-entry).
+    EXPECT_TRUE(
+        evalProtoVariant("variants.as(variants.field(variant(this), 'age'), 'int') == 30"));
+    // A missing key is CEL null, not an error.
+    EXPECT_TRUE(evalProtoVariant("variants.field(this, 'nope') == null"));
+    // Negative control.
+    EXPECT_FALSE(evalProtoVariant("variants.as(variants.field(this, 'age'), 'int') == 31"));
+}
+
 #ifdef SCHEMAREGISTRY_TEST_WITH_AVRO
 TEST(CelVariantTest, AvroVariantRecordIntoCel) {
     // A confluent.type.Variant record field: fromAvroValue surfaces it as a Variant
@@ -223,5 +253,78 @@ TEST(CelVariantTest, AvroVariantRecordIntoCel) {
     auto violations = schemaregistry::serdes::avro::utils::validateMessage(
         validator, nlohmann::json::parse(schema), {}, datum, false);
     EXPECT_TRUE(violations.empty());
+}
+
+// Cross-client parity: an Avro variant field is usable with the variants.* accessors with **no
+// variant(...) call**, and the wrapped form keeps working alongside it. fromAvroValue surfaces
+// the record as a confluent.type.Variant message, and variants.* are declared over {kAny}, so
+// they take it directly.
+// `variants.isNull` must coerce its receiver like every other accessor. It is declared over dyn,
+// so a bare variant field reaches it. A bare *object* cannot catch a missing coercion - isNull on
+// an object is false either way - so only a variant that is itself null discriminates.
+TEST(CelVariantTest, VariantIsNullCoercesBareReceiver) {
+    auto evalIsNull = [](const std::string &expr, const std::string &json) {
+        auto parsed = Variant::parseJson(json);
+        auto msg = std::make_unique<confluent::type::Variant>();
+        msg->set_metadata(
+            std::string(parsed.metadataBytes().begin(), parsed.metadataBytes().end()));
+        msg->set_value(std::string(parsed.valueBytes().begin(), parsed.valueBytes().end()));
+        CelValidator validator;
+        auto value = protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(msg)));
+        auto result = validator.execute(rule(expr), *value);
+        EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        return std::holds_alternative<bool>(result) && std::get<bool>(result);
+    };
+
+    EXPECT_TRUE(evalIsNull("variants.isNull(this)", "null"));
+    // The wrapped form has always worked and must keep working.
+    EXPECT_TRUE(evalIsNull("variants.isNull(variant(this))", "null"));
+    // A variant holding 5 is not variant-null.
+    EXPECT_FALSE(evalIsNull("variants.isNull(this)", "5"));
+}
+
+TEST(CelVariantTest, AvroVariantNeedsNoConstructor) {
+    auto evalVariant = [](const std::string &expr) {
+        std::string schema = R"json({
+            "type": "record", "name": "Holder",
+            "confluent:rules": [
+                {"name": "r", "expr": ")json" + expr + R"json("}
+            ],
+            "fields": [
+                {"name": "data", "type": {
+                    "type": "record", "name": "confluent.type.Variant",
+                    "fields": [
+                        {"name": "metadata", "type": "bytes"},
+                        {"name": "value", "type": "bytes"}
+                    ]
+                }}
+            ]
+        })json";
+        auto valid_schema = ::avro::compileJsonSchemaFromString(schema);
+        ::avro::GenericDatum datum(valid_schema);
+        auto &dataRec =
+            datum.value<::avro::GenericRecord>().fieldAt(0).value<::avro::GenericRecord>();
+        auto parsed = Variant::parseJson(R"({"name":"alice","age":30})");
+        dataRec.field("metadata").value<std::vector<uint8_t>>() = parsed.metadataBytes();
+        dataRec.field("value").value<std::vector<uint8_t>>() = parsed.valueBytes();
+        CelValidator validator;
+        return schemaregistry::serdes::avro::utils::validateMessage(
+                   validator, nlohmann::json::parse(schema), {}, datum, false)
+            .empty();
+    };
+
+    // Bare: no constructor call on the field.
+    EXPECT_TRUE(evalVariant(R"(variants.type(this.data) == 'object')"));
+    EXPECT_TRUE(
+        evalVariant(R"(variants.as(variants.field(this.data, 'name'), 'string') == 'alice')"));
+    EXPECT_TRUE(evalVariant(R"(variants.as(variants.path(this.data, '$.age'), 'int') == 30)"));
+    // The wrapped form must keep working (variant(...) re-entry).
+    EXPECT_TRUE(evalVariant(
+        R"(variants.as(variants.field(variant(this.data), 'name'), 'string') == 'alice')"));
+    // A missing key is CEL null, not an error — the null model still holds on a bare field.
+    EXPECT_TRUE(evalVariant(R"(variants.field(this.data, 'nope') == null)"));
+    // Negative control: a false comparison must fail.
+    EXPECT_FALSE(
+        evalVariant(R"(variants.as(variants.field(this.data, 'name'), 'string') == 'bob')"));
 }
 #endif
