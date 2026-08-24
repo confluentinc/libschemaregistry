@@ -15,12 +15,16 @@
 #pragma once
 
 #include "absl/status/status.h"
-#include "eval/public/cel_function_registry.h"
+#include "google/protobuf/arena.h"
+#include "runtime/function_registry.h"
 
 namespace schemaregistry::rules::cel {
 
-absl::Status RegisterExtraFuncs(
-    google::api::expr::runtime::CelFunctionRegistry &registry,
-    google::protobuf::Arena *regArena);
+// Registers into the modern ::cel::FunctionRegistry. The implementations are still legacy
+// google::api::expr::runtime::CelFunction instances, which is supported: CelFunction derives from
+// ::cel::Function and CelFunctionDescriptor is an alias of ::cel::FunctionDescriptor, so they
+// register directly and cel-cpp adapts their CelValue arguments at the boundary.
+absl::Status RegisterExtraFuncs(::cel::FunctionRegistry &registry,
+                               google::protobuf::Arena *regArena);
 
 }  // namespace schemaregistry::rules::cel
