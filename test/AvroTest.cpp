@@ -480,6 +480,113 @@ TEST(AvroTest, CelFieldTransformation) {
     EXPECT_EQ(bytes_field[2], 3);
 }
 
+// A union-typed field goes through the union arm of the transform walk, which the scalar
+// fields above never reach. Two branches share the record type here, so the branch has to
+// be taken from the datum rather than guessed from its Avro type: walking the value against
+// the other branch's schema would name its field "x" and the rule would not fire.
+TEST(AvroTest, CelFieldTransformationOverUnion) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+
+    auto ser_config = SerializerConfig(
+        false,  // auto_register_schemas
+        std::make_optional(SchemaSelector::useLatestVersion()),  // use_schema
+        true,   // normalize_schemas
+        false,  // validate
+        std::unordered_map<std::string, std::string>{}  // rule_config
+    );
+    auto deser_config = DeserializerConfig::createDefault();
+
+    const std::string schema_str = R"({
+        "type": "record",
+        "name": "test",
+        "fields": [
+            {"name": "note", "type": ["null", "string"]},
+            {"name": "choice", "type": [
+                {"type": "record", "name": "Rec", "namespace": "a",
+                 "fields": [{"name": "x", "type": "string"}]},
+                {"type": "record", "name": "Rec", "namespace": "b",
+                 "fields": [{"name": "y", "type": "string"}]}
+            ]}
+        ]
+    })";
+
+    Rule cel_rule;
+    cel_rule.setName(std::make_optional<std::string>("test-cel"));
+    cel_rule.setKind(std::make_optional<Kind>(Kind::Transform));
+    cel_rule.setMode(std::make_optional<Mode>(Mode::Write));
+    cel_rule.setType(std::make_optional<std::string>("CEL_FIELD"));
+    cel_rule.setExpr(std::make_optional<std::string>(
+        "name == 'note' || name == 'y' ; value + '-suffix'"));
+
+    RuleSet rule_set;
+    std::vector<Rule> domain_rules = {cel_rule};
+    rule_set.setDomainRules(std::make_optional<std::vector<Rule>>(domain_rules));
+
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(schema_str));
+    schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+    client->registerSchema("test-value", schema, false);
+
+    ::avro::ValidSchema avro_schema =
+        AvroSerializer::compileJsonSchema(schema_str);
+
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    rule_registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    AvroSerializer serializer(client, std::nullopt, rule_registry, ser_config);
+    AvroDeserializer deserializer(client, rule_registry, deser_config);
+
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Avro;
+
+    // The second branch of each union: a string note, and the record whose field the rule
+    // names.
+    ::avro::GenericDatum datum(avro_schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    auto &note = record.fieldAt(0);
+    note.selectBranch(1);
+    note.value<std::string>() = "hi";
+    auto &choice = record.fieldAt(1);
+    choice.selectBranch(1);
+    choice.value<::avro::GenericRecord>().setFieldAt(
+        0, ::avro::GenericDatum(std::string("there")));
+
+    auto round_tripped =
+        deserializer.deserialize(ser_ctx, serializer.serialize(ser_ctx, datum));
+    ASSERT_TRUE(round_tripped.value.type() == ::avro::AVRO_RECORD);
+    auto &result = round_tripped.value.value<::avro::GenericRecord>();
+
+    EXPECT_EQ(result.fieldAt(0).value<std::string>(), "hi-suffix");
+    // The branch is preserved, and it is the one the rule applied to.
+    ASSERT_TRUE(result.fieldAt(1).isUnion());
+    EXPECT_EQ(result.fieldAt(1).unionBranch(), 1u);
+    EXPECT_EQ(result.fieldAt(1).value<::avro::GenericRecord>()
+                  .fieldAt(0)
+                  .value<std::string>(),
+              "there-suffix");
+
+    // The null branch of a nullable field is left alone rather than transformed.
+    ::avro::GenericDatum without_note(avro_schema);
+    auto &bare = without_note.value<::avro::GenericRecord>();
+    auto &bare_choice = bare.fieldAt(1);
+    bare_choice.selectBranch(1);
+    bare_choice.value<::avro::GenericRecord>().setFieldAt(
+        0, ::avro::GenericDatum(std::string("only")));
+
+    auto bare_result = deserializer.deserialize(
+        ser_ctx, serializer.serialize(ser_ctx, without_note));
+    auto &bare_out = bare_result.value.value<::avro::GenericRecord>();
+    EXPECT_EQ(bare_out.fieldAt(0).type(), ::avro::AVRO_NULL);
+    EXPECT_EQ(bare_out.fieldAt(1).value<::avro::GenericRecord>()
+                  .fieldAt(0)
+                  .value<std::string>(),
+              "only-suffix");
+}
+
 TEST(AvroTest, JsonataWithCelField) {
     // JSONATA rule to transform "size" field to "height" field
     const std::string rule1_to_2 = 
