@@ -180,41 +180,101 @@ std::string frac(int64_t nano) {
     return buf;
 }
 
-std::string formatInstant(int64_t totalNanos) {
-    int64_t sec = floorDiv(totalNanos, 1000000000LL);
-    int64_t nano = floorMod(totalNanos, 1000000000LL);
+// The range a timestamp may occupy when rendered to JSON, in microseconds since the epoch:
+// 0001-01-01T00:00:00 through 9999-12-31T23:59:59.999999. That is the four-digit-year form every
+// client renders: for the zone-aware types it is RFC 3339 - also google.protobuf.Timestamp's range,
+// and the range timestamp(...) enforces when constructing a CEL timestamp. The zone-less types
+// carry no offset, so they are ISO-8601 local date-times rather than RFC 3339 (which has no
+// zone-less form); they share the range so both stay readable by the same date parsers.
+//
+// A variant TIMESTAMP_TZ / TIMESTAMP_NTZ is an arbitrary int64 of microseconds - roughly
+// +/-292,471 years - so it can hold instants outside that form. Those are refused rather than
+// rendered: ISO-8601's expanded year ("+10000-01-01T00:00:00Z") is not RFC 3339 and would not parse
+// back through parseJson. It is also exactly what Python's datetime and .NET's DateTime can hold,
+// so every client can enforce it natively. The nanosecond-based types need no check, because an
+// int64 of nanoseconds spans only 1677-2262, inside this range at both ends.
+constexpr int64_t kMinTimestampMicros = -62135596800000000LL;
+constexpr int64_t kMaxTimestampMicros = 253402300799999999LL;
+
+void checkMicrosRange(int64_t micros) {
+    if (micros < kMinTimestampMicros || micros > kMaxTimestampMicros) {
+        throw VariantException(
+            "timestamp microseconds (" + std::to_string(micros) + ") must be in range [" +
+            std::to_string(kMinTimestampMicros) + ", " + std::to_string(kMaxTimestampMicros) + "]");
+    }
+}
+
+std::string formatDateTimeParts(int64_t sec, int64_t nano, bool utc) {
     int64_t days = floorDiv(sec, 86400LL);
     int64_t secOfDay = floorMod(sec, 86400LL);
     int64_t year;
     int month, day;
     civilFromDays(days, year, month, day);
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%04lld-%02d-%02dT%02lld:%02lld:%02lld%sZ",
+    std::snprintf(buf, sizeof(buf), "%04lld-%02d-%02dT%02lld:%02lld:%02lld%s%s",
                   static_cast<long long>(year), month, day,
                   static_cast<long long>(secOfDay / 3600),
                   static_cast<long long>((secOfDay % 3600) / 60),
-                  static_cast<long long>(secOfDay % 60), frac(nano).c_str());
+                  static_cast<long long>(secOfDay % 60), frac(nano).c_str(),
+                  utc ? "Z" : "");
     return buf;
+}
+
+std::string formatInstantParts(int64_t sec, int64_t nano) {
+    return formatDateTimeParts(sec, nano, true);
+}
+
+std::string formatLocalDateTimeParts(int64_t sec, int64_t nano) {
+    return formatDateTimeParts(sec, nano, false);
+}
+
+std::string formatInstant(int64_t totalNanos) {
+    return formatInstantParts(floorDiv(totalNanos, 1000000000LL),
+                              floorMod(totalNanos, 1000000000LL));
 }
 
 std::string formatLocalDateTime(int64_t totalNanos) {
-    int64_t sec = floorDiv(totalNanos, 1000000000LL);
-    int64_t nano = floorMod(totalNanos, 1000000000LL);
-    int64_t days = floorDiv(sec, 86400LL);
-    int64_t secOfDay = floorMod(sec, 86400LL);
-    int64_t year;
-    int month, day;
-    civilFromDays(days, year, month, day);
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%04lld-%02d-%02dT%02lld:%02lld:%02lld%s",
-                  static_cast<long long>(year), month, day,
-                  static_cast<long long>(secOfDay / 3600),
-                  static_cast<long long>((secOfDay % 3600) / 60),
-                  static_cast<long long>(secOfDay % 60), frac(nano).c_str());
-    return buf;
+    return formatLocalDateTimeParts(floorDiv(totalNanos, 1000000000LL),
+                                    floorMod(totalNanos, 1000000000LL));
 }
 
+// These split microseconds into whole seconds before scaling the remainder to nanoseconds.
+// Converting to nanoseconds first overflowed int64 past 9223372036854775 micros
+// (2262-04-11T23:47:16.854775Z) and wrapped silently to a plausible-looking date in the past -
+// year 10000 rendered as 1816. The whole renderable range cannot be expressed in nanoseconds at
+// all, so the split is required, not merely safer.
+std::string formatInstantMicros(int64_t micros) {
+    checkMicrosRange(micros);
+    return formatInstantParts(floorDiv(micros, 1000000LL), floorMod(micros, 1000000LL) * 1000LL);
+}
+
+std::string formatLocalDateTimeMicros(int64_t micros) {
+    checkMicrosRange(micros);
+    return formatLocalDateTimeParts(floorDiv(micros, 1000000LL),
+                                    floorMod(micros, 1000000LL) * 1000LL);
+}
+
+// The range a TIME may occupy, in microseconds since midnight: 00:00:00 through 23:59:59.999999.
+// RFC 3339's partial-time requires time-hour = 2DIGIT in 00-23, so a value at or past 24 hours (or
+// negative) has no valid form. A variant TIME is an int64 of microseconds, so those are reachable
+// and are refused rather than rendered; checking also removes an overflow, since micros * 1000
+// wraps for a large enough value.
+constexpr int64_t kMinTimeMicros = 0;
+constexpr int64_t kMaxTimeMicros = 86400000000LL - 1;
+
+// The range a DATE may occupy, in days since the epoch: 0001-01-01 through 9999-12-31. RFC 3339's
+// full-date requires date-fullyear = 4DIGIT, so an expanded or negative year is not a valid
+// full-date. A variant DATE is an int32 of days - roughly +/-5.8 million years - so those are
+// reachable and are refused too.
+constexpr int64_t kMinDateEpochDay = -719162;
+constexpr int64_t kMaxDateEpochDay = 2932896;
+
 std::string formatLocalTime(int64_t micros) {
+    if (micros < kMinTimeMicros || micros > kMaxTimeMicros) {
+        throw VariantException(
+            "time microseconds of day (" + std::to_string(micros) + ") must be in range [" +
+            std::to_string(kMinTimeMicros) + ", " + std::to_string(kMaxTimeMicros) + "]");
+    }
     int64_t nanoOfDay = micros * 1000LL;
     int64_t secs = floorDiv(nanoOfDay, 1000000000LL);
     int64_t nano = floorMod(nanoOfDay, 1000000000LL);
@@ -228,6 +288,11 @@ std::string formatLocalTime(int64_t micros) {
 }
 
 std::string formatDate(int64_t days) {
+    if (days < kMinDateEpochDay || days > kMaxDateEpochDay) {
+        throw VariantException(
+            "date epoch day (" + std::to_string(days) + ") must be in range [" +
+            std::to_string(kMinDateEpochDay) + ", " + std::to_string(kMaxDateEpochDay) + "]");
+    }
     int64_t year;
     int month, day;
     civilFromDays(days, year, month, day);
@@ -813,12 +878,12 @@ void Variant::writeJson(std::string &out) const {
             break;
         case VariantType::TimestampTz:
             out.push_back('"');
-            out.append(formatInstant(getLong() * 1000LL));
+            out.append(formatInstantMicros(getLong()));
             out.push_back('"');
             break;
         case VariantType::TimestampNtz:
             out.push_back('"');
-            out.append(formatLocalDateTime(getLong() * 1000LL));
+            out.append(formatLocalDateTimeMicros(getLong()));
             out.push_back('"');
             break;
         case VariantType::TimestampNanosTz:
