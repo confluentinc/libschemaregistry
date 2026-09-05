@@ -172,6 +172,32 @@ google::api::expr::runtime::CelValue fromAvroValue(
             return google::api::expr::runtime::CelValue::CreateBytes(
                 arena_bytes);
         }
+        // A `fixed` is a fixed-width byte string, so it is presented as CEL bytes - exactly like
+        // AVRO_BYTES above, and what the Java reference does (GenericFixed -> CelByteString) and
+        // Rust does (Fixed -> Value::Bytes). Missing this arm, a bare fixed fell through to the
+        // default and compared *false* against a bytes literal rather than erroring, so a rule on
+        // a checksum or fixed-width id silently failed its record. Note a fixed carrying the
+        // `decimal` logical type was already handled by the logical-type switch above, which is
+        // why only the bare case was affected.
+        case ::avro::AVRO_FIXED: {
+            const auto &fixed_vec = avro.value<::avro::GenericFixed>().value();
+            auto *arena_fixed =
+                google::protobuf::Arena::Create<std::string>(arena);
+            arena_fixed->assign(fixed_vec.begin(), fixed_vec.end());
+            return google::api::expr::runtime::CelValue::CreateBytes(
+                arena_fixed);
+        }
+        // An `enum` is presented as its symbol name, matching the Java reference
+        // (GenericEnumSymbol -> String) and Rust (Enum -> Value::String). This deliberately
+        // differs from a *protobuf* enum, which every client presents as an int: an Avro enum
+        // symbol has no ordinal in the data model, only a name. Missing this arm, `this.status ==
+        // 'ACTIVE'` was silently false.
+        case ::avro::AVRO_ENUM: {
+            auto *arena_sym = google::protobuf::Arena::Create<std::string>(
+                arena, avro.value<::avro::GenericEnum>().symbol());
+            return google::api::expr::runtime::CelValue::CreateString(
+                arena_sym);
+        }
         case ::avro::AVRO_ARRAY: {
             const auto &arr = avro.value<::avro::GenericArray>().value();
             std::vector<google::api::expr::runtime::CelValue> vec;
@@ -259,8 +285,32 @@ google::api::expr::runtime::CelValue fromAvroValue(
     } else if (cel_value.IsDouble()) {
         return ::avro::GenericDatum(cel_value.DoubleOrDie());
     } else if (cel_value.IsString()) {
-        return ::avro::GenericDatum(
-            std::string(cel_value.StringOrDie().value()));
+        std::string text(cel_value.StringOrDie().value());
+        // An enum field is read as its symbol name (see AVRO_ENUM in fromAvroValue), so a rule
+        // that returns a string for one has to be written back as a GenericEnum carrying that
+        // symbol - a plain string datum does not satisfy an enum schema. The original datum is the
+        // only place the enum's schema is available, which is why it is threaded through here, the
+        // same way the array/record/map arms below use it.
+        if (original.type() == ::avro::AVRO_ENUM) {
+            ::avro::GenericDatum result{
+                ::avro::ValidSchema(original.value<::avro::GenericEnum>().schema())};
+            result.value<::avro::GenericEnum>().set(text);
+            return result;
+        }
+        return ::avro::GenericDatum(text);
+    } else if (cel_value.IsBytes()) {
+        auto bytes_view = cel_value.BytesOrDie().value();
+        std::vector<uint8_t> bytes(bytes_view.begin(), bytes_view.end());
+        // A fixed field needs a GenericFixed of its own schema; plain `bytes` takes the vector
+        // directly. There was no bytes arm here at all before, so a rule returning bytes for
+        // either shape fell through to the fallback and was silently discarded.
+        if (original.type() == ::avro::AVRO_FIXED) {
+            ::avro::GenericDatum result{
+                ::avro::ValidSchema(original.value<::avro::GenericFixed>().schema())};
+            result.value<::avro::GenericFixed>().value() = bytes;
+            return result;
+        }
+        return ::avro::GenericDatum(bytes);
     } else if (cel_value.IsNull()) {
         return ::avro::GenericDatum();
     } else if (cel_value.IsList()) {

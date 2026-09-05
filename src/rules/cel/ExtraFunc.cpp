@@ -753,7 +753,11 @@ bool isVariantMessage(const cel::CelValue& value) {
 
 // Read a confluent.type.Variant message via reflection (works for the generated
 // class and a runtime DynamicMessage).
-SrVariant variantFromMessage(const google::protobuf::Message& msg) {
+// An absent variant carries no metadata at all: a Protobuf field left unset, or an Avro
+// variant record whose byte fields are empty. There is nothing to read, so callers report it as
+// CEL null. The check has to precede construction: the SrVariant constructor reads the metadata
+// version byte and throws VariantException on an empty buffer.
+std::optional<SrVariant> variantFromMessage(const google::protobuf::Message& msg) {
     const auto* desc = msg.GetDescriptor();
     const auto* refl = msg.GetReflection();
     std::string metaScratch;
@@ -762,6 +766,9 @@ SrVariant variantFromMessage(const google::protobuf::Message& msg) {
         msg, desc->FindFieldByName("metadata"), &metaScratch);
     const std::string& value = refl->GetStringReference(
         msg, desc->FindFieldByName("value"), &valueScratch);
+    if (metadata.empty()) {
+        return std::nullopt;
+    }
     return SrVariant(std::vector<uint8_t>(value.begin(), value.end()),
                      std::vector<uint8_t>(metadata.begin(), metadata.end()));
 }
@@ -816,7 +823,12 @@ std::optional<SrVariant> receiverVariant(const cel::CelValue& value, bool* isNul
         return std::nullopt;
     }
     if (isVariantMessage(value)) {
-        return variantFromMessage(*value.MessageOrDie());
+        auto variant = variantFromMessage(*value.MessageOrDie());
+        if (!variant) {
+            // Absent: nothing to read, so it propagates as CEL null like a null receiver.
+            *isNull = true;
+        }
+        return variant;
     }
     return std::nullopt;
 }
@@ -1080,7 +1092,8 @@ absl::Status registerVariant(::cel::FunctionRegistry& registry) {
         registry, "variant", false, {T::kAny},
         [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
             if (isVariantMessage(args[0])) {
-                *out = wrapVariant(variantFromMessage(*args[0].MessageOrDie()), arena);
+                auto variant = variantFromMessage(*args[0].MessageOrDie());
+                *out = variant ? wrapVariant(*variant, arena) : cel::CelValue::CreateNull();
             } else if (args[0].IsNull()) {
                 // CEL null passes through as CEL null (matching the navigation accessors
                 // and the Java reference), rather than erroring.
@@ -1101,6 +1114,11 @@ absl::Status registerVariant(::cel::FunctionRegistry& registry) {
             [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
                 auto value = args[0].BytesOrDie().value();
                 auto metadata = args[1].BytesOrDie().value();
+                if (metadata.empty()) {
+                    *out = err(arena,
+                               "variant: metadata is empty, so there is no variant to read");
+                    return absl::OkStatus();
+                }
                 SrVariant variant(std::vector<uint8_t>(value.begin(), value.end()),
                                   std::vector<uint8_t>(metadata.begin(), metadata.end()));
                 *out = wrapVariant(variant, arena);
@@ -1150,10 +1168,14 @@ absl::Status registerVariant(::cel::FunctionRegistry& registry) {
     // variants.isNull(dyn) -> true iff a Variant whose top type is NULL (never errors).
     s = reg(registry, "variants.isNull", false, {T::kAny},
             [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* /*arena*/) {
-                bool result =
-                    isVariantMessage(args[0]) &&
-                    variantFromMessage(*args[0].MessageOrDie()).getType() ==
-                        VariantType::Null;
+                bool result = false;
+                if (isVariantMessage(args[0])) {
+                    auto variant = variantFromMessage(*args[0].MessageOrDie());
+                    // An absent variant is not a JSON null - there is nothing to read - so
+                    // this stays false rather than erroring.
+                    result = variant.has_value() &&
+                             variant->getType() == VariantType::Null;
+                }
                 *out = cel::CelValue::CreateBool(result);
                 return absl::OkStatus();
             });

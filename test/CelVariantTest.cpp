@@ -359,3 +359,49 @@ TEST(CelVariantTest, AvroVariantNeedsNoConstructor) {
         evalVariant(R"(variants.as(variants.field(this.data, 'name'), 'string') == 'bob')"));
 }
 #endif
+
+// An *absent* variant - a Protobuf field left unset, or an Avro variant record whose byte
+// fields are empty - carries no metadata, so there is nothing to read. It reads as CEL null and
+// every accessor propagates that, rather than the SrVariant constructor throwing on a metadata
+// version byte that isn't there.
+TEST(CelVariantTest, AbsentVariantReadsAsNull) {
+    auto evalAbsent = [](const std::string &expr) {
+        auto msg = std::make_unique<confluent::type::Variant>();
+        msg->set_metadata("");
+        msg->set_value("");
+        CelValidator validator;
+        auto value = protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(msg)));
+        auto result = validator.execute(rule(expr), *value);
+        EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        return std::holds_alternative<bool>(result) && std::get<bool>(result);
+    };
+
+    EXPECT_TRUE(evalAbsent(R"(variants.type(this) == null)"));
+    // isNull is false, not an error: an absent variant is not a JSON null.
+    EXPECT_TRUE(evalAbsent(R"(!variants.isNull(this))"));
+    EXPECT_TRUE(evalAbsent(R"(variants.field(this, 'name') == null)"));
+    EXPECT_TRUE(evalAbsent(R"(variants.path(this, '$.name') == null)"));
+    EXPECT_TRUE(evalAbsent(R"(variants.toJson(this) == null)"));
+    // The explicit constructor reports it as CEL null too, like variant(null).
+    EXPECT_TRUE(evalAbsent(R"(variant(this) == null)"));
+}
+
+// Absent must stay distinguishable from a variant that genuinely holds JSON null: the former is
+// CEL null, the latter a present variant whose type is NULL.
+TEST(CelVariantTest, ExplicitNullVariantIsNotAbsent) {
+    auto evalNullVariant = [](const std::string &expr) {
+        auto parsed = Variant::parseJson("null");
+        auto msg = std::make_unique<confluent::type::Variant>();
+        msg->set_metadata(
+            std::string(parsed.metadataBytes().begin(), parsed.metadataBytes().end()));
+        msg->set_value(std::string(parsed.valueBytes().begin(), parsed.valueBytes().end()));
+        CelValidator validator;
+        auto value = protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(msg)));
+        auto result = validator.execute(rule(expr), *value);
+        EXPECT_TRUE(std::holds_alternative<bool>(result)) << expr;
+        return std::holds_alternative<bool>(result) && std::get<bool>(result);
+    };
+
+    EXPECT_TRUE(evalNullVariant(R"(variants.isNull(this))"));
+    EXPECT_TRUE(evalNullVariant(R"(variants.type(this) != null)"));
+}

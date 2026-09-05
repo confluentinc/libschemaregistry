@@ -432,6 +432,55 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampIntoCel) {
 // `decimal(...)` call**, and the wrapped form keeps working alongside it. fromAvroValue applies
 // the schema's scale and builds a confluent.type.Decimal message, which is this client's in-CEL
 // decimal representation, so decimals.* (declared over {kMessage, kMessage}) accept it directly.
+// An Avro `fixed` reaches CEL as bytes and an `enum` as its symbol name, matching the Java
+// reference (GenericFixed -> CelByteString, GenericEnumSymbol -> String) and Rust. Neither had an
+// arm in fromAvroValue's base-type switch, so both fell to its default and became CEL **null** -
+// which made every comparison silently *false* rather than an error. For a validation rule that is
+// the worst failure mode: `this.status == 'ACTIVE'` failed the record with nothing to show the rule
+// itself was broken.
+//
+// Note a `fixed` carrying the `decimal` logical type was always handled by the logical-type switch,
+// which is why only the bare forms were affected.
+TEST(CelDecimalTimestampTest, AvroFixedAndEnumIntoCel) {
+    auto eval = [](const std::string &expr) {
+        std::string schema = R"json({
+            "type": "record", "name": "FixedEnumRecord",
+            "confluent:rules": [
+                {"name": "r", "expr": ")json" + expr + R"json("}
+            ],
+            "fields": [
+                {"name": "fx", "type": {"type": "fixed", "name": "F4", "size": 4}},
+                {"name": "en", "type": {"type": "enum", "name": "E",
+                                        "symbols": ["ACTIVE", "INACTIVE"]}}
+            ]
+        })json";
+        auto valid_schema = ::avro::compileJsonSchemaFromString(schema);
+        ::avro::GenericDatum datum(valid_schema);
+        auto &rec = datum.value<::avro::GenericRecord>();
+        rec.field("fx").value<::avro::GenericFixed>().value() =
+            std::vector<uint8_t>{1, 2, 3, 4};
+        rec.field("en").value<::avro::GenericEnum>().set("ACTIVE");
+        CelValidator validator;
+        return schemaregistry::serdes::avro::utils::validateMessage(
+                   validator, nlohmann::json::parse(schema), {}, datum, false)
+            .empty();
+    };
+
+    // fixed -> bytes
+    EXPECT_TRUE(eval(R"(this.fx == b'\\x01\\x02\\x03\\x04')"));
+    EXPECT_TRUE(eval("size(this.fx) == 4"));
+    EXPECT_TRUE(eval("type(this.fx) == bytes"));
+    // enum -> its symbol name (NOT an ordinal: a protobuf enum is an int, an Avro enum is a name)
+    EXPECT_TRUE(eval(R"(this.en == 'ACTIVE')"));
+    EXPECT_TRUE(eval(R"(this.en != 'INACTIVE')"));
+    EXPECT_TRUE(eval("type(this.en) == string"));
+    EXPECT_TRUE(eval(R"(this.en in ['ACTIVE', 'INACTIVE'])"));
+    // A wrong comparison must be a clean false, and these would also have been false when the
+    // fields read as null - so they are paired with the true cases above to be meaningful.
+    EXPECT_FALSE(eval(R"(this.en == 'INACTIVE')"));
+    EXPECT_FALSE(eval(R"(this.fx == b'\\x09')"));
+}
+
 TEST(CelDecimalTimestampTest, AvroLogicalDecimalNeedsNoConstructor) {
     auto evalDecimal = [](const std::string &expr) {
         std::string schema = R"json({
