@@ -25,6 +25,7 @@ if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES ValidationRuleTest.cpp)  # Inline validation rule tests
     list(APPEND TEST_SOURCES CelDecimalTimestampTest.cpp)  # CEL decimal/timestamp + is* tests
     list(APPEND TEST_SOURCES CelVariantTest.cpp)  # CEL variant() / variants.* tests
+    list(APPEND TEST_SOURCES CelAvroWriteBackTest.cpp)  # D2: CEL results written back to Avro
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)

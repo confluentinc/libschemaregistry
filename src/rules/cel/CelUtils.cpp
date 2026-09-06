@@ -1,9 +1,12 @@
 #include "schemaregistry/rules/cel/CelUtils.h"
+#include "schemaregistry/rules/cel/AvroResultWriter.h"
+#include "schemaregistry/rules/cel/ProtobufResultWriter.h"
 
 #include <utility>
 
 #include "absl/time/time.h"
 #include "confluent/type/decimal.pb.h"
+#include "schemaregistry/rules/cel/DecimalUtil.h"
 #include "confluent/type/variant.pb.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
@@ -113,6 +116,11 @@ nlohmann::json toJsonValue(
 }
 
 #ifdef SCHEMAREGISTRY_USE_AVRO
+
+namespace {
+
+
+}  // namespace
 
 google::api::expr::runtime::CelValue fromAvroValue(
     const ::avro::GenericDatum &avro, google::protobuf::Arena *arena) {
@@ -271,9 +279,125 @@ google::api::expr::runtime::CelValue fromAvroValue(
     }
 }
 
+namespace {
+
+/// Writes a CEL decimal back into the shape the field's schema declares.
+///
+/// `fromAvroValue` reads a DECIMAL logical type into a confluent.type.Decimal message, so a
+/// rule that computes one hands back a message rather than any primitive CEL type. Without
+/// this the value fell through `toAvroValue`'s trailing `return original` and the computed
+/// result was silently discarded (finding D2).
+///
+/// The computed decimal carries its own scale, which arithmetic may have changed; the Avro
+/// schema's scale is fixed. Rescaling to the schema's scale is what the JVM client gets from
+/// Avro's own DecimalConversion, which rejects a mismatch rather than truncating - so an
+/// inexact rescale is an error here too, not a silent narrowing.
+::avro::GenericDatum decimalToAvro(const ::avro::GenericDatum &original,
+                                   const google::protobuf::Message &message) {
+    const auto *decimal_msg =
+        google::protobuf::DynamicCastToGenerated<confluent::type::Decimal>(&message);
+    confluent::type::Decimal owned;
+    if (decimal_msg == nullptr) {
+        // A DynamicMessage of the same type: round-trip through the wire format.
+        if (!owned.ParseFromString(message.SerializeAsString())) {
+            throw std::runtime_error(
+                "cannot read confluent.type.Decimal returned by a CEL rule");
+        }
+        decimal_msg = &owned;
+    }
+
+    decimal::Decimal value = DecimalUtil::fromProto(*decimal_msg);
+    const int32_t target_scale = original.logicalType().scale();
+    decimal::Context ctx = DecimalUtil::exactContext();
+    decimal::Decimal rescaled = value.rescale(-target_scale, ctx);
+    if (ctx.status() & (MPD_Inexact | MPD_Invalid_operation)) {
+        throw std::runtime_error(
+            "decimal result does not fit the field's scale of " +
+            std::to_string(target_scale));
+    }
+
+    std::string unscaled = DecimalUtil::toProto(rescaled).value();
+    std::vector<uint8_t> bytes(unscaled.begin(), unscaled.end());
+    if (original.type() == ::avro::AVRO_FIXED) {
+        ::avro::GenericDatum result{
+            ::avro::ValidSchema(original.value<::avro::GenericFixed>().schema())};
+        result.value<::avro::GenericFixed>().value() = bytes;
+        return result;
+    }
+    return ::avro::GenericDatum(bytes);
+}
+
+/// Writes a CEL variant back into the confluent.type.Variant record it was read from.
+/// The record's own schema is the only place the field layout is available, so it is taken
+/// from the original datum - the same reason the enum, fixed and container arms thread it
+/// through.
+::avro::GenericDatum variantToAvro(const ::avro::GenericDatum &original,
+                                   const google::protobuf::Message &message) {
+    const auto *variant_msg =
+        google::protobuf::DynamicCastToGenerated<confluent::type::Variant>(&message);
+    confluent::type::Variant owned;
+    if (variant_msg == nullptr) {
+        if (!owned.ParseFromString(message.SerializeAsString())) {
+            throw std::runtime_error(
+                "cannot read confluent.type.Variant returned by a CEL rule");
+        }
+        variant_msg = &owned;
+    }
+    if (original.type() != ::avro::AVRO_RECORD) {
+        return original;
+    }
+
+    ::avro::GenericDatum result{
+        ::avro::ValidSchema(original.value<::avro::GenericRecord>().schema())};
+    auto &record = result.value<::avro::GenericRecord>();
+    const std::string &metadata = variant_msg->metadata();
+    const std::string &value = variant_msg->value();
+    for (size_t i = 0; i < record.schema()->names(); ++i) {
+        const std::string &field_name = record.schema()->nameAt(i);
+        if (field_name == "metadata") {
+            record.fieldAt(i).value<std::vector<uint8_t>>() =
+                std::vector<uint8_t>(metadata.begin(), metadata.end());
+        } else if (field_name == "value") {
+            record.fieldAt(i).value<std::vector<uint8_t>>() =
+                std::vector<uint8_t>(value.begin(), value.end());
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
 ::avro::GenericDatum toAvroValue(
     const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelValue &cel_value) {
+    // Logical types first, mirroring fromAvroValue: a decimal and a variant are carried as
+    // proto messages and a timestamp as a CEL timestamp, none of which any arm below matches.
+    // Before this they all reached the trailing `return original` and were discarded.
+    if (cel_value.IsMessage()) {
+        const google::protobuf::Message *message = cel_value.MessageOrDie();
+        if (message != nullptr) {
+            const std::string &name = message->GetDescriptor()->full_name();
+            if (name == "confluent.type.Decimal") {
+                return decimalToAvro(original, *message);
+            }
+            if (name == "confluent.type.Variant") {
+                return variantToAvro(original, *message);
+            }
+        }
+        return original;
+    } else if (cel_value.IsTimestamp()) {
+        const absl::Time time = cel_value.TimestampOrDie();
+        switch (original.logicalType().type()) {
+            case ::avro::LogicalType::TIMESTAMP_MILLIS:
+                return ::avro::GenericDatum(absl::ToUnixMillis(time));
+            case ::avro::LogicalType::TIMESTAMP_MICROS:
+                return ::avro::GenericDatum(absl::ToUnixMicros(time));
+            default:
+                // A timestamp computed for a field that is not a timestamp logical type has
+                // no unit to be written in; leaving the field alone matches the fallback.
+                return original;
+        }
+    }
     if (cel_value.IsBool()) {
         return ::avro::GenericDatum(cel_value.BoolOrDie());
     } else if (cel_value.IsInt64()) {
@@ -345,47 +469,7 @@ google::api::expr::runtime::CelValue fromAvroValue(
         const auto *cel_map = cel_value.MapOrDie();
 
         if (original.type() == ::avro::AVRO_RECORD) {
-            auto orig_record_schema =
-                original.value<::avro::GenericRecord>().schema();
-            ::avro::GenericDatum result_datum{
-                ::avro::ValidSchema(orig_record_schema)};
-            auto &result_record = result_datum.value<::avro::GenericRecord>();
-
-            auto &orig_record = original.value<::avro::GenericRecord>();
-            for (size_t i = 0; i < orig_record.fieldCount(); ++i) {
-                result_record.setFieldAt(i, orig_record.fieldAt(i));
-            }
-
-            auto map_keys = cel_map->ListKeys(nullptr);
-            if (map_keys.ok()) {
-                const auto *keys_list = map_keys.value();
-                for (int i = 0; i < keys_list->size(); ++i) {
-                    auto key_val = keys_list->Get(nullptr, i);
-                    if (!key_val.IsError() && key_val.IsString()) {
-                        std::string key =
-                            std::string(key_val.StringOrDie().value());
-                        auto value_lookup = cel_map->Get(nullptr, key_val);
-                        if (value_lookup.has_value()) {
-                            for (size_t field_idx = 0;
-                                 field_idx < orig_record_schema->leaves();
-                                 ++field_idx) {
-                                if (orig_record_schema->nameAt(field_idx) ==
-                                    key) {
-                                    auto field_template =
-                                        orig_record.fieldAt(field_idx);
-                                    result_record.setFieldAt(
-                                        field_idx,
-                                        toAvroValue(field_template,
-                                                    value_lookup.value()));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return result_datum;
+            return recordFromCelMap(original, *cel_map);
         } else if (original.type() == ::avro::AVRO_MAP) {
             auto orig_map_schema =
                 original.value<::avro::GenericMap>().schema();
@@ -428,10 +512,53 @@ google::api::expr::runtime::CelValue fromAvroValue(
 
 #endif
 
+namespace {
+
+using schemaregistry::serdes::protobuf::ProtobufVariant;
+
+}  // namespace
+
 schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
     const schemaregistry::serdes::protobuf::ProtobufVariant &original,
     const google::api::expr::runtime::CelValue &cel_value) {
     using namespace schemaregistry::serdes::protobuf;
+
+    // A CEL_FIELD rule over a decimal or timestamp field is handed the whole message and
+    // hands back a message or a CEL timestamp - neither of which any arm below matches, so
+    // both used to reach the fallback and be written as bytes, which aborts reflection with
+    // "Expected CPPTYPE_STRING, field type CPPTYPE_MESSAGE". The counterpart of the arms
+    // toAvroValue needs for the same reason.
+    if (original.type == ProtobufVariant::ValueType::Message) {
+        const auto &orig =
+            std::get<std::unique_ptr<google::protobuf::Message>>(original.value);
+        if (orig != nullptr && cel_value.IsMessage() &&
+            cel_value.MessageOrDie() != nullptr) {
+            auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
+            const google::protobuf::Message *src = cel_value.MessageOrDie();
+            if (src->GetDescriptor()->full_name() ==
+                out->GetDescriptor()->full_name()) {
+                out->CopyFrom(*src);
+                return ProtobufVariant(std::move(out));
+            }
+            return original;
+        }
+        if (orig != nullptr && cel_value.IsTimestamp()) {
+            const absl::Time time = cel_value.TimestampOrDie();
+            auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
+            const google::protobuf::Descriptor *desc = out->GetDescriptor();
+            const google::protobuf::Reflection *refl = out->GetReflection();
+            const int64_t seconds = absl::ToUnixSeconds(time);
+            if (const auto *sec = desc->FindFieldByName("seconds")) {
+                refl->SetInt64(out.get(), sec, seconds);
+            }
+            if (const auto *nanos = desc->FindFieldByName("nanos")) {
+                refl->SetInt32(out.get(), nanos,
+                               static_cast<int32_t>(absl::ToInt64Nanoseconds(
+                                   time - absl::FromUnixSeconds(seconds))));
+            }
+            return ProtobufVariant(std::move(out));
+        }
+    }
 
     if (cel_value.IsBool()) {
         return ProtobufVariant(cel_value.BoolOrDie());
@@ -506,6 +633,15 @@ schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
 
         return ProtobufVariant(result_list);
     } else if (cel_value.IsMap()) {
+        // A message-level transform returns a map that is the whole new message, so rebuild
+        // it rather than producing a bare protobuf map - the serializer cannot write one.
+        if (original.type == ProtobufVariant::ValueType::Message) {
+            const auto &orig_msg =
+                original.get<std::unique_ptr<google::protobuf::Message>>();
+            if (orig_msg != nullptr) {
+                return messageFromCelMap(*orig_msg, cel_value);
+            }
+        }
         const auto *cel_map = cel_value.MapOrDie();
         std::map<MapKey, ProtobufVariant> result_map;
 
