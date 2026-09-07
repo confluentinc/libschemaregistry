@@ -35,6 +35,83 @@ bool avroFieldAcceptsNull(const ::avro::NodePtr &field_schema) {
     return false;
 }
 
+
+/// Re-wraps a converted value as a member of a union field.
+///
+/// `GenericDatum::type()`, `logicalType()` and `value<T>()` all forward transparently through a
+/// union to its selected branch, so `toAvroValue` cannot tell that the template it was handed was
+/// a union and returns a bare datum. Encoding a bare datum into a union slot writes no branch
+/// index at all, and the record that comes off the wire is unreadable - avro-cpp reads the next
+/// field's bytes as the branch index and throws `std::out_of_range` from `selectBranch`. Every
+/// message-level `CEL` transform over a schema with a nullable field produced such a record.
+::avro::GenericDatum wrapForUnionField(const ::avro::NodePtr &field_schema,
+                                       const ::avro::GenericDatum &value) {
+    if (field_schema->type() != ::avro::AVRO_UNION || value.isUnion()) {
+        return value;
+    }
+    for (size_t branch = 0; branch < field_schema->leaves(); ++branch) {
+        if (field_schema->leafAt(branch)->type() != value.type()) {
+            continue;
+        }
+        ::avro::GenericDatum out{field_schema};
+        out.selectBranch(branch);
+        // `value<T>()` writes into the selected branch, which is how avro-cpp's own
+        // GenericReader fills a union (see impl/Generic.cc).
+        switch (value.type()) {
+            case ::avro::AVRO_NULL:
+                break;  // selectBranch already left it null
+            case ::avro::AVRO_BOOL:
+                out.value<bool>() = value.value<bool>();
+                break;
+            case ::avro::AVRO_INT:
+                out.value<int32_t>() = value.value<int32_t>();
+                break;
+            case ::avro::AVRO_LONG:
+                out.value<int64_t>() = value.value<int64_t>();
+                break;
+            case ::avro::AVRO_FLOAT:
+                out.value<float>() = value.value<float>();
+                break;
+            case ::avro::AVRO_DOUBLE:
+                out.value<double>() = value.value<double>();
+                break;
+            case ::avro::AVRO_STRING:
+                out.value<std::string>() = value.value<std::string>();
+                break;
+            case ::avro::AVRO_BYTES:
+                out.value<std::vector<uint8_t>>() =
+                    value.value<std::vector<uint8_t>>();
+                break;
+            case ::avro::AVRO_FIXED:
+                out.value<::avro::GenericFixed>() =
+                    value.value<::avro::GenericFixed>();
+                break;
+            case ::avro::AVRO_ENUM:
+                out.value<::avro::GenericEnum>() =
+                    value.value<::avro::GenericEnum>();
+                break;
+            case ::avro::AVRO_RECORD:
+                out.value<::avro::GenericRecord>() =
+                    value.value<::avro::GenericRecord>();
+                break;
+            case ::avro::AVRO_ARRAY:
+                out.value<::avro::GenericArray>() =
+                    value.value<::avro::GenericArray>();
+                break;
+            case ::avro::AVRO_MAP:
+                out.value<::avro::GenericMap>() =
+                    value.value<::avro::GenericMap>();
+                break;
+            default:
+                // Nothing else can come out of toAvroValue; leave the value unwrapped rather
+                // than silently writing a wrong branch.
+                return value;
+        }
+        return out;
+    }
+    return value;
+}
+
 }  // namespace
 
 ::avro::GenericDatum recordFromCelMap(
@@ -79,8 +156,10 @@ bool avroFieldAcceptsNull(const ::avro::NodePtr &field_schema) {
                                 orig_record.fieldAt(field_idx);
                             result_record.setFieldAt(
                                 field_idx,
-                                toAvroValue(field_template,
-                                            value_lookup.value()));
+                                wrapForUnionField(
+                                    orig_record_schema->leafAt(field_idx),
+                                    toAvroValue(field_template,
+                                                value_lookup.value())));
                             named[field_idx] = true;
                             break;
                         }
@@ -108,7 +187,12 @@ bool avroFieldAcceptsNull(const ::avro::NodePtr &field_schema) {
         // everywhere else.
         if (declared.type() != ::avro::AVRO_NULL ||
             avroFieldAcceptsNull(orig_record_schema->leafAt(field_idx))) {
-            result_record.setFieldAt(field_idx, declared);
+            // Wrapped for the same reason as a named field: avro-cpp stores a union field's
+            // declared default as a bare datum, and a bare datum in a union slot encodes
+            // without a branch index.
+            result_record.setFieldAt(
+                field_idx,
+                wrapForUnionField(orig_record_schema->leafAt(field_idx), declared));
             continue;
         }
         throw std::runtime_error(

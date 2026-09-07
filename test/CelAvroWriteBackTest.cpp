@@ -15,7 +15,13 @@
 #include <string>
 #include <vector>
 
+#include "schemaregistry/rest/ClientConfiguration.h"
+#include "schemaregistry/rest/MockSchemaRegistryClient.h"
+#include "schemaregistry/rest/model/Rule.h"
+#include "schemaregistry/rest/model/RuleSet.h"
+#include "schemaregistry/rest/model/Schema.h"
 #include "schemaregistry/rules/cel/CelExecutor.h"
+#include "schemaregistry/serdes/avro/AvroDeserializer.h"
 #include "schemaregistry/rules/cel/CelFieldExecutor.h"
 #include "schemaregistry/serdes/Serde.h"
 #include "schemaregistry/serdes/avro/AvroSerializer.h"
@@ -27,6 +33,9 @@
 
 using namespace schemaregistry::serdes;
 using schemaregistry::rules::cel::CelFieldExecutor;
+using schemaregistry::rest::ClientConfiguration;
+using schemaregistry::rest::MockSchemaRegistryClient;
+using schemaregistry::serdes::avro::AvroDeserializer;
 using schemaregistry::serdes::avro::AvroSerializer;
 
 namespace {
@@ -512,3 +521,173 @@ TEST(CelAvroMessageTransform, AnUnnamedFieldTakesItsDeclaredDefault) {
     EXPECT_EQ(record.fieldAt(2).type(), ::avro::AVRO_NULL);
 }
 
+
+// ---- Message-level CEL transforms over a nullable field: the bytes have to be readable -------
+//
+// Every test above asserts on the datum the executor returned, never on the bytes it encodes to.
+// That is what let a union field's write-back go wrong unseen: `GenericDatum::type()`,
+// `logicalType()` and `value<T>()` all forward through a union to its selected branch, so
+// `toAvroValue` could not tell its template was a union and returned a bare datum. A bare datum
+// in a union slot encodes with *no branch index*, and reading it back threw
+// `std::out_of_range` from `selectBranch` - avro-cpp had taken the next field's bytes as the
+// branch. So this one goes through the real serializer and back.
+
+namespace {
+
+const char *kNullableSchema = R"({
+  "type": "record",
+  "name": "N",
+  "fields": [
+    {"name": "amount",
+     "type": ["null", {"type": "bytes", "logicalType": "decimal", "precision": 8, "scale": 2}]},
+    {"name": "label", "type": "string"}
+  ]
+})";
+
+/// Serializes with one message-level CEL transform and reads the record back off the bytes.
+::avro::GenericDatum roundTripMessageTransform(const std::string &schema_text,
+                                               const std::string &expr,
+                                               const std::string &subject) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
+
+    Rule rule;
+    rule.setName(std::make_optional<std::string>("r"));
+    rule.setKind(std::make_optional<Kind>(Kind::Transform));
+    rule.setMode(std::make_optional<Mode>(Mode::Write));
+    rule.setType(std::make_optional<std::string>("CEL"));
+    rule.setExpr(std::make_optional<std::string>(expr));
+
+    RuleSet rule_set;
+    rule_set.setDomainRules(
+        std::make_optional<std::vector<Rule>>(std::vector<Rule>{rule}));
+    Schema schema;
+    schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    schema.setSchema(std::make_optional<std::string>(schema_text));
+    schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+    client->registerSchema(subject + "-value", schema, false);
+
+    ::avro::ValidSchema avro_schema = AvroSerializer::compileJsonSchema(schema_text);
+    ::avro::GenericDatum datum(avro_schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.field("amount").selectBranch(0);
+    record.field("label").value<std::string>() = "hi";
+
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelExecutor>());
+    auto ser_config = SerializerConfig(
+        false, std::make_optional(SchemaSelector::useLatestVersion()), true, false,
+        std::unordered_map<std::string, std::string>{});
+    AvroSerializer serializer(client, std::nullopt, registry, ser_config);
+    AvroDeserializer deserializer(client, registry, DeserializerConfig::createDefault());
+
+    SerializationContext ser_ctx;
+    ser_ctx.topic = subject;
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Avro;
+
+    return deserializer.deserialize(ser_ctx, serializer.serialize(ser_ctx, datum)).value;
+}
+
+}  // namespace
+
+/// Pass-through over a null union branch: the field the rule echoed has to come back null, and
+/// the record has to be readable at all.
+TEST(CelAvroMessageTransform, NullableFieldRoundTripsThroughTheWire) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableSchema, "{'amount': message.amount, 'label': message.label}", "nullable-pass");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &record = result.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.field("amount").type(), ::avro::AVRO_NULL);
+    EXPECT_EQ(record.field("label").value<std::string>(), "hi");
+}
+
+/// The same for a field the rule does not name: it takes null (the branch its union allows), and
+/// that null still has to be encoded as a union member.
+TEST(CelAvroMessageTransform, UnnamedNullableFieldRoundTripsThroughTheWire) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableSchema, "{'label': message.label}", "nullable-omit");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &record = result.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.field("amount").type(), ::avro::AVRO_NULL);
+    EXPECT_EQ(record.field("label").value<std::string>(), "hi");
+}
+
+// ---- a rule that cannot handle a null must fail loudly ---------------------------------------
+//
+// D11: cel-cpp reports a *runtime* failure as an error Value carrying an OK status - a failed
+// conversion, an unresolved overload - so the executor's status check never saw it. The error
+// value then reached `toAvroValue`, which has no arm for it and hands its input back, so a
+// message-level condition over a null neither passed, failed nor errored: the record went out
+// exactly as it came in. That was the only silent wrong answer in the whole C8/C9 sweep, and the
+// worst of the three possible outcomes - a raise names the rule, a false is at least a verdict,
+// a no-op is neither.
+
+namespace {
+
+const char *kNullableDecimalSchema = R"({
+  "type": "record",
+  "name": "N",
+  "fields": [
+    {"name": "amount",
+     "type": ["null", {"type": "bytes", "logicalType": "decimal", "precision": 8, "scale": 2}],
+     "confluent:tags": ["AMOUNT"]},
+    {"name": "label", "type": "string"}
+  ]
+})";
+
+/// Runs one message-level CEL *condition* over a record whose decimal field is null.
+::avro::GenericDatum runNullCondition(const std::string &expr) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kNullableDecimalSchema);
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.field("amount").selectBranch(0);
+    record.field("label").value<std::string>() = "hi";
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL");
+    rule.setKind(Kind::Condition);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelExecutor>());
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, {}, nullptr, registry);
+
+    CelExecutor exec;
+    auto input = schemaregistry::serdes::avro::makeAvroValue(datum);
+    return schemaregistry::serdes::avro::asAvro(*exec.transform(ctx, *input));
+}
+
+}  // namespace
+
+/// The load-bearing case: an unguarded rule over a null must throw, not return the record.
+TEST(CelAvroNullCondition, UnguardedRuleOverANullThrows) {
+    EXPECT_THROW(runNullCondition("decimals.gt(message.amount, decimal(\"10.00\"))"),
+                 std::exception);
+}
+
+/// Its twin. `== null` is the guard the reference recommends for exactly this case, and it has
+/// to keep working - otherwise "it throws" could just mean nulls broke altogether.
+TEST(CelAvroNullCondition, NullGuardStillAnswersTrue) {
+    ::avro::GenericDatum result = runNullCondition("message.amount == null");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_BOOL);
+    EXPECT_TRUE(result.value<bool>());
+}
+
+/// And a false verdict is still a verdict, not an error - so the new throw has not swallowed
+/// the ordinary condition path.
+TEST(CelAvroNullCondition, AFalseConditionIsStillABool) {
+    ::avro::GenericDatum result = runNullCondition("message.label == 'nope'");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_BOOL);
+    EXPECT_FALSE(result.value<bool>());
+}

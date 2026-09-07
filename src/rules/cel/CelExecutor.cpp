@@ -235,8 +235,20 @@ CelExecutor::Impl::evaluate(
         throw SerdeError("CEL result conversion failed: " +
                          std::string(legacy.status().message()));
     }
-    return std::make_unique<google::api::expr::runtime::CelValue>(
+    auto value = std::make_unique<google::api::expr::runtime::CelValue>(
         std::move(legacy).value());
+    // cel-cpp reports a *runtime* failure as an error Value carrying an OK status - a failed
+    // conversion, an unresolved overload - so the eval_status check above does not see it.
+    // Left unchecked, the error CelValue reached toAvroValue, which has no arm for it and
+    // returns its input unchanged: a message-level condition then neither passed, failed nor
+    // errored and the record went out as it came in (D11, the only silent wrong answer in the
+    // C8/C9 sweep), and a field rule over a null quietly passed.
+    if (value->IsError()) {
+        const absl::Status *err = value->ErrorOrDie();
+        throw SerdeError("CEL evaluation failed: " +
+                         std::string(err != nullptr ? err->message() : "unknown error"));
+    }
+    return value;
 }
 
 absl::StatusOr<std::shared_ptr<const ::cel::Program>>
