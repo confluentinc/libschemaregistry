@@ -419,8 +419,17 @@ inline void ProtobufSerializer<T>::validateInlineRules(
     // only when they present values differently; both live in validateMessage.
     const google::protobuf::Descriptor *schema_descriptor = nullptr;
     if (pool != nullptr) {
-        schema_descriptor =
-            pool->FindMessageTypeByName(message.GetDescriptor()->full_name());
+        const std::string &full_name = message.GetDescriptor()->full_name();
+        schema_descriptor = pool->FindMessageTypeByName(full_name);
+        if (schema_descriptor == nullptr) {
+            // A registry schema was selected but its pool has no message with this
+            // name (for example after a top-level message or package rename). Letting
+            // validateMessage fall back to the caller's descriptor would silently skip
+            // the selected schema's inline rules - failing open on a validation gate -
+            // so report it instead. Name the type so it is searchable.
+            throw ProtobufError("Selected schema does not define message " + full_name +
+                                "; cannot validate its inline rules");
+        }
     }
     raiseValidationViolations(
         utils::validateMessage(*executor, message, schema_descriptor, fail_fast));
