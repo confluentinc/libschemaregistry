@@ -26,13 +26,7 @@ if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES CelDecimalTimestampTest.cpp)  # CEL decimal/timestamp + is* tests
     list(APPEND TEST_SOURCES CelVariantTest.cpp)  # CEL variant() / variants.* tests
     list(APPEND TEST_SOURCES CelAvroWriteBackTest.cpp)
-    list(APPEND TEST_SOURCES ZzC9Test.cpp)  # TEMP C9 sweep
-    list(APPEND TEST_SOURCES ZzC8Test.cpp)  # TEMP C8 sweep
-    list(APPEND TEST_SOURCES ZzC8ExtTest.cpp)  # TEMP C8 ext sweep
-    list(APPEND TEST_SOURCES ZzC8PbExtTest.cpp)  # TEMP C8 pb ext sweep
-    list(APPEND TEST_SOURCES ZzC8InlineTest.cpp)  # TEMP C8 inline sweep
-    list(APPEND TEST_SOURCES ZzC8PbInlineTest.cpp)  # TEMP C8 pb inline sweep
-    list(APPEND TEST_SOURCES ZzC8PbTest.cpp)  # TEMP C8 protobuf sweep  # D2: CEL results written back to Avro
+    list(APPEND TEST_SOURCES CelProtobufContainerWriteBackTest.cpp)
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)
