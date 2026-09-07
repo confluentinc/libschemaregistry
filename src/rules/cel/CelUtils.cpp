@@ -286,7 +286,7 @@ namespace {
 /// `fromAvroValue` reads a DECIMAL logical type into a confluent.type.Decimal message, so a
 /// rule that computes one hands back a message rather than any primitive CEL type. Without
 /// this the value fell through `toAvroValue`'s trailing `return original` and the computed
-/// result was silently discarded (finding D2).
+/// result was silently discarded.
 ///
 /// The computed decimal carries its own scale, which arithmetic may have changed; the Avro
 /// schema's scale is fixed. Rescaling to the schema's scale is what the JVM client gets from

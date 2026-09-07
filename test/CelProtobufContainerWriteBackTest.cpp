@@ -57,8 +57,8 @@ long long unscaledOf(const confluent::type::Decimal &d) {
     return n;
 }
 
-std::unique_ptr<parity::C9Containers> containerMsg() {
-    auto m = std::make_unique<parity::C9Containers>();
+std::unique_ptr<parity::ValueTypeContainers> containerMsg() {
+    auto m = std::make_unique<parity::ValueTypeContainers>();
     m->set_label("hi");
     setDec(m->add_amounts(), 111);
     setDec(m->add_amounts(), 222);
@@ -68,7 +68,7 @@ std::unique_ptr<parity::C9Containers> containerMsg() {
 }
 
 /// Runs one message-level CEL transform and returns the rebuilt message.
-parity::C9Containers transform(const std::string &expr) {
+parity::ValueTypeContainers transform(const std::string &expr) {
     Rule rule;
     rule.setName("r");
     rule.setType("CEL");
@@ -93,7 +93,7 @@ parity::C9Containers transform(const std::string &expr) {
 
     // Round-tripped through the wire rather than inspected in place: the defect was in what got
     // written, and reflection on the rebuilt message would report the same either way.
-    parity::C9Containers out;
+    parity::ValueTypeContainers out;
     out.ParseFromString(
         std::get<std::unique_ptr<google::protobuf::Message>>(pv.value)->SerializeAsString());
     return out;
@@ -106,7 +106,7 @@ const char *kIdentity =
 }  // namespace
 
 TEST(CelProtobufContainerWriteBack, IdentityKeepsEveryContainer) {
-    parity::C9Containers out = transform(kIdentity);
+    parity::ValueTypeContainers out = transform(kIdentity);
 
     ASSERT_EQ(out.amounts_size(), 2);
     EXPECT_EQ(unscaledOf(out.amounts(0)), 111);
@@ -123,7 +123,7 @@ TEST(CelProtobufContainerWriteBack, IdentityKeepsEveryContainer) {
 // The discriminator for the test above: a *computed* element proves the repeated field was
 // written, so "the containers survived" cannot mean "nothing was written at all".
 TEST(CelProtobufContainerWriteBack, WritesAComputedRepeatedField) {
-    parity::C9Containers out = transform(
+    parity::ValueTypeContainers out = transform(
         "{'amounts': [decimal('9.99')], 'amount_map': message.amount_map, "
         "'nested': message.nested, 'label': message.label}");
 
@@ -132,7 +132,7 @@ TEST(CelProtobufContainerWriteBack, WritesAComputedRepeatedField) {
 }
 
 TEST(CelProtobufContainerWriteBack, WritesAComputedMap) {
-    parity::C9Containers out = transform(
+    parity::ValueTypeContainers out = transform(
         "{'amounts': message.amounts, 'amount_map': {'b': decimal('7.77')}, "
         "'nested': message.nested, 'label': message.label}");
 
@@ -145,7 +145,7 @@ TEST(CelProtobufContainerWriteBack, WritesAComputedMap) {
 // The third shape, hidden inside the same cell: a nested message the rule *constructs* rather
 // than echoes arrives as a CEL map, and used to write nothing.
 TEST(CelProtobufContainerWriteBack, WritesAConstructedNestedMessage) {
-    parity::C9Containers out = transform(
+    parity::ValueTypeContainers out = transform(
         "{'amounts': message.amounts, 'amount_map': message.amount_map, "
         "'nested': {'inner': decimal('8.88')}, 'label': message.label}");
 
@@ -158,7 +158,7 @@ TEST(CelProtobufContainerWriteBack, WritesAConstructedNestedMessage) {
 // Replace semantics still hold for a container: a field the rule does not name is dropped.
 // Without this, every assertion above would also pass on a walk that merged into the input.
 TEST(CelProtobufContainerWriteBack, OmittingAContainerLeavesItEmpty) {
-    parity::C9Containers out = transform(
+    parity::ValueTypeContainers out = transform(
         "{'nested': message.nested, 'label': message.label}");
 
     EXPECT_EQ(out.amounts_size(), 0);

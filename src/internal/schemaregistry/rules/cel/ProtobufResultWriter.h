@@ -20,7 +20,7 @@ namespace schemaregistry::rules::cel::utils {
  *
  * Its own unit rather than a branch inside `toProtobufValue`, which is where it used to live. That
  * function's job is "convert this value against a template", and the template shape is what made
- * seeding the result from the input look natural on the Avro side - finding D7, where the same
+ * seeding the result from the input look natural on the Avro side - this, where the same
  * fusion turned a message-level transform into a merge. Stating the contract here is what keeps
  * that reading from being available.
  *

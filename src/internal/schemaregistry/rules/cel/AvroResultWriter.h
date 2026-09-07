@@ -17,7 +17,7 @@ namespace schemaregistry::rules::cel::utils {
  * Its own unit rather than a branch inside `toAvroValue`, which is where it used to live and where
  * it went wrong. That function's job is "convert this value against a template", so seeding the
  * result from the template reads as the natural thing to write - and it silently made every
- * message-level Avro transform a merge, in the one client that fused the two (finding D7). The
+ * message-level Avro transform a merge, in the one client that fused the two. The
  * contract above is the whole point of the separation; the code is the same code.
  *
  * `original` supplies the *shape*: its schema, and per field the logical type, scale and unit that

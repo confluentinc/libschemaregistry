@@ -575,7 +575,7 @@ TEST(AvroTest, CelFieldTransformationOverUnion) {
     // This assertion used to read the other way - "left alone rather than transformed" - which
     // was not a design choice but a swallowed error: cel-cpp reports a runtime failure as an
     // error *Value* with an OK status, and that value reached toAvroValue, which has no arm for
-    // it and hands its input back. The reference raises here (capability C8, C5), and a rule
+    // it and hands its input back. The reference raises here, and a rule
     // that wants to survive a null has to say so: `value == null ? value : value + '-suffix'`.
     ::avro::GenericDatum without_note(avro_schema);
     auto &bare = without_note.value<::avro::GenericRecord>();

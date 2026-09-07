@@ -1,5 +1,5 @@
 /**
- * D2: a CEL rule's computed decimal, timestamp or variant must be written back into the
+ * A CEL rule's computed decimal, timestamp or variant must be written back into the
  * Avro datum. Before this, `toAvroValue` had no arm for any of the three - a decimal and a
  * variant arrive as proto messages and a timestamp as a CEL timestamp, none of which matched
  * a branch - so all three reached the trailing `return original` and the computed value was
@@ -138,7 +138,7 @@ TEST(CelAvroWriteBack, ComputedTimestampIsWrittenBack) {
         << "the computed timestamp was discarded and the original returned";
 }
 
-/// The control: a string transform always worked, which is what originally isolated D2 to
+/// The control: a string transform always worked, which is what originally isolated the fault to
 /// the logical-type arms rather than to the walk.
 TEST(CelAvroWriteBack, StringTransformStillWorks) {
     ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kSchema);
@@ -618,7 +618,7 @@ TEST(CelAvroMessageTransform, UnnamedNullableFieldRoundTripsThroughTheWire) {
 
 // ---- a rule that cannot handle a null must fail loudly ---------------------------------------
 //
-// D11: cel-cpp reports a *runtime* failure as an error Value carrying an OK status - a failed
+// cel-cpp reports a runtime failure as an error Value carrying an OK status - a failed
 // conversion, an unresolved overload - so the executor's status check never saw it. The error
 // value then reached `toAvroValue`, which has no arm for it and hands its input back, so a
 // message-level condition over a null neither passed, failed nor errored: the record went out
