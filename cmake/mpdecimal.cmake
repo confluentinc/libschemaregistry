@@ -124,9 +124,12 @@ set(MPDEC_HEADERS
 
 add_library(mpdec STATIC ${MPDEC_HEADERS} ${MPDEC_SOURCES})
 
+# The source dir holds libmpdec's internal headers and must stay private: it ships an
+# io.h that would otherwise precede the CRT's <io.h> for every consumer on Windows.
+# Only the generated mpdecimal.h is public.
 target_include_directories(mpdec
   PUBLIC "$<BUILD_INTERFACE:${MPDEC_GEN_DIR}>"
-  PUBLIC "$<BUILD_INTERFACE:${MPDEC_SOURCE_DIR}/libmpdec>"
+  PRIVATE "$<BUILD_INTERFACE:${MPDEC_SOURCE_DIR}/libmpdec>"
 )
 
 target_compile_definitions(mpdec PRIVATE ANSI=1)
