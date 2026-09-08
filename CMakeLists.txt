@@ -297,6 +297,13 @@ target_compile_options(schemaregistry
     PRIVATE
         $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:
             -Wall -Wno-unused-variable -Wno-unused-lambda-capture>
+    PUBLIC
+        # fmt static_asserts that its Unicode support needs /utf-8, and avro's headers pull fmt
+        # in. The flag used to arrive transitively through the avro-cpp port's interface options;
+        # it stopped once the vcpkg baseline moved, so set it here rather than rely on a
+        # dependency to supply a flag this build requires. PUBLIC because the installed headers
+        # include avro's, so a consumer compiles the same static_assert.
+        $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
 # Include directories
