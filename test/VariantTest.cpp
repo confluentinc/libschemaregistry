@@ -340,6 +340,21 @@ TEST(VariantTest, ArrayNavigation) {
 
 // ---- decimal ----
 
+TEST(VariantTest, DecimalBuilderRejectsNegativeScale) {
+    // The encoding stores the scale in one unsigned byte, so a negative scale would wrap
+    // (-1 becomes 255) and decode as a different number.
+    {
+        VariantBuilder b;
+        EXPECT_THROW(b.appendDecimal({100}, -2), VariantException);
+    }
+    // A positive scale still encodes.
+    {
+        VariantBuilder b;
+        b.appendDecimal({100}, 2);
+        EXPECT_EQ(b.build().toJson(), "1.00");
+    }
+}
+
 TEST(VariantTest, DecimalString) {
     // A big integer literal wider than 64 bits becomes a scale-0 decimal.
     Variant big = parse("123456789012345678901234567890");

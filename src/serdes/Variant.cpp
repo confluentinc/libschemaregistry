@@ -1069,6 +1069,11 @@ struct VariantBuilder::Impl {
 
     // Emit a decimal from a magnitude digit string + sign at the given scale.
     void writeDecimalDigits(bool negative, std::string digits, int scale) {
+        // The encoding stores the scale in a single unsigned byte, so a negative scale would
+        // wrap (-1 becomes 255) and change the value on decode.
+        if (scale < 0) {
+            throw VariantException("decimal scale must be non-negative");
+        }
         // Normalize leading zeros (BigInteger.ToString has none).
         size_t nz = digits.find_first_not_of('0');
         if (nz == std::string::npos) {
