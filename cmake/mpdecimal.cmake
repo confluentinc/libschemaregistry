@@ -166,5 +166,15 @@ target_include_directories(mpdecxx
     "$<BUILD_INTERFACE:${MPDEC_SOURCE_DIR}/libmpdec>"
 )
 
+if(MSVC)
+  # decimal.hh picks dllimport whenever _DLL is defined, which MSVC sets for the dynamic CRT
+  # (/MD) - so a *static* mpdecxx is still declared dllimport and every consumer emits __imp_
+  # references that no import library provides. BUILD_LIBMPDECXX selects the dllexport branch
+  # instead, which references the static library directly. PUBLIC because consumers include
+  # decimal.hh and have to agree with how decimal.cc was compiled. The C header carries no
+  # MSVC import/export logic, so libmpdec needs nothing here.
+  target_compile_definitions(mpdecxx PUBLIC BUILD_LIBMPDECXX)
+endif()
+
 add_library(mpdec::mpdec ALIAS mpdec)
 add_library(mpdecxx::mpdecxx ALIAS mpdecxx)
