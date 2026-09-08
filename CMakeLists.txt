@@ -74,20 +74,29 @@ find_package(OpenSSL CONFIG REQUIRED)
 find_package(cpr CONFIG REQUIRED)
 
 if (SCHEMAREGISTRY_WITH_AVRO)
-    # Fetch Apache Avro C++
-    find_package(unofficial-avro-cpp CONFIG QUIET)
-    if(NOT unofficial-avro-cpp_FOUND)
-    FetchContent_Declare(
-        unofficial-avro-cpp
-        GIT_REPOSITORY https://github.com/apache/avro.git
-        GIT_TAG        release-1.12.2
-        EXCLUDE_FROM_ALL
-        SOURCE_SUBDIR  lang/c++
-    )
-    # Disable Avro subproject tests to avoid registering them with ctest here
-    set(AVROCPP_BUILD_TESTS OFF CACHE BOOL "Build Avro C++ tests" FORCE)
-    set(AVRO_BUILD_TESTS OFF CACHE BOOL "Build Avro tests" FORCE)
-    FetchContent_MakeAvailable(unofficial-avro-cpp)
+    # Apache Avro C++. Newer vcpkg ports export avro-cpp::avrocpp; older ones
+    # used unofficial::avro-cpp::avrocpp. Building from source gives avrocpp_s.
+    find_package(avro-cpp CONFIG QUIET)
+    if(avro-cpp_FOUND)
+        set(SCHEMAREGISTRY_AVRO_TARGET avro-cpp::avrocpp)
+    else()
+        find_package(unofficial-avro-cpp CONFIG QUIET)
+        if(unofficial-avro-cpp_FOUND)
+            set(SCHEMAREGISTRY_AVRO_TARGET unofficial::avro-cpp::avrocpp)
+        else()
+            FetchContent_Declare(
+                unofficial-avro-cpp
+                GIT_REPOSITORY https://github.com/apache/avro.git
+                GIT_TAG        release-1.12.2
+                EXCLUDE_FROM_ALL
+                SOURCE_SUBDIR  lang/c++
+            )
+            # Disable Avro subproject tests to avoid registering them with ctest here
+            set(AVROCPP_BUILD_TESTS OFF CACHE BOOL "Build Avro C++ tests" FORCE)
+            set(AVRO_BUILD_TESTS OFF CACHE BOOL "Build Avro tests" FORCE)
+            FetchContent_MakeAvailable(unofficial-avro-cpp)
+            set(SCHEMAREGISTRY_AVRO_TARGET avrocpp_s)
+        endif()
     endif()
 endif()
 
@@ -140,7 +149,7 @@ if (SCHEMAREGISTRY_WITH_RULES)
     FetchContent_Declare(
         protovalidate_cc
         GIT_REPOSITORY https://github.com/bufbuild/protovalidate-cc.git
-        GIT_TAG        v1.1.0
+        GIT_TAG        v1.2.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
 
@@ -320,8 +329,12 @@ target_link_libraries(schemaregistry
 if(SCHEMAREGISTRY_WITH_AVRO)
     target_link_libraries(schemaregistry
         PUBLIC
-            $<BUILD_INTERFACE:unofficial::avro-cpp::avrocpp>
+            $<BUILD_INTERFACE:${SCHEMAREGISTRY_AVRO_TARGET}>
     )
+    # avro/Exception.hh reaches fmt::format through <fmt/core.h>, which fmt 12
+    # no longer pulls in without this opt-in. Public because our installed
+    # headers include avro's.
+    target_compile_definitions(schemaregistry PUBLIC FMT_DEPRECATED_HEAVY_CORE)
 endif()
 
 # Conditionally link JSON libraries

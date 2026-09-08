@@ -58,7 +58,7 @@ std::unique_ptr<SerdeValue> transformFields(
         if (message_ptr) {
             if (!descriptor) {
                 throw ProtobufError("Message descriptor not found for " +
-                                    message_ptr->GetTypeName());
+                                    std::string(message_ptr->GetTypeName()));
             }
 
             // Transform the message using the synchronous method
@@ -103,7 +103,7 @@ bool isCelLeafMessage(const google::protobuf::Descriptor* desc) {
     if (desc == nullptr) {
         return false;
     }
-    const std::string& name = desc->full_name();
+    const auto name = desc->full_name();
     return name == kCelDecimalTypeName || name == kCelTimestampTypeName;
 }
 
@@ -262,7 +262,8 @@ std::optional<ProtobufVariant> transformFieldWithContext(
     auto temp_serde_value =
         protobuf::makeProtobufValue(ProtobufVariant(std::move(temp_message)));
 
-    ctx.enterField(*temp_serde_value, fd->full_name(), fd->name(),
+    ctx.enterField(*temp_serde_value, std::string(fd->full_name()),
+                   std::string(fd->name()),
                    getFieldType(fd), getInlineTags(fd));
 
     // Skip-on-null, as in the validation walk: a field with explicit presence that is
@@ -296,7 +297,7 @@ std::optional<ProtobufVariant> transformFieldWithContext(
                 bool condition_result = new_value.get<bool>();
                 if (!condition_result) {
                     throw ProtobufError("Rule condition failed for field: " +
-                                        fd->name());
+                                        std::string(fd->name()));
                 }
             }
             ctx.exitField();

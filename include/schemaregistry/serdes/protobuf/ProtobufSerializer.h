@@ -243,7 +243,7 @@ inline std::string ProtobufSerializer<T>::getRecordName(
     auto [file_desc, pool] =
         serde_->getParsedSchema(*schema, base_->getSerde().getClient());
     if (file_desc && file_desc->message_type_count() > 0) {
-        return file_desc->message_type(0)->full_name();
+        return std::string(file_desc->message_type(0)->full_name());
     }
     throw ProtobufError("Could not determine record name from schema");
 }
@@ -419,7 +419,7 @@ inline void ProtobufSerializer<T>::validateInlineRules(
     // only when they present values differently; both live in validateMessage.
     const google::protobuf::Descriptor *schema_descriptor = nullptr;
     if (pool != nullptr) {
-        const std::string &full_name = message.GetDescriptor()->full_name();
+        const std::string full_name(message.GetDescriptor()->full_name());
         schema_descriptor = pool->FindMessageTypeByName(full_name);
         if (schema_descriptor == nullptr) {
             // A registry schema was selected but its pool has no message with this
@@ -444,13 +444,13 @@ ProtobufSerializer<T>::resolveDependencies(
 
     for (int i = 0; i < file_desc->dependency_count(); ++i) {
         const auto *dep = file_desc->dependency(i);
-        if (utils::isBuiltin(dep->name())) {
+        if (utils::isBuiltin(std::string(dep->name()))) {
             continue;
         }
 
         auto dep_refs = resolveDependencies(ctx, dep);
-        auto subject =
-            reference_subject_name_strategy_(dep->name(), ctx.serde_type);
+        auto subject = reference_subject_name_strategy_(
+            std::string(dep->name()), ctx.serde_type);
 
         schemaregistry::rest::model::Schema schema;
         schema.setSchemaType("PROTOBUF");
@@ -466,7 +466,7 @@ ProtobufSerializer<T>::resolveDependencies(
             subject, schema, base_->getConfig().normalize_schemas, false);
 
         schemaregistry::rest::model::SchemaReference sr;
-        sr.setName(dep->name());
+        sr.setName(std::string(dep->name()));
         sr.setSubject(subject);
         sr.setVersion(reference.getVersion());
 

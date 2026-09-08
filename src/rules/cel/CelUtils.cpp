@@ -376,7 +376,7 @@ namespace {
     if (cel_value.IsMessage()) {
         const google::protobuf::Message *message = cel_value.MessageOrDie();
         if (message != nullptr) {
-            const std::string &name = message->GetDescriptor()->full_name();
+            const auto name = message->GetDescriptor()->full_name();
             if (name == "confluent.type.Decimal") {
                 return decimalToAvro(original, *message);
             }
