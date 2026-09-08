@@ -428,6 +428,36 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampIntoCel) {
     EXPECT_TRUE(violations.empty());
 }
 
+// Cross-client parity: `timestamp-nanos` had no arm in fromAvroValue's logical-type switch, so it
+// fell through to the base-type switch and reached CEL as a bare **int** of the raw nanosecond
+// count. `timestamp(this.ts)` then read that as epoch *seconds* - 1.7e18 seconds - where Java
+// (epochOf(value, 1_000_000_000L, 1L)) gives the correct instant. Millis and micros were handled,
+// so only nanos was affected.
+//
+// Asserting against a fixed instant with sub-second digits is what makes this load-bearing: a
+// regression cannot satisfy it by returning a plausible-looking timestamp.
+TEST(CelDecimalTimestampTest, AvroLogicalTimestampNanosIntoCel) {
+    const char *schema = R"json({
+        "type": "record", "name": "TsNanosRecord",
+        "confluent:rules": [
+            {"name": "r",
+             "expr": "timestamp(this.ts) == timestamp('2023-11-14T22:13:20.123456789Z')"}
+        ],
+        "fields": [
+            {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-nanos"}}
+        ]
+    })json";
+    auto valid_schema = ::avro::compileJsonSchemaFromString(schema);
+    ::avro::GenericDatum datum(valid_schema);
+    datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() =
+        1700000000123456789LL;
+
+    CelValidator validator;
+    auto violations = schemaregistry::serdes::avro::utils::validateMessage(
+        validator, nlohmann::json::parse(schema), {}, datum, false);
+    EXPECT_TRUE(violations.empty());
+}
+
 // Cross-client parity: an Avro `decimal` logical type is usable as a Decimal with **no
 // `decimal(...)` call**, and the wrapped form keeps working alongside it. fromAvroValue applies
 // the schema's scale and builds a confluent.type.Decimal message, which is this client's in-CEL

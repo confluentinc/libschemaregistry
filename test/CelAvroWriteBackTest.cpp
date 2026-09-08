@@ -138,6 +138,38 @@ TEST(CelAvroWriteBack, ComputedTimestampIsWrittenBack) {
         << "the computed timestamp was discarded and the original returned";
 }
 
+/// A computed timestamp reaches a `timestamp-nanos` field too. The write-back switch handled only
+/// millis and micros, so nanos hit the default and the transform silently returned the field
+/// unchanged - the failure mode the EXPECT_NE below is there to catch.
+TEST(CelAvroWriteBack, ComputedTimestampNanosIsWrittenBack) {
+    // Named `R` with the field named `ts` so it matches runTransform's inline_tags key
+    // ("R.ts"): a full name the map does not carry means the tag never applies and the record
+    // comes back unchanged, which is indistinguishable from the bug this test is for.
+    const char *nanosSchema = R"({
+      "type": "record",
+      "name": "R",
+      "fields": [
+        {"name": "ts",
+         "type": {"type": "long", "logicalType": "timestamp-nanos"},
+         "confluent:tags": ["TS"]}
+      ]
+    })";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(nanosSchema);
+    ::avro::GenericDatum datum(schema);
+    datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() =
+        1700000000123456789LL;
+
+    ::avro::GenericDatum result =
+        runTransform(schema, datum, "TS", "value + duration('60s')");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const int64_t nanos = result.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>();
+
+    EXPECT_EQ(nanos, 1700000060123456789LL);
+    EXPECT_NE(nanos, 1700000000123456789LL)
+        << "the computed timestamp was discarded and the original returned";
+}
+
 /// The control: a string transform always worked, which is what originally isolated the fault to
 /// the logical-type arms rather than to the walk.
 TEST(CelAvroWriteBack, StringTransformStillWorks) {

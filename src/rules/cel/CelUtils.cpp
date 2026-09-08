@@ -147,6 +147,9 @@ google::api::expr::runtime::CelValue fromAvroValue(
         case ::avro::LogicalType::TIMESTAMP_MICROS:
             return google::api::expr::runtime::CelValue::CreateTimestamp(
                 absl::FromUnixMicros(avro.value<int64_t>()));
+        case ::avro::LogicalType::TIMESTAMP_NANOS:
+            return google::api::expr::runtime::CelValue::CreateTimestamp(
+                absl::FromUnixNanos(avro.value<int64_t>()));
         default:
             break;
     }
@@ -392,6 +395,8 @@ namespace {
                 return ::avro::GenericDatum(absl::ToUnixMillis(time));
             case ::avro::LogicalType::TIMESTAMP_MICROS:
                 return ::avro::GenericDatum(absl::ToUnixMicros(time));
+            case ::avro::LogicalType::TIMESTAMP_NANOS:
+                return ::avro::GenericDatum(absl::ToUnixNanos(time));
             default:
                 // A timestamp computed for a field that is not a timestamp logical type has
                 // no unit to be written in; leaving the field alone matches the fallback.
