@@ -63,6 +63,10 @@ class CelExecutor::Impl {
     std::unique_ptr<SerdeValue> toSerdeValue(
         const SerdeValue &original,
         const google::api::expr::runtime::CelValue &cel_value);
+    /// A CONDITION's verdict in `msg`'s own format, bypassing the result writers.
+    std::unique_ptr<SerdeValue> makeVerdict(
+        const SerdeValue &msg,
+        const google::api::expr::runtime::CelValue &result);
 };
 
 }  // namespace schemaregistry::rules::cel

@@ -20,6 +20,10 @@
 
 namespace schemaregistry::rules::cel::utils {
 
+/// The name of the CEL type a value carries, for a rule error message. Shared so the Avro and
+/// protobuf writers report a mismatch in the same words.
+const char *celTypeName(const google::api::expr::runtime::CelValue &value);
+
 google::api::expr::runtime::CelValue fromJsonValue(
     const nlohmann::json &json, google::protobuf::Arena *arena);
 

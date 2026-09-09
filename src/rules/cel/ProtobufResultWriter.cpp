@@ -13,6 +13,7 @@
 
 #include "absl/status/statusor.h"
 #include "google/protobuf/descriptor.h"
+#include "schemaregistry/rules/cel/CelUtils.h"
 
 namespace schemaregistry::rules::cel::utils {
 
@@ -181,23 +182,6 @@ struct ScalarSink {
         }
     }
 };
-
-/// The CEL type a value carries, for an error message.
-const char *celTypeName(const google::api::expr::runtime::CelValue &value) {
-    if (value.IsBool()) return "a bool";
-    if (value.IsInt64()) return "an int";
-    if (value.IsUint64()) return "a uint";
-    if (value.IsDouble()) return "a double";
-    if (value.IsString()) return "a string";
-    if (value.IsBytes()) return "bytes";
-    if (value.IsList()) return "a list";
-    if (value.IsMap()) return "a map";
-    if (value.IsMessage()) return "a message";
-    if (value.IsTimestamp()) return "a timestamp";
-    if (value.IsDuration()) return "a duration";
-    if (value.IsNull()) return "null";
-    return "this value";
-}
 
 [[noreturn]] void refuseScalar(const google::protobuf::FieldDescriptor *fd,
                                const google::api::expr::runtime::CelValue &value,
@@ -400,7 +384,11 @@ void setRepeatedField(google::protobuf::Message *out,
                       const google::protobuf::FieldDescriptor *fd,
                       const google::api::expr::runtime::CelValue &value) {
     if (!value.IsList()) {
-        return;
+        // Returning left the field empty, and under replace semantics that is a deletion
+        // reported as a success: `{"amounts": decimal('1')}` looked like it had been applied
+        // and came back with no elements at all. The JVM's write-back parse says
+        // "Expected an array for amounts but found 1".
+        refuseScalar(fd, value, "repeated");
     }
     const auto *list = value.ListOrDie();
     for (int i = 0; i < list->size(); ++i) {
@@ -425,18 +413,22 @@ void setMapField(google::protobuf::Message *out,
                  const google::protobuf::FieldDescriptor *fd,
                  const google::api::expr::runtime::CelValue &value) {
     if (!value.IsMap()) {
-        return;
+        // Same silent deletion as the repeated case above. The JVM says
+        // "Expect a map object but found: 1".
+        refuseScalar(fd, value, "map");
     }
     const auto *cel_map = value.MapOrDie();
     auto map_keys = cel_map->ListKeys(nullptr);
     if (!map_keys.ok()) {
-        return;
+        throw std::runtime_error("cannot read the keys of the map returned for field " +
+                                 std::string(fd->full_name()));
     }
     const google::protobuf::Descriptor *entry = fd->message_type();
     const auto *key_fd = entry->map_key();
     const auto *value_fd = entry->map_value();
     if (key_fd == nullptr || value_fd == nullptr) {
-        return;
+        throw std::runtime_error("field " + std::string(fd->full_name()) +
+                                 " is not a well-formed protobuf map");
     }
     const auto *keys_list = map_keys.value();
     for (int i = 0; i < keys_list->size(); ++i) {

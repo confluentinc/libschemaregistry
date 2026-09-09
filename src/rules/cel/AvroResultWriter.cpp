@@ -173,7 +173,19 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
     }
 }
 
-/// The datum `toAvroValue` converts a returned value against.
+[[noreturn]] void refuseField(const std::string &field,
+                              const ::avro::NodePtr &field_schema,
+                              const google::api::expr::runtime::CelValue &value) {
+    throw std::runtime_error(
+        "cannot write " + std::string(utils::celTypeName(value)) + " to field '" + field +
+        "', which is " + ::avro::toString(field_schema->type()));
+}
+
+/// The datum `toAvroValue` converts a returned value against, or a rule error if the field
+/// cannot hold what the rule returned.
+///
+/// Two things were wrong here, and one function fixes both because both are the same question:
+/// which schema does this value get written against?
 ///
 /// `toAvroValue` reads the field's logical type, scale and schema off the datum it is handed,
 /// and a union datum forwards all three to its *currently selected* branch. So the field's own
@@ -182,10 +194,23 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
 /// `decimal('1.23')` into an error against a phantom scale of 0 (and a computed timestamp into
 /// a silently dropped field). Resolving the branch from the value first is what the JVM
 /// writer's resolveUnion does before it recurses into the branch schema.
+///
+/// And `toAvroValue` dispatches on the *CEL value*, not on the schema, with a trailing
+/// `return original` for anything it does not recognise - so a value the field could not hold
+/// was never reported. It went one of two ways, neither an error: the value was discarded and
+/// the field kept its input (a timestamp, list or map returned for a string field), or a datum
+/// of the CEL value's own type was written into the slot, giving a record that no longer
+/// matches its schema (an int returned for a string field, a string for a long). The JVM
+/// dispatches on the schema instead and throws `typeMismatch` for every one of these, so the
+/// value is checked against the field's schema here before any of it runs.
 ::avro::GenericDatum conversionTemplate(
-    const ::avro::NodePtr &field_schema, const ::avro::GenericDatum &original,
+    const std::string &field, const ::avro::NodePtr &field_schema,
+    const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelValue &cel_value) {
     if (field_schema->type() != ::avro::AVRO_UNION) {
+        if (!branchAcceptsCel(field_schema, cel_value)) {
+            refuseField(field, field_schema, cel_value);
+        }
         return original;
     }
     for (size_t branch = 0; branch < field_schema->leaves(); ++branch) {
@@ -197,9 +222,8 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
         }
         return ::avro::GenericDatum(field_schema->leafAt(branch));
     }
-    // No branch matches. Leave the template alone rather than throwing here, so the value
-    // still reaches toAvroValue's own fallback and wrapForUnionField's.
-    return original;
+    // No branch can hold it, which is an UnresolvedUnionException on the JVM.
+    refuseField(field, field_schema, cel_value);
 }
 
 ::avro::GenericDatum wrapForUnionField(const ::avro::NodePtr &field_schema,
@@ -311,7 +335,7 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
                             // carries the logical type, scale and unit); its value
                             // is not used.
                             auto field_template = conversionTemplate(
-                                orig_record_schema->leafAt(field_idx),
+                                key, orig_record_schema->leafAt(field_idx),
                                 orig_record.fieldAt(field_idx),
                                 value_lookup.value());
                             result_record.setFieldAt(

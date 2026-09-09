@@ -46,6 +46,22 @@ void result_bytes_for_fixed(std::vector<uint8_t> &bytes, size_t fixed_size) {
 
 namespace schemaregistry::rules::cel::utils {
 
+const char *celTypeName(const google::api::expr::runtime::CelValue &value) {
+    if (value.IsBool()) return "a bool";
+    if (value.IsInt64()) return "an int";
+    if (value.IsUint64()) return "a uint";
+    if (value.IsDouble()) return "a double";
+    if (value.IsString()) return "a string";
+    if (value.IsBytes()) return "bytes";
+    if (value.IsList()) return "a list";
+    if (value.IsMap()) return "a map";
+    if (value.IsMessage()) return "a message";
+    if (value.IsTimestamp()) return "a timestamp";
+    if (value.IsDuration()) return "a duration";
+    if (value.IsNull()) return "null";
+    return "this value";
+}
+
 google::api::expr::runtime::CelValue fromJsonValue(
     const nlohmann::json &json, google::protobuf::Arena *arena) {
     if (json.is_null())
@@ -421,8 +437,20 @@ namespace {
                 return ::avro::GenericDatum(absl::ToUnixMillis(time));
             case ::avro::LogicalType::TIMESTAMP_MICROS:
                 return ::avro::GenericDatum(absl::ToUnixMicros(time));
-            case ::avro::LogicalType::TIMESTAMP_NANOS:
-                return ::avro::GenericDatum(absl::ToUnixNanos(time));
+            case ::avro::LogicalType::TIMESTAMP_NANOS: {
+                // A CEL timestamp spans years 1 to 9999; an epoch-nanosecond int64 spans
+                // only 1677 to 2262, and absl saturates rather than reporting the loss, so
+                // an out-of-range instant was silently written as a different one. The JVM
+                // reaches the same rejection through Avro's TimestampNanosConversion, whose
+                // Math.multiplyExact raises "long overflow". Millis and micros need no such
+                // check: the whole CEL range fits an int64 in both units.
+                const int64_t nanos = absl::ToUnixNanos(time);
+                if (absl::FromUnixNanos(nanos) != time) {
+                    throw std::out_of_range(
+                        "timestamp is out of range for an Avro timestamp-nanos field");
+                }
+                return ::avro::GenericDatum(nanos);
+            }
             default:
                 // A timestamp computed for a field that is not a timestamp logical type has
                 // no unit to be written in; leaving the field alone matches the fallback.
@@ -556,6 +584,8 @@ namespace {
 
 using schemaregistry::serdes::protobuf::ProtobufVariant;
 
+constexpr const char *kProtoTimestampTypeName = "google.protobuf.Timestamp";
+
 }  // namespace
 
 schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
@@ -568,35 +598,53 @@ schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
     // both used to reach the fallback and be written as bytes, which aborts reflection with
     // "Expected CPPTYPE_STRING, field type CPPTYPE_MESSAGE". The counterpart of the arms
     // toAvroValue needs for the same reason.
+    // A message-typed field takes its own message, and a google.protobuf.Timestamp field also
+    // takes a CEL timestamp. Nothing else: the JVM's ProtobufSchema.rebuildValueType reports
+    // every other shape as "Rule returned <type> for field '<name>', which is a <message>".
+    // Both mismatches were silent here. A message of the wrong type fell to `return original`
+    // and kept the field's input value, and the timestamp arm accepted *any* message - a
+    // Decimal has no seconds or nanos field, so the field was replaced with an empty Decimal.
     if (original.type == ProtobufVariant::ValueType::Message) {
         const auto &orig =
             std::get<std::unique_ptr<google::protobuf::Message>>(original.value);
-        if (orig != nullptr && cel_value.IsMessage() &&
-            cel_value.MessageOrDie() != nullptr) {
-            auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
-            const google::protobuf::Message *src = cel_value.MessageOrDie();
-            if (src->GetDescriptor()->full_name() ==
-                out->GetDescriptor()->full_name()) {
+        if (orig != nullptr) {
+            const std::string target(orig->GetDescriptor()->full_name());
+            if (cel_value.IsMessage() && cel_value.MessageOrDie() != nullptr) {
+                const google::protobuf::Message *src = cel_value.MessageOrDie();
+                const std::string source(src->GetDescriptor()->full_name());
+                if (source != target) {
+                    throw std::runtime_error("cannot write " + source +
+                                             " to a field of type " + target);
+                }
+                auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
                 out->CopyFrom(*src);
                 return ProtobufVariant(std::move(out));
             }
-            return original;
-        }
-        if (orig != nullptr && cel_value.IsTimestamp()) {
-            const absl::Time time = cel_value.TimestampOrDie();
-            auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
-            const google::protobuf::Descriptor *desc = out->GetDescriptor();
-            const google::protobuf::Reflection *refl = out->GetReflection();
-            const int64_t seconds = absl::ToUnixSeconds(time);
-            if (const auto *sec = desc->FindFieldByName("seconds")) {
-                refl->SetInt64(out.get(), sec, seconds);
-            }
-            if (const auto *nanos = desc->FindFieldByName("nanos")) {
-                refl->SetInt32(out.get(), nanos,
+            if (cel_value.IsTimestamp()) {
+                if (target != kProtoTimestampTypeName) {
+                    throw std::runtime_error(
+                        "cannot write a timestamp to a field of type " + target);
+                }
+                const absl::Time time = cel_value.TimestampOrDie();
+                auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
+                const google::protobuf::Descriptor *desc = out->GetDescriptor();
+                const google::protobuf::Reflection *refl = out->GetReflection();
+                const int64_t seconds = absl::ToUnixSeconds(time);
+                refl->SetInt64(out.get(), desc->FindFieldByName("seconds"), seconds);
+                refl->SetInt32(out.get(), desc->FindFieldByName("nanos"),
                                static_cast<int32_t>(absl::ToInt64Nanoseconds(
                                    time - absl::FromUnixSeconds(seconds))));
+                return ProtobufVariant(std::move(out));
             }
-            return ProtobufVariant(std::move(out));
+            // A map is a message-level transform's whole new message and a list is a
+            // repeated field; both are rebuilt by the arms below. Anything else is a scalar
+            // for a message-typed field, which those arms would hand back as a scalar
+            // variant - and protobuf's reflection setter CHECK-fails on that, aborting the
+            // process rather than reporting a rule error.
+            if (!cel_value.IsMap() && !cel_value.IsList()) {
+                throw std::runtime_error("cannot write this CEL value to a field of type " +
+                                         target);
+            }
         }
     }
 

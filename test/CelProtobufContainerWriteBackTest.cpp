@@ -194,3 +194,32 @@ TEST(CelProtobufContainerWriteBack, WrongTypedMessageValueIsRejected) {
         transform("{'nested': message.nested, 'label': message.label}");
     EXPECT_EQ(unscaledOf(echoed.nested().inner()), 444);
 }
+
+/// A named repeated or map field whose result is the wrong shape used to be emitted **empty**,
+/// so a typo deleted every element and reported success: `{'amounts': decimal('1')}` looked
+/// applied and came back with no elements. Under replace semantics that is a deletion, not a
+/// no-op. The JVM's write-back parse says "Expected an array for amounts but found 1" and
+/// "Expect a map object but found: 1" - measured against protobuf-java 4.35.1.
+TEST(CelProtobufContainerWriteBack, AWrongShapeForAContainerIsRejected) {
+    EXPECT_THROW(transform("{'amounts': decimal('1'), 'amount_map': message.amount_map, "
+                           "'nested': message.nested, 'label': message.label}"),
+                 std::exception);
+    EXPECT_THROW(transform("{'amounts': 'x', 'amount_map': message.amount_map, "
+                           "'nested': message.nested, 'label': message.label}"),
+                 std::exception);
+    EXPECT_THROW(transform("{'amounts': message.amount_map, 'amount_map': message.amount_map, "
+                           "'nested': message.nested, 'label': message.label}"),
+                 std::exception);
+    EXPECT_THROW(transform("{'amounts': message.amounts, 'amount_map': 1, "
+                           "'nested': message.nested, 'label': message.label}"),
+                 std::exception);
+    EXPECT_THROW(transform("{'amounts': message.amounts, 'amount_map': message.amounts, "
+                           "'nested': message.nested, 'label': message.label}"),
+                 std::exception);
+
+    // The must-fail twin: the identity still round-trips, so "throws" cannot mean the
+    // container paths stopped working.
+    parity::ValueTypeContainers ok = transform(kIdentity);
+    EXPECT_EQ(ok.amounts_size(), 2);
+    EXPECT_EQ(ok.amount_map().size(), 1u);
+}

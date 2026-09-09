@@ -81,6 +81,14 @@ void checkIndex(int64_t pos, size_t length) {
     }
 }
 
+/// Reads a little-endian unsigned integer, which has to fit a non-negative int32.
+///
+/// That bound is the JVM's own contract for `readUnsigned` ("The value must fit into a
+/// non-negative int"), enforced there by a `result < 0` check because its accumulator *is* an
+/// int. The accumulator here is 64-bit, so a 4-byte count with the high bit set came back as a
+/// large positive value and every caller's `static_cast<int>` then silently turned it into a
+/// negative one - a field count of 0xFFFFFFFF became -1, and the object simply reported itself
+/// as empty. Both counts and field ids come through here, so one check covers them.
 int64_t readUnsignedLE(const std::vector<uint8_t> &data, int64_t pos,
                        int numBytes) {
     checkIndex(pos, data.size());
@@ -88,6 +96,10 @@ int64_t readUnsignedLE(const std::vector<uint8_t> &data, int64_t pos,
     int64_t result = 0;
     for (int i = numBytes - 1; i >= 0; i--) {
         result = (result << 8) | data[pos + i];
+    }
+    if (result > std::numeric_limits<int32_t>::max()) {
+        throw VariantException(
+            "malformed variant: unsigned value does not fit a non-negative int");
     }
     return result;
 }
@@ -696,12 +708,25 @@ void Variant::objectInfo(int &numFields, int &idSize, int &offsetSize,
     }
     bool largeSize = ((typeInfo >> 4) & 0x1) != 0;
     int sizeBytes = largeSize ? kU32Size : 1;
-    numFields = static_cast<int>(readUnsignedLE(value, pos_ + 1, sizeBytes));
+    // In 64 bits, then range-checked. A count near int32 max times an id size of 4 overflows
+    // int, and where the JVM's int arithmetic wraps to a negative that its checkIndex then
+    // rejects, the same wrap in C++ is undefined behaviour. Computing wide and rejecting a
+    // table that does not fit the buffer reaches the JVM's outcome - an exception - without
+    // relying on it.
+    const int64_t count = readUnsignedLE(value, pos_ + 1, sizeBytes);
+    const int64_t ids = pos_ + 1 + sizeBytes;
+    const int64_t offsets = ids + count * (((typeInfo >> 2) & 0x3) + 1);
+    const int64_t data = offsets + (count + 1) * ((typeInfo & 0x3) + 1);
+    if (data > static_cast<int64_t>(value.size())) {
+        throw VariantException(
+            "malformed variant: object id and offset tables do not fit the value");
+    }
+    numFields = static_cast<int>(count);
     idSize = ((typeInfo >> 2) & 0x3) + 1;
     offsetSize = (typeInfo & 0x3) + 1;
-    idStart = static_cast<int>(pos_) + 1 + sizeBytes;
-    offsetStart = idStart + numFields * idSize;
-    dataStart = offsetStart + (numFields + 1) * offsetSize;
+    idStart = static_cast<int>(ids);
+    offsetStart = static_cast<int>(offsets);
+    dataStart = static_cast<int>(data);
 }
 
 void Variant::arrayInfo(int &numFields, int &offsetSize, int &offsetStart,
@@ -715,10 +740,18 @@ void Variant::arrayInfo(int &numFields, int &offsetSize, int &offsetStart,
     }
     bool largeSize = ((typeInfo >> 2) & 0x1) != 0;
     int sizeBytes = largeSize ? kU32Size : 1;
-    numFields = static_cast<int>(readUnsignedLE(value, pos_ + 1, sizeBytes));
+    // Wide arithmetic then a range check, for the reason given in objectInfo.
+    const int64_t count = readUnsignedLE(value, pos_ + 1, sizeBytes);
+    const int64_t offsets = pos_ + 1 + sizeBytes;
+    const int64_t data = offsets + (count + 1) * ((typeInfo & 0x3) + 1);
+    if (data > static_cast<int64_t>(value.size())) {
+        throw VariantException(
+            "malformed variant: array offset table does not fit the value");
+    }
+    numFields = static_cast<int>(count);
     offsetSize = (typeInfo & 0x3) + 1;
-    offsetStart = static_cast<int>(pos_) + 1 + sizeBytes;
-    dataStart = offsetStart + (numFields + 1) * offsetSize;
+    offsetStart = static_cast<int>(offsets);
+    dataStart = static_cast<int>(data);
 }
 
 int Variant::numObjectFields() const {
@@ -794,11 +827,18 @@ std::string Variant::getMetadataKey(int id) const {
     const auto &metadata = *metadata_;
     checkIndex(0, metadata.size());
     int offsetSize = ((metadata[0] >> 6) & 0x3) + 1;
-    int dictSize = static_cast<int>(readUnsignedLE(metadata, 1, offsetSize));
-    if (id >= dictSize) {
+    const int64_t dictSize = readUnsignedLE(metadata, 1, offsetSize);
+    // `id` is read through readUnsignedLE too, so it cannot be negative here; the check is
+    // kept explicit because a negative one would otherwise pass the upper bound.
+    if (id < 0 || id >= dictSize) {
         throw VariantException("malformed variant: field id out of range");
     }
-    int stringStart = 1 + (dictSize + 2) * offsetSize;
+    const int64_t stringTable = 1 + (dictSize + 2) * static_cast<int64_t>(offsetSize);
+    if (stringTable > static_cast<int64_t>(metadata.size())) {
+        throw VariantException(
+            "malformed variant: metadata offset table does not fit the metadata");
+    }
+    int stringStart = static_cast<int>(stringTable);
     int offset = static_cast<int>(
         readUnsignedLE(metadata, 1 + (id + 1) * offsetSize, offsetSize));
     int nextOffset = static_cast<int>(

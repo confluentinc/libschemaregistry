@@ -635,3 +635,103 @@ TEST(VariantTest, ParseJsonSurvivesAnAbsurdExponent) {
     EXPECT_EQ(Variant::parseJson("1e400").toJson(), "Infinity");
     EXPECT_EQ(Variant::parseJson("1e-400").toJson(), "0.0");
 }
+
+// ---- a malformed header must be rejected, not narrowed ----------------------------------------
+//
+// An object's or array's element count, a metadata dictionary size and a field id all come off
+// the wire as unsigned values of up to four bytes, and every caller carried them through `int`
+// arithmetic. `readUnsignedLE` accumulates in 64 bits, so a count with the high bit set came
+// back as a large positive value and the `static_cast<int>` at each call site silently turned it
+// negative: a count of 0xFFFFFFFF became -1 and the object simply reported itself as empty. A
+// count merely *near* int32 max is worse - times an id size of 4 it overflows int, which is
+// undefined behaviour in C++ where the JVM's int arithmetic merely wraps to a negative its own
+// checkIndex then rejects.
+//
+// The JVM guards this at the same place, in readUnsigned: "The value must fit into a
+// non-negative int ([0, Integer.MAX_VALUE])", throwing IllegalArgumentException otherwise.
+// Values are read in 64 bits here and the whole id/offset table is checked against the buffer,
+// which reaches the JVM's outcome without relying on the overflow.
+
+namespace {
+
+/// A large-size object header with the given 4-byte field count and no body.
+std::vector<uint8_t> objectHeader(uint32_t numFields, int idSize, int offsetSize) {
+    // 0_b4_b3b2_b1b0: b4 = large size, b3b2 = id size - 1, b1b0 = offset size - 1.
+    const int typeInfo = (1 << 4) | ((idSize - 1) << 2) | (offsetSize - 1);
+    std::vector<uint8_t> value = {
+        static_cast<uint8_t>((typeInfo << 2) | 2 /* kObjectType */)};
+    for (int i = 0; i < 4; ++i) {
+        value.push_back(static_cast<uint8_t>((numFields >> (8 * i)) & 0xFF));
+    }
+    return value;
+}
+
+/// A large-size array header with the given 4-byte element count and no body.
+std::vector<uint8_t> arrayHeader(uint32_t numElements, int offsetSize) {
+    // 000_b2_b1b0: b2 = large size, b1b0 = offset size - 1.
+    const int typeInfo = (1 << 2) | (offsetSize - 1);
+    std::vector<uint8_t> value = {
+        static_cast<uint8_t>((typeInfo << 2) | 3 /* kArrayType */)};
+    for (int i = 0; i < 4; ++i) {
+        value.push_back(static_cast<uint8_t>((numElements >> (8 * i)) & 0xFF));
+    }
+    return value;
+}
+
+}  // namespace
+
+/// A count that has no non-negative int form. Reported as an empty object before, because the
+/// cast made it -1 and every loop over it ran zero times.
+TEST(VariantTest, AnObjectCountThatDoesNotFitAnIntIsRejected) {
+    for (uint32_t count : {0xFFFFFFFFu, 0x80000000u, 0xDEADBEEFu}) {
+        Variant v(objectHeader(count, 1, 1), kEmptyMeta);
+        EXPECT_THROW(v.numObjectFields(), VariantException) << count;
+        EXPECT_THROW(v.getFieldByKey("a"), VariantException) << count;
+    }
+}
+
+/// A count that does fit an int but whose id and offset tables do not fit the value. The id
+/// table alone is 4 GiB here, so the multiplication that sizes it overflowed int.
+TEST(VariantTest, AnObjectHeaderLargerThanItsValueIsRejected) {
+    for (uint32_t count : {0x7FFFFFFFu, 0x40000000u, 1000u}) {
+        Variant v(objectHeader(count, 4, 4), kEmptyMeta);
+        EXPECT_THROW(v.numObjectFields(), VariantException) << count;
+    }
+}
+
+/// The array path has the same two problems and the same two fixes.
+TEST(VariantTest, AMalformedArrayHeaderIsRejected) {
+    for (uint32_t count : {0xFFFFFFFFu, 0x80000000u}) {
+        Variant v(arrayHeader(count, 1), kEmptyMeta);
+        EXPECT_THROW(v.numArrayElements(), VariantException) << count;
+    }
+    for (uint32_t count : {0x7FFFFFFFu, 1000u}) {
+        Variant v(arrayHeader(count, 4), kEmptyMeta);
+        EXPECT_THROW(v.numArrayElements(), VariantException) << count;
+    }
+}
+
+/// The metadata dictionary size is read the same way, and a key lookup walks its offset table.
+TEST(VariantTest, AMalformedMetadataDictionaryIsRejected) {
+    // version 1, offset_size 4 (bits 6-7), then a 4-byte dictionary size.
+    const std::vector<uint8_t> huge = {
+        static_cast<uint8_t>(1 | (3 << 6)), 0xFF, 0xFF, 0xFF, 0xFF};
+    Variant v(objectHeader(1, 1, 1), huge);
+    EXPECT_THROW(v.getFieldByKey("a"), VariantException);
+
+    // A size that fits an int but whose offset table runs past the metadata.
+    const std::vector<uint8_t> tooBig = {
+        static_cast<uint8_t>(1 | (3 << 6)), 0xFF, 0xFF, 0xFF, 0x7F};
+    Variant v2(objectHeader(1, 1, 1), tooBig);
+    EXPECT_THROW(v2.getFieldByKey("a"), VariantException);
+}
+
+/// The must-fail twin for all of the above: a well-formed object still parses. A guard that
+/// rejected everything would satisfy every EXPECT_THROW here.
+TEST(VariantTest, AWellFormedObjectStillParses) {
+    Variant v = parse(R"({"name":"alice","n":2})");
+    EXPECT_EQ(v.numObjectFields(), 2);
+    ASSERT_TRUE(v.getFieldByKey("name").has_value());
+    EXPECT_EQ(v.getFieldByKey("name")->getString(), "alice");
+    EXPECT_EQ(parse(R"([1,2,3])").numArrayElements(), 3);
+}

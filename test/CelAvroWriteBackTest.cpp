@@ -392,6 +392,30 @@ TEST(CelProtobufFieldValueTypes, FieldTypesMatchAvro) {
         desc->FindFieldByName("data")->message_type()));
 }
 
+/// A CEL_FIELD rule on a value-type field has to hand back that value type, and nothing else.
+/// Both mismatches were silent: a message of the wrong type fell to `return original` and the
+/// field kept its input, and the timestamp arm accepted *any* message - a Decimal has no
+/// seconds or nanos field, so the field was replaced with an **empty Decimal**, which reads
+/// back as zero. A scalar was worse still: the arms below would hand back a scalar variant for
+/// a CPPTYPE_MESSAGE field, and protobuf's reflection setter CHECK-fails on that, aborting the
+/// process. The JVM reports all three from ProtobufSchema.rebuildValueType, as "Rule returned
+/// <type> for field '<name>', which is a <message>; expected a decimal" (or a timestamp).
+TEST(CelProtobufFieldValueTypes, AWrongValueTypeForAFieldIsRejected) {
+    // A timestamp for the decimal field, and a decimal for the timestamp field.
+    EXPECT_THROW(runFieldRule("timestamp(0)", Kind::Transform, "AMOUNT"), std::exception);
+    EXPECT_THROW(runFieldRule("decimal('1.23')", Kind::Transform, "TS"), std::exception);
+    // A scalar for either.
+    EXPECT_THROW(runFieldRule("1", Kind::Transform, "AMOUNT"), std::exception);
+    EXPECT_THROW(runFieldRule("'x'", Kind::Transform, "TS"), std::exception);
+
+    // The must-fail twins: the right value type still reaches the field.
+    parity::ParityPlain dec = runFieldRule(
+        "decimals.add(decimal(value), decimal('1.00'))", Kind::Transform, "AMOUNT");
+    EXPECT_NE(dec.amount().value(), std::string("\x04\xD2", 2));
+    parity::ParityPlain ts = runFieldRule("value + duration('60s')", Kind::Transform, "TS");
+    EXPECT_EQ(ts.ts().seconds(), 1700000060);
+}
+
 /// C4. Before the port this reported nothing because the rule never ran.
 TEST(CelProtobufFieldValueTypes, DecimalConditionFires) {
     EXPECT_NO_THROW(runFieldRule(
@@ -736,6 +760,169 @@ TEST(CelAvroMessageTransform, NonNullBranchStillConvertsAgainstItself) {
     ASSERT_EQ(amount.type(), ::avro::AVRO_BYTES);
     EXPECT_EQ(amount.value<std::vector<uint8_t>>(),
               (std::vector<uint8_t>{0x05, 0x36}));
+}
+
+// ---- a value the field's schema cannot hold has to be reported --------------------------------
+//
+// `toAvroValue` dispatches on the *CEL value*, not on the schema, with a trailing
+// `return original` for anything it does not recognise - so a value the field could not hold
+// was never reported. It went one of two ways, neither an error:
+//
+//   * the value was discarded and the field kept its **input** - a timestamp, list or map
+//     returned for a string field, or a timestamp for a decimal field;
+//   * a datum of the CEL value's own type was written into the slot, giving a record that no
+//     longer matches its schema - an int returned for a string field, a string for a long, a
+//     string for an array. Reading such a record back crashed the reader outright.
+//
+// The JVM dispatches on the schema and throws typeMismatch for all of them, so the value is now
+// checked against the field's schema before any conversion runs.
+
+namespace {
+
+const char *kShapesSchema = R"({
+  "type": "record",
+  "name": "S",
+  "fields": [
+    {"name": "amount",
+     "type": {"type": "bytes", "logicalType": "decimal", "precision": 8, "scale": 2}},
+    {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "label", "type": "string"},
+    {"name": "codes", "type": {"type": "array", "items": "string"}},
+    {"name": "tags", "type": {"type": "map", "values": "string"}}
+  ]
+})";
+
+/// The identity map over kShapesSchema with exactly one field replaced. Every field has to be
+/// named because the transform replaces rather than merges, and none of them has a default.
+std::string shapesExpr(const std::string &field, const std::string &value) {
+    const char *names[][2] = {{"amount", "message.amount"}, {"ts", "message.ts"},
+                              {"label", "message.label"}, {"codes", "message.codes"},
+                              {"tags", "message.tags"}};
+    std::string expr = "{";
+    for (const auto &n : names) {
+        if (expr.size() > 1) {
+            expr += ", ";
+        }
+        expr += std::string("'") + n[0] + "': " + (field == n[0] ? value : n[1]);
+    }
+    return expr + "}";
+}
+
+::avro::GenericDatum shapesRecord(const ::avro::ValidSchema &schema) {
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<std::vector<uint8_t>>() = {0x04, 0xD2};
+    record.fieldAt(1).value<int64_t>() = 1700000000123L;
+    record.fieldAt(2).value<std::string>() = "hi";
+    record.fieldAt(3).value<::avro::GenericArray>().value().push_back(
+        ::avro::GenericDatum(std::string("a")));
+    record.fieldAt(4).value<::avro::GenericMap>().value().emplace_back(
+        "k", ::avro::GenericDatum(std::string("v")));
+    return datum;
+}
+
+::avro::GenericDatum runShapes(const std::string &field, const std::string &value) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kShapesSchema);
+    return runMessageTransform(schema, shapesRecord(schema), shapesExpr(field, value));
+}
+
+}  // namespace
+
+/// The must-fail twin first: the identity transform over this fixture has to keep working, so
+/// "throws" below cannot just mean the walk stopped working.
+TEST(CelAvroMessageTransform, TheShapesFixtureRoundTrips) {
+    ::avro::GenericDatum out = runShapes("", "");
+
+    ASSERT_EQ(out.type(), ::avro::AVRO_RECORD);
+    const auto &record = out.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.field("amount").value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{0x04, 0xD2}));
+    EXPECT_EQ(record.field("ts").value<int64_t>(), 1700000000123L);
+    EXPECT_EQ(record.field("label").value<std::string>(), "hi");
+    EXPECT_EQ(record.field("codes").value<::avro::GenericArray>().value().size(), 1u);
+    EXPECT_EQ(record.field("tags").value<::avro::GenericMap>().value().size(), 1u);
+}
+
+/// The cases that kept the field's input value. Nothing about the result distinguished these
+/// from a rule that had legitimately echoed the field, which is why they went unnoticed.
+TEST(CelAvroMessageTransform, AValueThatWasSilentlyDiscardedIsRefused) {
+    EXPECT_THROW(runShapes("label", "timestamp(0)"), std::exception);
+    EXPECT_THROW(runShapes("label", "['x']"), std::exception);
+    EXPECT_THROW(runShapes("label", "{'a': 'b'}"), std::exception);
+    EXPECT_THROW(runShapes("amount", "timestamp(0)"), std::exception);
+    EXPECT_THROW(runShapes("codes", "{'a': 'b'}"), std::exception);
+    EXPECT_THROW(runShapes("tags", "['x']"), std::exception);
+}
+
+/// The cases that wrote a datum of the wrong type into the slot. These produced a record that
+/// does not match its own schema - reading one back crashes the reader.
+TEST(CelAvroMessageTransform, AWrongTypedDatumIsRefused) {
+    EXPECT_THROW(runShapes("label", "1"), std::exception);
+    EXPECT_THROW(runShapes("label", "message.amount"), std::exception);
+    EXPECT_THROW(runShapes("ts", "'x'"), std::exception);
+    EXPECT_THROW(runShapes("ts", "message.amount"), std::exception);
+    EXPECT_THROW(runShapes("amount", "'x'"), std::exception);
+    EXPECT_THROW(runShapes("amount", "7"), std::exception);
+    EXPECT_THROW(runShapes("codes", "'x'"), std::exception);
+    EXPECT_THROW(runShapes("tags", "'x'"), std::exception);
+}
+
+/// A plain `long` field is not a timestamp field: its unit is not declared, so there is nothing
+/// to write a computed timestamp in. The JVM's branchAccepts requires the logical type too.
+TEST(CelAvroMessageTransform, ATimestampNeedsATimestampLogicalType) {
+    const char *plain = R"({
+      "type": "record", "name": "S",
+      "fields": [{"name": "n", "type": "long"}]
+    })";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(plain);
+    ::avro::GenericDatum datum(schema);
+    datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() = 7;
+
+    EXPECT_THROW(runMessageTransform(schema, datum, "{'n': timestamp(0)}"), std::exception);
+    EXPECT_EQ(runMessageTransform(schema, datum, "{'n': 8}")
+                  .value<::avro::GenericRecord>().fieldAt(0).value<int64_t>(), 8);
+}
+
+/// A CEL timestamp spans years 1 to 9999; an epoch-nanosecond int64 spans only 1677 to 2262,
+/// and absl saturates rather than reporting the loss, so an out-of-range instant was written as
+/// a different one. The JVM reaches the same rejection through Avro's TimestampNanosConversion,
+/// whose Math.multiplyExact raises "long overflow" - measured against avro 1.12.2:
+///   2023-11-14T22:13:20.123456789Z -> 1700000000123456789
+///   2262-04-11T23:47:16.854775807Z -> 9223372036854775807  (the last representable instant)
+///   2263-01-01T00:00:00Z           -> THROW ArithmeticException: long overflow
+///   9999-12-31T23:59:59.999999999Z -> THROW
+TEST(CelAvroMessageTransform, TimestampNanosRangeIsChecked) {
+    const char *nanos = R"({
+      "type": "record", "name": "S",
+      "fields": [{"name": "ts", "type": {"type": "long", "logicalType": "timestamp-nanos"}}]
+    })";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(nanos);
+    ::avro::GenericDatum datum(schema);
+    datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() = 1700000000123456789LL;
+
+    // In range, including the last instant an int64 of nanoseconds can hold.
+    EXPECT_EQ(runMessageTransform(schema, datum, "{'ts': timestamp('2023-11-14T22:13:20.123456789Z')}")
+                  .value<::avro::GenericRecord>().fieldAt(0).value<int64_t>(),
+              1700000000123456789LL);
+    EXPECT_EQ(runMessageTransform(schema, datum, "{'ts': timestamp('2262-04-11T23:47:16.854775807Z')}")
+                  .value<::avro::GenericRecord>().fieldAt(0).value<int64_t>(),
+              9223372036854775807LL);
+    // Out of range, and a CEL rule can name either of these directly.
+    EXPECT_THROW(runMessageTransform(schema, datum, "{'ts': timestamp('2263-01-01T00:00:00Z')}"),
+                 std::exception);
+    EXPECT_THROW(runMessageTransform(schema, datum,
+                                     "{'ts': timestamp('9999-12-31T23:59:59.999999999Z')}"),
+                 std::exception);
+    // A millis field takes the whole CEL range, so the check belongs to nanos alone.
+    const char *millis = R"({
+      "type": "record", "name": "S",
+      "fields": [{"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}}]
+    })";
+    ::avro::ValidSchema ms = AvroSerializer::compileJsonSchema(millis);
+    ::avro::GenericDatum msDatum(ms);
+    msDatum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() = 0;
+    EXPECT_NO_THROW(runMessageTransform(ms, msDatum,
+                                        "{'ts': timestamp('9999-12-31T23:59:59.999Z')}"));
 }
 
 // ---- decimal-on-fixed: the padding has to sign-extend -----------------------------------------

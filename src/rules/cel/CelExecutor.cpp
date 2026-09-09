@@ -181,10 +181,45 @@ std::unique_ptr<SerdeValue> CelExecutor::Impl::execute(
     // Execute the main expression
     auto result = executeRule(ctx, msg, expr, args, arena);
     if (result) {
+        // A CONDITION's result is a verdict, not data, so it must not go through a result
+        // writer - which is what the JVM does with
+        // `if (ctx.rule().getKind() == RuleKind.CONDITION) return result;`, ahead of every
+        // writer. Without the check a condition's bool was converted against the message it
+        // was validating. That was harmless only while those conversions had a silent
+        // fallback for a shape they did not recognise; once they began reporting the
+        // mismatch, a condition over a decimal or timestamp field started failing as though
+        // the rule had tried to write to it.
+        if (ctx.getRule().getKind().value_or(Kind::Transform) == Kind::Condition) {
+            return makeVerdict(msg, *result);
+        }
         return toSerdeValue(msg, *result);
     }
 
     return nullptr;
+}
+
+std::unique_ptr<SerdeValue> CelExecutor::Impl::makeVerdict(
+    const SerdeValue &msg,
+    const google::api::expr::runtime::CelValue &result) {
+    // Only the verdict itself is carried over, in the message's own format so that the
+    // caller's asBool() reads it. A non-bool result stays a failure, as on the JVM, where
+    // anything that is not Boolean.TRUE fails the rule.
+    const bool verdict = result.IsBool() && result.BoolOrDie();
+    switch (msg.getFormat()) {
+        case SerdeFormat::Json:
+            return schemaregistry::serdes::json::makeJsonValue(
+                nlohmann::json(verdict));
+#ifdef SCHEMAREGISTRY_USE_AVRO
+        case SerdeFormat::Avro:
+            return schemaregistry::serdes::avro::makeAvroValue(
+                ::avro::GenericDatum(verdict));
+#endif
+        case SerdeFormat::Protobuf:
+            return schemaregistry::serdes::protobuf::makeProtobufValue(
+                schemaregistry::serdes::protobuf::ProtobufVariant(verdict));
+        default:
+            return msg.clone();
+    }
 }
 
 std::unique_ptr<google::api::expr::runtime::CelValue>
