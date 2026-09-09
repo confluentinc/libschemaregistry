@@ -58,7 +58,7 @@ std::unique_ptr<SerdeValue> transformFields(
         if (message_ptr) {
             if (!descriptor) {
                 throw ProtobufError("Message descriptor not found for " +
-                                    message_ptr->GetTypeName());
+                                    std::string(message_ptr->GetTypeName()));
             }
 
             // Transform the message using the synchronous method
@@ -86,6 +86,95 @@ std::unique_ptr<SerdeValue> transformFields(
         }
     }
     return value.clone();
+}
+
+// Message types a CEL rule works with as a single value rather than as a record.
+//
+// Avro carries the same concepts as logical types on a primitive, so the field is a leaf there
+// and a CEL_FIELD rule reaches it. Variant is deliberately absent: it is a record in Avro too,
+// so skipping it is the behaviour that matches, and a variant is reached with a message-level
+// CEL rule instead.
+namespace {
+constexpr const char* kCelDecimalTypeName = "confluent.type.Decimal";
+constexpr const char* kCelTimestampTypeName = "google.protobuf.Timestamp";
+}  // namespace
+
+bool isCelLeafMessage(const google::protobuf::Descriptor* desc) {
+    if (desc == nullptr) {
+        return false;
+    }
+    const auto name = desc->full_name();
+    return name == kCelDecimalTypeName || name == kCelTimestampTypeName;
+}
+
+// transformLeafValue hands one value to the field transform, when the rule's tags overlap the
+// field's. Shared by the primitive case and by a value-type message, which a rule sees as a
+// single value rather than as a record.
+ProtobufVariant transformLeafValue(RuleContext& ctx, const ProtobufVariant& message) {
+    auto field_ctx = ctx.currentField();
+    if (field_ctx.has_value()) {
+        auto rule_tags = ctx.getRule().getTags();
+        std::unordered_set<std::string> rule_tags_set;
+        if (rule_tags.has_value()) {
+            rule_tags_set = std::unordered_set<std::string>(
+                rule_tags->begin(), rule_tags->end());
+        }
+
+        // Check if rule tags overlap with field context tags (empty
+        // rule_tags means apply to all)
+        bool should_apply =
+            !rule_tags.has_value() || rule_tags_set.empty();
+        if (!should_apply) {
+            const auto& field_tags = field_ctx->getTags();
+            for (const auto& field_tag : field_tags) {
+                if (rule_tags_set.find(field_tag) !=
+                    rule_tags_set.end()) {
+                    should_apply = true;
+                    break;
+                }
+            }
+        }
+
+        if (should_apply) {
+            // Create a SerdeValue from the current ProtobufVariant
+            auto message_value = makeProtobufValue(message);
+
+            // Get field executor type from the rule
+            auto field_executor_type =
+                ctx.getRule().getType().value_or("");
+
+            // Try to get executor from context's rule registry first,
+            // then global
+            std::shared_ptr<RuleExecutor> executor;
+            if (ctx.getRuleRegistry()) {
+                executor = ctx.getRuleRegistry()->getExecutor(
+                    field_executor_type);
+            }
+            if (!executor) {
+                executor = global_registry::getRuleExecutor(
+                    field_executor_type);
+            }
+
+            if (executor) {
+                auto field_executor =
+                    std::dynamic_pointer_cast<FieldRuleExecutor>(
+                        executor);
+                if (!field_executor) {
+                    throw ProtobufError(
+                        "executor " + field_executor_type +
+                        " is not a field rule executor");
+                }
+
+                auto new_value =
+                    field_executor->transformField(ctx, *message_value);
+                if (new_value &&
+                    new_value->getFormat() == SerdeFormat::Protobuf) {
+                    return asProtobuf(*new_value);
+                }
+            }
+        }
+    }
+    return message;
 }
 
 ProtobufVariant transformRecursive(
@@ -122,6 +211,14 @@ ProtobufVariant transformRecursive(
                 return message;  // Return original if null
             }
 
+            // A decimal or a timestamp is a single value to a rule, not a record to
+            // descend into. Without this the walk reached value/scale and seconds/nanos
+            // one at a time, so a rule tagged for the field never fired and the message
+            // came back unchanged with no error. Ported from the JVM client's #4538.
+            if (isCelLeafMessage(msg_ptr->GetDescriptor())) {
+                return transformLeafValue(ctx, message);
+            }
+
             auto result =
                 std::unique_ptr<google::protobuf::Message>(msg_ptr->New());
             result->CopyFrom(*msg_ptr);
@@ -149,71 +246,8 @@ ProtobufVariant transformRecursive(
         }
         default: {
             // Handle primitive types (Bool, I32, I64, U32, U64, F32, F64,
-            // String, Bytes, EnumNumber) Field-level transformation logic
-            auto field_ctx = ctx.currentField();
-            if (field_ctx.has_value()) {
-                auto rule_tags = ctx.getRule().getTags();
-                std::unordered_set<std::string> rule_tags_set;
-                if (rule_tags.has_value()) {
-                    rule_tags_set = std::unordered_set<std::string>(
-                        rule_tags->begin(), rule_tags->end());
-                }
-
-                // Check if rule tags overlap with field context tags (empty
-                // rule_tags means apply to all)
-                bool should_apply =
-                    !rule_tags.has_value() || rule_tags_set.empty();
-                if (!should_apply) {
-                    const auto& field_tags = field_ctx->getTags();
-                    for (const auto& field_tag : field_tags) {
-                        if (rule_tags_set.find(field_tag) !=
-                            rule_tags_set.end()) {
-                            should_apply = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (should_apply) {
-                    // Create a SerdeValue from the current ProtobufVariant
-                    auto message_value = makeProtobufValue(message);
-
-                    // Get field executor type from the rule
-                    auto field_executor_type =
-                        ctx.getRule().getType().value_or("");
-
-                    // Try to get executor from context's rule registry first,
-                    // then global
-                    std::shared_ptr<RuleExecutor> executor;
-                    if (ctx.getRuleRegistry()) {
-                        executor = ctx.getRuleRegistry()->getExecutor(
-                            field_executor_type);
-                    }
-                    if (!executor) {
-                        executor = global_registry::getRuleExecutor(
-                            field_executor_type);
-                    }
-
-                    if (executor) {
-                        auto field_executor =
-                            std::dynamic_pointer_cast<FieldRuleExecutor>(
-                                executor);
-                        if (!field_executor) {
-                            throw ProtobufError(
-                                "executor " + field_executor_type +
-                                " is not a field rule executor");
-                        }
-
-                        auto new_value =
-                            field_executor->transformField(ctx, *message_value);
-                        if (new_value &&
-                            new_value->getFormat() == SerdeFormat::Protobuf) {
-                            return asProtobuf(*new_value);
-                        }
-                    }
-                }
-            }
-            return message;
+            // String, Bytes, EnumNumber).
+            return transformLeafValue(ctx, message);
         }
     }
 }
@@ -228,7 +262,8 @@ std::optional<ProtobufVariant> transformFieldWithContext(
     auto temp_serde_value =
         protobuf::makeProtobufValue(ProtobufVariant(std::move(temp_message)));
 
-    ctx.enterField(*temp_serde_value, fd->full_name(), fd->name(),
+    ctx.enterField(*temp_serde_value, std::string(fd->full_name()),
+                   std::string(fd->name()),
                    getFieldType(fd), getInlineTags(fd));
 
     // Skip-on-null, as in the validation walk: a field with explicit presence that is
@@ -262,9 +297,16 @@ std::optional<ProtobufVariant> transformFieldWithContext(
                 bool condition_result = new_value.get<bool>();
                 if (!condition_result) {
                     throw ProtobufError("Rule condition failed for field: " +
-                                        fd->name());
+                                        std::string(fd->name()));
                 }
             }
+            ctx.exitField();
+            // A condition's result is a verdict on the value, not a replacement for it.
+            // Returning it would have the caller write the bool onto the field, which
+            // aborts for any field that is not a bool. This never showed before because a
+            // protobuf CEL_FIELD condition never actually fired: every value type was a
+            // message the walk descended past.
+            return std::nullopt;
         }
 
         ctx.exitField();
@@ -417,10 +459,93 @@ ProtobufVariant getMessageFieldValue(
 }
 
 // Helper function to set field value in protobuf message
+/// Whether `value` can be written into `fd` through reflection.
+///
+/// protobuf's reflection setters CHECK the field's type and *abort the process* on a
+/// mismatch, so this has to be settled before the call. The JVM gets a reported failure for
+/// free - setField raises ClassCastException - and its setTransformedField turns the
+/// value-type case into a named rule error rather than that bare cast failure, deliberately
+/// for "a broad untagged masking or redaction rule reaching one of these fields". So the
+/// shortcut above stays ungated, as it is on the JVM, and the mismatch it can produce is
+/// reported here instead.
+///
+/// A confluent.type.Decimal field is what made this visible: the walk hands such a field to
+/// the rule whole rather than descending into value/scale, so any field executor that answers
+/// with a scalar - a mask, a redaction, ENCRYPT - hands back bytes for a message-typed field.
+///
+/// `string` and `bytes` share CPPTYPE_STRING and both go through SetString, so either variant
+/// is accepted for either: that is what the existing walk does, and narrowing it would break
+/// an encryption rule on a string field.
+bool acceptsVariant(const google::protobuf::FieldDescriptor* fd,
+                    const ProtobufVariant& value) {
+    using VT = ProtobufVariant::ValueType;
+    if (value.type == VT::Map) {
+        return fd->is_map();
+    }
+    if (value.type == VT::List) {
+        // A map field answers is_repeated() too, and that is deliberate: this walk hands a
+        // map field back as a *list of its synthetic entry messages*, which the list path
+        // then adds one at a time. Excluding maps here breaks the ordinary map write-back
+        // (ValidationRuleTest.ProtobufFieldTransformLeavesMapKeysAlone catches it). What the
+        // list path needed was not a narrower guard but a per-element descriptor check,
+        // which it now has - an item that is not the entry message is reported rather than
+        // reaching CopyFrom's CHECK.
+        return fd->is_repeated();
+    }
+    if (fd->is_repeated()) {
+        return false;
+    }
+    switch (fd->cpp_type()) {
+        case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
+            return value.type == VT::Bool;
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
+            return value.type == VT::I32;
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
+            return value.type == VT::I64;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
+            return value.type == VT::U32;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
+            return value.type == VT::U64;
+        case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT:
+            return value.type == VT::F32;
+        case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
+            return value.type == VT::F64;
+        case google::protobuf::FieldDescriptor::CPPTYPE_ENUM:
+            return value.type == VT::EnumNumber;
+        case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
+            return value.type == VT::String || value.type == VT::Bytes;
+        case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE: {
+            // The *descriptor*, not just the kind. CopyFrom ABSL_CHECKs on a mismatch and
+            // aborts, which is the failure this whole function exists to prevent - and it is
+            // reachable, because the two CEL leaf messages are the message-typed fields a
+            // field executor does fire on: a Decimal handed to a google.protobuf.Timestamp
+            // field aborted the process, and so did a Timestamp handed to a Decimal field.
+            if (value.type != VT::Message) {
+                return false;
+            }
+            const auto& nested =
+                std::get<std::unique_ptr<google::protobuf::Message>>(value.value);
+            return nested == nullptr ||
+                   nested->GetDescriptor() == fd->message_type();
+        }
+        default:
+            return false;
+    }
+}
+
 void setMessageField(google::protobuf::Message* message,
                      const google::protobuf::FieldDescriptor* fd,
                      const ProtobufVariant& value) {
     const google::protobuf::Reflection* reflection = message->GetReflection();
+
+    if (!acceptsVariant(fd, value)) {
+        throw std::runtime_error(
+            "a rule returned a value that field " + std::string(fd->full_name()) +
+            " cannot hold; it is a " +
+            (fd->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE
+                 ? std::string(fd->message_type()->full_name())
+                 : std::string(fd->type_name())));
+    }
 
     switch (value.type) {
         case ProtobufVariant::ValueType::Bool: {
@@ -571,6 +696,16 @@ void setMessageField(google::protobuf::Message* message,
                                 std::unique_ptr<google::protobuf::Message>>(
                                 item.value);
                             if (msg_ptr) {
+                                // Per element, for the reason given in acceptsVariant: the
+                                // top-level guard sees the list, not its items.
+                                if (msg_ptr->GetDescriptor() != fd->message_type()) {
+                                    throw std::runtime_error(
+                                        "a rule returned " +
+                                        std::string(msg_ptr->GetDescriptor()->full_name()) +
+                                        " for an element of repeated field " +
+                                        std::string(fd->full_name()) + ", which holds " +
+                                        std::string(fd->message_type()->full_name()));
+                                }
                                 google::protobuf::Message* added_msg =
                                     reflection->AddMessage(message, fd);
                                 added_msg->CopyFrom(*msg_ptr);
@@ -697,6 +832,19 @@ void setMessageField(google::protobuf::Message* message,
                             std::unique_ptr<google::protobuf::Message>>(
                             map_value.value);
                         if (msg_ptr) {
+                            // Per value, for the reason given in acceptsVariant.
+                            if (msg_ptr->GetDescriptor() !=
+                                value_field->message_type()) {
+                                throw std::runtime_error(
+                                    "a rule returned " +
+                                    std::string(
+                                        msg_ptr->GetDescriptor()->full_name()) +
+                                    " for a value of map field " +
+                                    std::string(fd->full_name()) +
+                                    ", which holds " +
+                                    std::string(value_field->message_type()
+                                                    ->full_name()));
+                            }
                             google::protobuf::Message* mutable_value_msg =
                                 entry_reflection->MutableMessage(entry_msg,
                                                                  value_field);
@@ -890,6 +1038,13 @@ FieldType getFieldType(const google::protobuf::FieldDescriptor* field_desc) {
         case google::protobuf::FieldDescriptor::TYPE_ENUM:
             return FieldType::Enum;
         case google::protobuf::FieldDescriptor::TYPE_MESSAGE:
+            // Report the same primitive type the Avro counterpart does, so that CEL_FIELD
+            // applies to the field and a rule written against one format ports to the other.
+            if (isCelLeafMessage(field_desc->message_type())) {
+                return field_desc->message_type()->full_name() == kCelDecimalTypeName
+                           ? FieldType::Bytes
+                           : FieldType::Long;
+            }
             return FieldType::Record;
         default:
             return FieldType::String;  // Default fallback
