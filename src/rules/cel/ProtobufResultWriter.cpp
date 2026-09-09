@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <map>
 #include <string>
 
 #include "absl/status/statusor.h"
@@ -501,6 +502,33 @@ void fillFromCelMap(google::protobuf::Message *out,
         return;
     }
     const auto *keys_list = map_keys.value();
+    // Two entries can name one slot, and applying both left the outcome to whatever order the
+    // runtime iterated in - which for cel-cpp is its own map ordering, not the order the rule
+    // was written in: `{'a': 1, 'b': 2}` and `{'b': 2, 'a': 1}` both kept `b`. JsonFormat
+    // refuses both shapes, and their null handling is *opposite*:
+    //
+    //   * the same field twice - findResultField accepts a field's declared name and its JSON
+    //     name, so total_amount and totalAmount are one field. mergeField refuses it with
+    //     "Field p.M.total_amount has already been set.";
+    //   * two members of one oneof - mergeOneofField refuses it ("Cannot set field p.M.b
+    //     because another field p.M.a belonging to the same oneof has already been set"), but
+    //     only after returning early for a null, so a null does *not* count - which agrees
+    //     with this writer's own rule that a null clears rather than sets.
+    //
+    // Measured against protobuf-java 4.35.1. A proto3 `optional` field sits in a synthetic
+    // oneof of exactly one member, which real_containing_oneof() reports as none, so it can
+    // never collide with a sibling.
+    //
+    // One deliberate strengthening. The JVM's duplicate test is `builder.hasField`, so *there*
+    // a null counts only when it follows a value: `{ta: 1, totalAmount: null}` is refused and
+    // `{ta: null, totalAmount: 1}` is accepted. That rule cannot be reproduced here, because
+    // cel-cpp's map iteration is not the order the rule was written in and is not even stable
+    // between runs - the same expression was measured rejecting twice and accepting once. So a
+    // field named twice is refused whichever entry carries the null, which costs two
+    // pathological cases the JVM would accept and buys a verdict that does not vary per run.
+    // The oneof check needs no such note: two non-null members collide in either order.
+    std::map<int, std::string> set_by;
+    std::map<std::string, std::string> oneof_by;
     for (int i = 0; i < keys_list->size(); ++i) {
         auto key_val = keys_list->Get(nullptr, i);
         if (key_val.IsError()) {
@@ -529,16 +557,45 @@ void fillFromCelMap(google::protobuf::Message *out,
             throw std::runtime_error("cannot find field " + key_name + " in message " +
                                      std::string(desc->full_name()));
         }
+        // Before the value is read, and recorded below whether or not it turns out to be
+        // null - see the note above on why this is order-independent here.
+        const auto already = set_by.find(fd->number());
+        if (already != set_by.end()) {
+            const std::string &first = already->second;
+            const bool in_order = first <= key_name;
+            throw std::runtime_error(
+                "result names field " + std::string(fd->full_name()) + " twice, as " +
+                (in_order ? first : key_name) + " and " + (in_order ? key_name : first));
+        }
         auto lookup = cel_map->Get(nullptr, key_val);
         if (!lookup.has_value()) {
-            continue;
+            // A key the map listed but cannot resolve. Skipping it deleted the field it named
+            // and reported success, the same way an unknown key did.
+            throw std::runtime_error("the CEL result has no value for field " + key_name +
+                                     " of " + std::string(desc->full_name()));
         }
+        set_by.emplace(fd->number(), key_name);
         const auto &value = lookup.value();
         if (value.IsNull()) {
             // An explicit null clears the field, which is how a rule preserves an absent
-            // value across a transform that echoes it.
+            // value across a transform that echoes it. It sets nothing, so it does not count
+            // towards a oneof collision - which is the JVM's rule and needs no strengthening,
+            // being order-independent already.
             out->GetReflection()->ClearField(out, fd);
             continue;
+        }
+        if (const auto *oneof = fd->real_containing_oneof()) {
+            const std::string oneof_name(oneof->full_name());
+            const auto sibling = oneof_by.find(oneof_name);
+            if (sibling != oneof_by.end() && sibling->second != fd->name()) {
+                const std::string mine(fd->name());
+                const bool in_order = sibling->second <= mine;
+                throw std::runtime_error(
+                    "result sets more than one member of oneof " + oneof_name + ": " +
+                    (in_order ? sibling->second : mine) + " and " +
+                    (in_order ? mine : sibling->second));
+            }
+            oneof_by.emplace(oneof_name, std::string(fd->name()));
         }
         // A map answers true to is_repeated() as well, so it has to be tested first.
         if (fd->is_map()) {

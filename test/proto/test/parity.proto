@@ -102,3 +102,15 @@ message ScalarKinds {
   double dbl = 7;
   float flt = 8;
 }
+
+// A two-member oneof plus a snake_case field, for the result-key exclusivity checks. Two
+// entries can name one slot either way: two members of a oneof, or one field under both its
+// declared and its JSON name.
+message OneofChoice {
+  oneof choice {
+    int32 a = 1;
+    int32 b = 2;
+  }
+  int32 total_amount = 3;
+  string label = 4;
+}

@@ -293,3 +293,97 @@ TEST(CelProtobufContainerWriteBack, AResultKeyThatNamesNoFieldIsRejected) {
     EXPECT_EQ(ok.amounts_size(), 2);
     EXPECT_EQ(ok.label(), "hi");
 }
+
+// ---- two result entries cannot name one slot -------------------------------------------------
+
+namespace {
+
+/// Runs one message-level CEL transform over the oneof fixture and returns the rebuilt
+/// message. Separate from `transform` above because it needs its own message type.
+parity::OneofChoice transformChoice(const std::string &expr) {
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+
+    SerializationContext serCtx{"t", SerdeType::Value, SerdeFormat::Protobuf, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelExecutor>());
+    RuleContext ctx(std::nullopt, serCtx, std::nullopt, std::nullopt, "t-value", Mode::Write,
+                    rule, 0, rules,
+                    std::unordered_map<std::string, std::unordered_set<std::string>>{},
+                    nullptr, registry);
+
+    auto msg = std::make_unique<parity::OneofChoice>();
+    msg->set_a(1);
+    msg->set_label("hi");
+    CelExecutor exec;
+    auto input = makeProtobufValue(ProtobufVariant(std::move(msg)));
+    auto result = exec.transform(ctx, *input);
+    auto &pv = asProtobuf(*result);
+    parity::OneofChoice out;
+    out.CopyFrom(*std::get<std::unique_ptr<google::protobuf::Message>>(pv.value));
+    return out;
+}
+
+}  // namespace
+
+/// Two non-null members of one oneof. Setting the second cleared the first, so the result was
+/// whichever the runtime happened to visit last - and cel-cpp iterates its own map order, not
+/// the order the rule was written in: `{'a': 1, 'b': 2}` and `{'b': 2, 'a': 1}` both kept `b`.
+/// The JVM's mergeOneofField refuses it: "Cannot set field p.M.b because another field p.M.a
+/// belonging to the same oneof has already been set" (protobuf-java 4.35.1).
+TEST(CelProtobufContainerWriteBack, TwoMembersOfOneOneofAreRejected) {
+    EXPECT_THROW(transformChoice("{'a': 1, 'b': 2, 'label': 'hi'}"), std::exception);
+    EXPECT_THROW(transformChoice("{'b': 2, 'a': 1, 'label': 'hi'}"), std::exception);
+    EXPECT_THROW(transformChoice("{'a': 1, 'b': 2, 'total_amount': 3, 'label': 'hi'}"),
+                 std::exception);
+}
+
+/// A null sets nothing, so it does not collide with its sibling - the JVM's mergeOneofField
+/// returns early for a null, and this writer's own rule is that a null clears rather than sets.
+/// That half is order-independent, so it needs no strengthening.
+TEST(CelProtobufContainerWriteBack, ANullDoesNotCollideWithItsOneofSibling) {
+    parity::OneofChoice kept = transformChoice("{'a': 1, 'b': null, 'label': 'hi'}");
+    EXPECT_EQ(kept.choice_case(), parity::OneofChoice::kA);
+    EXPECT_EQ(kept.a(), 1);
+
+    parity::OneofChoice other = transformChoice("{'a': null, 'b': 2, 'label': 'hi'}");
+    EXPECT_EQ(other.choice_case(), parity::OneofChoice::kB);
+    EXPECT_EQ(other.b(), 2);
+
+    parity::OneofChoice neither = transformChoice("{'a': null, 'b': null, 'label': 'hi'}");
+    EXPECT_EQ(neither.choice_case(), parity::OneofChoice::CHOICE_NOT_SET);
+
+    // One member plus an unrelated field is fine, which is the ordinary case.
+    parity::OneofChoice ok = transformChoice("{'a': 1, 'total_amount': 3, 'label': 'hi'}");
+    EXPECT_EQ(ok.a(), 1);
+    EXPECT_EQ(ok.total_amount(), 3);
+}
+
+/// One field named twice, under its declared name and its JSON name - `findResultField`
+/// accepts either, so these are one field and applying both kept whichever came last.
+///
+/// Refused whichever entry carries the null, which is stricter than the JVM in two
+/// pathological cases: its test is `builder.hasField`, so a null counts there only when it
+/// *follows* a value. That rule is not reproducible here - cel-cpp's map iteration is not the
+/// order the rule was written in and is not stable between runs, so the same expression was
+/// measured rejecting twice and accepting once. A verdict that does not vary per run is worth
+/// two cases that name one field twice and would have been accepted.
+TEST(CelProtobufContainerWriteBack, NamingOneFieldTwiceIsRejected) {
+    EXPECT_THROW(transformChoice("{'total_amount': 1, 'totalAmount': 2, 'label': 'hi'}"),
+                 std::exception);
+    EXPECT_THROW(transformChoice("{'total_amount': 1, 'totalAmount': null, 'label': 'hi'}"),
+                 std::exception);
+    EXPECT_THROW(transformChoice("{'totalAmount': null, 'total_amount': 1, 'label': 'hi'}"),
+                 std::exception);
+    EXPECT_THROW(transformChoice("{'total_amount': null, 'totalAmount': null, 'label': 'hi'}"),
+                 std::exception);
+
+    // The must-fail twin: either spelling on its own still reaches the field.
+    EXPECT_EQ(transformChoice("{'total_amount': 3, 'label': 'hi'}").total_amount(), 3);
+    EXPECT_EQ(transformChoice("{'totalAmount': 4, 'label': 'hi'}").total_amount(), 4);
+}
