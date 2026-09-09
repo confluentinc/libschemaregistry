@@ -393,9 +393,19 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
     if (!s.ok()) return s;
 
     // Rounding: decimals.round/trunc (unary + scale), floor/ceil already done.
+    //
+    // No precision cap, because BigDecimal.setScale takes no MathContext: the JVM's
+    // round/trunc/floor/ceil rescale and never shorten the coefficient. That matters now that
+    // the coefficient is arbitrary-width - `decimals.add` on two operands at CEL's own
+    // 38-digit precision already yields 39 digits, and `decimals.mul` 76.
+    //
+    // The `prec(38)` this used to carry was inert rather than wrong: mpd_qrescale "ignores
+    // precision, emax, emin, but uses the rounding mode" (mpdecimal's own comment on
+    // _mpd_qrescale), so the rounding mode was the only thing ever read from this context.
+    // Built from MaxContext so the code says that, and so a later switch to quantize - which
+    // *does* observe prec - cannot start capping silently.
     auto roundTo = [](const decimal::Decimal& d, int32_t scale, int round) {
-        decimal::Context c;
-        c.prec(38);
+        decimal::Context c = decimal::MaxContext();
         c.round(round);
         return d.rescale(-static_cast<int64_t>(scale), c);
     };

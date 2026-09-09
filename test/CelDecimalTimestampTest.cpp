@@ -646,6 +646,64 @@ TEST(CelDecimalTimestampTest, AWideCoefficientRoundTripsAtAnyWidth) {
         "\"3402823669209384634633746074317682114.55\""));
 }
 
+// The rounding family must not cap total precision: BigDecimal.setScale takes no MathContext,
+// so the JVM's round/trunc/floor/ceil rescale and never shorten the coefficient. That became
+// load-bearing once the coefficient stopped being capped at 128 bits - `decimals.add` on two
+// operands at CEL's own 38-digit precision already yields 39 digits and `decimals.mul` yields
+// 76, so wide values now reach these functions routinely.
+//
+// They are correct today for a reason that is easy to lose: mpd_qrescale "ignores precision,
+// emax, emin, but uses the rounding mode" (mpdecimal's own comment on _mpd_qrescale), and
+// mpd_qfloor/mpd_qceil likewise. So the 38-digit context these were handed never capped
+// anything. `quantize` *does* observe prec - it is why the Python client's own rescale needs
+// an unbounded context - so a switch to it, or a genuinely bounded context here, would start
+// truncating silently. These cases are what would catch that.
+TEST(CelDecimalTimestampTest, TheRoundingFamilyDoesNotCapPrecision) {
+    const std::string n38 = "99999999999999999999999999999999999999";           // 38 digits
+    const std::string sum = "199999999999999999999999999999999999998";          // 39
+    const std::string product =
+        "9999999999999999999999999999999999999800000000000000000000000000000000000001";  // 76
+    const std::string mul = "decimals.mul(decimal(\"" + n38 + "\"), decimal(\"" + n38 + "\"))";
+    const std::string add = "decimals.add(decimal(\"" + n38 + "\"), decimal(\"" + n38 + "\"))";
+
+    // The operands that make the rest reachable at all.
+    EXPECT_TRUE(evalBool("string(" + add + ") == \"" + sum + "\""));
+    EXPECT_TRUE(evalBool("string(" + mul + ") == \"" + product + "\""));
+
+    // A no-op rescale of a wide value.
+    EXPECT_TRUE(evalBool("string(decimals.round(" + add + ", 0)) == \"" + sum + "\""));
+    EXPECT_TRUE(evalBool("string(decimals.round(" + mul + ", 0)) == \"" + product + "\""));
+    EXPECT_TRUE(evalBool("string(decimals.trunc(" + mul + ", 0)) == \"" + product + "\""));
+    EXPECT_TRUE(evalBool("string(decimals.floor(" + mul + ")) == \"" + product + "\""));
+    EXPECT_TRUE(evalBool("string(decimals.ceil(" + mul + ")) == \"" + product + "\""));
+
+    // Rescaling to a *finer* scale, which grows the coefficient past 38 digits: setScale(5)
+    // zero-pads on the JVM, giving 43 digits, and round(mul, 2) gives 78.
+    EXPECT_TRUE(evalBool("string(decimals.round(decimal(\"" + n38 + "\"), 1)) == \"" +
+                         n38 + ".0\""));
+    EXPECT_TRUE(evalBool("string(decimals.round(decimal(\"" + n38 + "\"), 5)) == \"" +
+                         n38 + ".00000\""));
+    EXPECT_TRUE(evalBool("string(decimals.round(" + mul + ", 2)) == \"" + product + ".00\""));
+
+    // Rounding a wide value that actually has a fraction to drop, which is the only shape
+    // that makes floor/ceil rescale rather than short-circuit.
+    EXPECT_TRUE(evalBool("string(decimals.round(decimal(\"" + sum + ".5\"), 0)) == "
+                         "\"199999999999999999999999999999999999999\""));
+    EXPECT_TRUE(evalBool("string(decimals.floor(decimal(\"" + sum + ".5\"))) == \"" +
+                         sum + "\""));
+    EXPECT_TRUE(evalBool("string(decimals.ceil(decimal(\"" + sum + ".5\"))) == "
+                         "\"199999999999999999999999999999999999999\""));
+    EXPECT_TRUE(evalBool("string(decimals.trunc(decimal(\"" + sum + ".5\"))) == \"" +
+                         sum + "\""));
+    EXPECT_TRUE(evalBool("string(decimals.floor(decimal(\"" + product + ".5\"))) == \"" +
+                         product + "\""));
+
+    // Flink's TRUNCATE early-return still holds at these widths: a target scale at or finer
+    // than the input's is a no-op, so no zero-padding.
+    EXPECT_TRUE(evalBool("string(decimals.trunc(decimal(\"" + n38 + "\"), 5)) == \"" +
+                         n38 + "\""));
+}
+
 // confluent.type.Decimal.scale is a signed int32, and the scale is the negated exponent, so a
 // wide exponent wrapped it: 1e-2147483648 needs scale 2147483648, which wrapped to -2147483648
 // and turned a vanishingly small number into an enormous one (it compared >= 1). The accepted
