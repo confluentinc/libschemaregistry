@@ -27,11 +27,21 @@ namespace schemaregistry::rules::cel {
 
 // 38 significant digits, HALF_UP — matches Java's MathContext(38, HALF_UP) and the other
 // clients, and reproduces CPython's decimal results exactly (libmpdec is the same engine).
+//
+// Emax/Emin are widened alongside, exactly as the Python client's _DIV_CONTEXT does. A
+// default-constructed Context carries Emax 999999, which is far narrower than the exponent
+// range the constructor accepts (the int32 scale of confluent.type.Decimal), so dividing a
+// legitimately constructed value overflowed here where Java and Python both return a result:
+// `decimals.div(decimal("1e1000000"), decimal("1"))` was `[Overflow]`. Only the precision is
+// part of the cross-client contract; the exponent range is each library's own, and clamping
+// it below what this client's own constructor accepts made the two disagree.
 decimal::Context &DecimalUtil::context() {
     static thread_local decimal::Context ctx = [] {
         decimal::Context c;
         c.prec(38);
         c.round(decimal::ROUND_HALF_UP);
+        c.emax(MPD_MAX_EMAX);
+        c.emin(MPD_MIN_EMIN);
         return c;
     }();
     return ctx;
@@ -166,84 +176,6 @@ std::string coefficientDigits(const decimal::Decimal &d) {
 
 }  // namespace
 
-void DecimalUtil::bytesToMagnitude(const std::string &bytes, uint8_t &sign, uint64_t &hi,
-                                   uint64_t &lo) {
-    const bool negative =
-        !bytes.empty() && (static_cast<uint8_t>(bytes[0]) & 0x80) != 0;
-
-    // Right-align the bytes into a sign-extended 16-byte big-endian buffer.
-    uint8_t buf[16];
-    std::memset(buf, negative ? 0xFF : 0x00, sizeof(buf));
-    const size_t len = bytes.size();
-    if (len <= sizeof(buf)) {
-        const size_t off = sizeof(buf) - len;
-        for (size_t i = 0; i < len; ++i) {
-            buf[off + i] = static_cast<uint8_t>(bytes[i]);
-        }
-    } else {
-        // The coefficient is carried in a 128-bit triple (hi/lo), so anything wider than
-        // 16 bytes (> ~38 digits) cannot be represented. Fail fast rather than silently
-        // truncate to a wrong value.
-        throw std::out_of_range(
-            "decimal coefficient exceeds 128 bits (max 16 bytes) and cannot be represented");
-    }
-
-    uint64_t h = 0;
-    uint64_t l = 0;
-    for (int i = 0; i < 8; ++i) {
-        h = (h << 8) | buf[i];
-    }
-    for (int i = 8; i < 16; ++i) {
-        l = (l << 8) | buf[i];
-    }
-
-    if (negative) {
-        // magnitude = -(two's-complement value) = ~value + 1
-        l = ~l;
-        h = ~h;
-        if (++l == 0) {
-            ++h;
-        }
-        sign = 1;
-    } else {
-        sign = 0;
-    }
-    hi = h;
-    lo = l;
-}
-
-std::string DecimalUtil::magnitudeToBytes(uint8_t sign, uint64_t hi, uint64_t lo) {
-    uint64_t h = hi;
-    uint64_t l = lo;
-    if (sign) {
-        // Negative representation = two's complement of the magnitude.
-        l = ~l;
-        h = ~h;
-        if (++l == 0) {
-            ++h;
-        }
-    }
-
-    uint8_t buf[16];
-    for (int i = 7; i >= 0; --i) {
-        buf[i] = static_cast<uint8_t>(h & 0xFF);
-        h >>= 8;
-    }
-    for (int i = 15; i >= 8; --i) {
-        buf[i] = static_cast<uint8_t>(l & 0xFF);
-        l >>= 8;
-    }
-
-    // Strip redundant leading pad bytes while the sign bit is preserved.
-    const uint8_t pad = sign ? 0xFF : 0x00;
-    const uint8_t signBit = sign ? 0x80 : 0x00;
-    size_t start = 0;
-    while (start < 15 && buf[start] == pad && (buf[start + 1] & 0x80) == signBit) {
-        ++start;
-    }
-    return std::string(reinterpret_cast<char *>(buf + start), sizeof(buf) - start);
-}
-
 decimal::Decimal DecimalUtil::fromUnscaledBytes(const std::string &unscaled, int32_t scale) {
     // Through the digits as well, so both directions take the same widths: reading was capped
     // at 16 bytes, which would have refused what the JVM routinely writes.
@@ -252,6 +184,47 @@ decimal::Decimal DecimalUtil::fromUnscaledBytes(const std::string &unscaled, int
     twosComplementToDigits(unscaled, negative, digits);
     decimal::Decimal value((negative ? "-" : "") + digits);
     return value.scaleb(decimal::Decimal(-static_cast<int64_t>(scale)), exactContext());
+}
+
+int64_t DecimalUtil::rescaledDigits(int64_t target_scale, const decimal::Decimal &d) {
+    if (!d.isfinite()) {
+        throw std::runtime_error("cannot measure a non-finite decimal");
+    }
+    const int64_t exponent = d.exponent();
+    const int64_t digits = d.adjexp() - exponent + 1;
+    return std::max<int64_t>(1, digits + target_scale + exponent);
+}
+
+int64_t DecimalUtil::plainFormLength(const decimal::Decimal &d) {
+    if (!d.isfinite()) {
+        throw std::runtime_error("cannot measure a non-finite decimal");
+    }
+    const int64_t exponent = d.exponent();
+    const int64_t digits = d.adjexp() - exponent + 1;
+    return digits + (exponent < 0 ? -exponent : exponent);
+}
+
+void DecimalUtil::requireSaneWidth(int64_t needed, const std::string &fn,
+                                   const std::string &what, int64_t limit) {
+    if (needed > limit) {
+        throw std::out_of_range(fn + ": " + what + " needs " + std::to_string(needed) +
+                                " digits, past this client's " + std::to_string(limit) +
+                                "-digit limit");
+    }
+}
+
+void DecimalUtil::requireAlignable(const decimal::Decimal &a, const decimal::Decimal &b,
+                                   const std::string &fn) {
+    // Addition and subtraction expand the narrower operand into the wider one's frame before
+    // computing a single digit, so the frame carries the smaller exponent and spans both
+    // magnitudes. No exemption for a zero operand: aligning a zero at an extreme scale with
+    // 1 still expands the *one* into the zero's scale.
+    if (!a.isfinite() || !b.isfinite()) {
+        throw std::runtime_error("cannot measure a non-finite decimal");
+    }
+    const int64_t exponent = std::min(a.exponent(), b.exponent());
+    const int64_t adjusted = std::max(a.adjexp(), b.adjexp()) + 1;
+    requireSaneWidth(adjusted - exponent + 1, fn, "aligning the operands");
 }
 
 decimal::Decimal DecimalUtil::fromProto(const confluent::type::Decimal &d) {
@@ -280,8 +253,25 @@ confluent::type::Decimal DecimalUtil::toProto(const decimal::Decimal &d) {
     // mpd_uint128_triple_t and refuse anything past signed 128 bits, so `decimals.add` on two
     // values at CEL's own documented 38-digit precision was an error here and ordinary there.
     confluent::type::Decimal out;
-    out.set_value(digitsToTwosComplement(coefficientDigits(d),
-                                         !d.iszero() && d.issigned()));
+    const std::string digits = coefficientDigits(d);
+    // The coefficient goes out in base 256, and this codec's radix conversion is quadratic:
+    // 0.04 s at 10^4 digits, 4.2 s at 10^5, ~420 s at 10^6. Nothing upstream bounded it, so a
+    // rule as ordinary as `decimals.round(x, 1000000)` did not fail - it ground. That is the
+    // resource this ceiling protects, and it is time rather than memory, so it is a separate
+    // and much lower number than kSaneWidth. Checked from the digit string's length, before
+    // the conversion runs.
+    DecimalUtil::requireSaneWidth(static_cast<int64_t>(digits.size()),
+                                  "confluent.type.Decimal", "the coefficient",
+                                  kSaneCoefficient);
+    out.set_value(digitsToTwosComplement(digits, !d.iszero() && d.issigned()));
+    // The unscaled value's digit count, which is what BigDecimal.precision() reports. This
+    // client set it nowhere, so every decimal it produced carried 0 - a value the reference
+    // cannot produce, since precision() is never less than 1 (zero's precision is 1) - and a
+    // JVM consumer rewrites such a message on its next touch. Every decimal that reaches the
+    // wire from here originates in this function, so this one line covers the serde and the
+    // CEL write-back alike. Taken from the digit string that was just encoded, so a rescale
+    // upstream cannot leave it stale.
+    out.set_precision(static_cast<uint32_t>(digits.size()));
     out.set_scale(static_cast<int32_t>(-exponent));
     return out;
 }

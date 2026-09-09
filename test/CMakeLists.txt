@@ -80,6 +80,9 @@ if(SCHEMAREGISTRY_WITH_RULES)
     target_link_libraries(schemaregistry-test
         PRIVATE
             tink::static
+            # mpdecimal, so a test can call DecimalUtil directly: its internal header
+            # includes decimal.hh, which is otherwise only on the library's own include path.
+            $<BUILD_INTERFACE:mpdecxx::mpdecxx>
     )
 endif()
 

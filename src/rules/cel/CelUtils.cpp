@@ -176,8 +176,12 @@ google::api::expr::runtime::CelValue fromAvroValue(
                     : avro.value<std::vector<uint8_t>>();
             auto *msg =
                 google::protobuf::Arena::Create<confluent::type::Decimal>(arena);
-            msg->set_value(std::string(bytes.begin(), bytes.end()));
-            msg->set_scale(avro.logicalType().scale());
+            // Through DecimalUtil so an Avro-sourced decimal is field-identical to the same
+            // number from `decimal("...")`: minimal coefficient bytes (a `fixed` decimal's
+            // sign padding stripped) and `precision` set to the digit count. Built by hand,
+            // it carried precision 0, and cel-cpp's builtin `in` compares fields.
+            *msg = DecimalUtil::toProto(DecimalUtil::fromUnscaledBytes(
+                std::string(bytes.begin(), bytes.end()), avro.logicalType().scale()));
             return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
                 msg, arena);
         }
@@ -441,6 +445,15 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
     decimal::Decimal value = DecimalUtil::fromProto(*decimal_msg);
     const int32_t target_scale = original.logicalType().scale();
     decimal::Context ctx = DecimalUtil::exactContext();
+    // The field's scale is small, but the rule's value need not be: a rule is free to return
+    // a decimal with an extreme exponent (div holds its coefficient to 38 digits and lets the
+    // exponent run), and rescaling that into the field's scale materialises the whole
+    // coefficient under a MaxContext. Zero is exempt - rescaling it never expands anything.
+    if (!value.iszero()) {
+        DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(target_scale, value),
+                                      "decimal field", "the field's scale of " +
+                                                           std::to_string(target_scale));
+    }
     decimal::Decimal rescaled = value.rescale(-target_scale, ctx);
     if (ctx.status() & (MPD_Inexact | MPD_Invalid_operation)) {
         throw std::runtime_error(

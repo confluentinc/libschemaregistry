@@ -243,8 +243,16 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
     // decimal(bytes, int)
     s = reg(registry, "decimal", false, {T::kBytes, T::kInt64},
             [](absl::Span<const cel::CelValue> args, cel::CelValue* out, Arena* arena) {
+                // The scale costs nothing here - it only sets the exponent, and the width
+                // guard fires later where the digits are needed. The coefficient is the risk
+                // on this path, and it is checked from the byte count before the digits are
+                // built: one byte carries about 2.41 decimal digits.
+                const absl::string_view raw = args[0].BytesOrDie().value();
+                DecimalUtil::requireSaneWidth(
+                    static_cast<int64_t>(raw.size() * 241 / 100) + 1, "decimal(bytes, scale)",
+                    "the coefficient", DecimalUtil::kSaneCoefficient);
                 auto d = DecimalUtil::fromUnscaledBytes(
-                    std::string(args[0].BytesOrDie().value()),
+                    std::string(raw),
                     requireIntScale(args[1].Int64OrDie(), "decimal(bytes, scale)"));
                 *out = wrapDecimal(d, arena);
                 return absl::OkStatus();
@@ -294,12 +302,26 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
     // add/sub/mul use the exact (unbounded-precision) context so results are not capped at
     // 38 digits — matching Java's exact BigDecimal add/subtract/multiply. div/sqrt below
     // deliberately keep the 38-digit context() (the shared cross-client contract).
-    if (s = bin("decimals.add", [](auto a, auto b, std::string*) { return a.add(b, DecimalUtil::exactContext()); });
+    // add/sub align their operands, so the aligned frame has to be built before a single digit
+    // is computed - measured in the sibling client, `add(1e2147483647, 3)` costs 1738 MB and
+    // `add(1e2147483647, 1e-2147483647)` 3125 MB, from one expression over two cheaply
+    // constructed operands. exactContext() is MaxContext(), so nothing below this bounds it.
+    if (s = bin("decimals.add",
+                [](auto a, auto b, std::string*) {
+                    DecimalUtil::requireAlignable(a, b, "decimals.add");
+                    return a.add(b, DecimalUtil::exactContext());
+                });
         !s.ok())
         return s;
-    if (s = bin("decimals.sub", [](auto a, auto b, std::string*) { return a.sub(b, DecimalUtil::exactContext()); });
+    if (s = bin("decimals.sub",
+                [](auto a, auto b, std::string*) {
+                    DecimalUtil::requireAlignable(a, b, "decimals.sub");
+                    return a.sub(b, DecimalUtil::exactContext());
+                });
         !s.ok())
         return s;
+    // mul is unguarded at any width: it adds the exponents and multiplies the coefficients,
+    // so the result is as compact as its operands. Measured at 13 MB where add costs 1738 MB.
     if (s = bin("decimals.mul", [](auto a, auto b, std::string*) { return a.mul(b, DecimalUtil::exactContext()); });
         !s.ok())
         return s;
@@ -324,6 +346,17 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                     // context() would trap (Division_impossible) when the integer quotient
                     // exceeds 38 digits, e.g. mod(1E40, 3), turning a valid result into a
                     // CEL error. exactContext() (MaxContext) computes the remainder exactly.
+                    //
+                    // Which is why the width has to be bounded here: the remainder itself is
+                    // small, but the *integral quotient* has to be produced to get there.
+                    // Not the aligned frame add/sub use - libmpdec short-circuits when the
+                    // dividend is the smaller operand or the magnitudes are close, so the
+                    // frame would refuse `1e-2147483647 mod 1e2147483647` (which is the
+                    // dividend itself) and `1e2147483647 mod 1e2147483000` (647 quotient
+                    // digits), both free and both accepted by the JVM.
+                    DecimalUtil::requireSaneWidth(
+                        std::max<int64_t>(0, a.adjexp() - b.adjexp()) + 1, "decimals.mod",
+                        "the integral quotient");
                     return a.rem(b, DecimalUtil::exactContext());
                 });
         !s.ok())
@@ -373,9 +406,28 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
         return s;
     if (s = un("decimals.abs", [](auto a, std::string*) { return a.copy_abs(); }); !s.ok())
         return s;
-    if (s = un("decimals.floor", [](auto a, std::string*) { return a.floor(DecimalUtil::context()); }); !s.ok())
+    // floor/ceil rescale to scale 0 without going through roundTo, so they carry the same
+    // bound. Reachable from a rule that names no scale at all: `floor(x)` on a value with a
+    // large negative exponent is a multi-GB allocation.
+    if (s = un("decimals.floor",
+               [](auto a, std::string*) {
+                   if (!a.iszero()) {
+                       DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(0, a),
+                                                     "decimals.floor", "rounding to an integer");
+                   }
+                   return a.floor(DecimalUtil::context());
+               });
+        !s.ok())
         return s;
-    if (s = un("decimals.ceil", [](auto a, std::string*) { return a.ceil(DecimalUtil::context()); }); !s.ok())
+    if (s = un("decimals.ceil",
+               [](auto a, std::string*) {
+                   if (!a.iszero()) {
+                       DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(0, a),
+                                                     "decimals.ceil", "rounding to an integer");
+                   }
+                   return a.ceil(DecimalUtil::context());
+               });
+        !s.ok())
         return s;
 
     // decimals.sign -> int (-1/0/1; sign() returns 1 for zero, so special-case)
@@ -404,7 +456,19 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
     // _mpd_qrescale), so the rounding mode was the only thing ever read from this context.
     // Built from MaxContext so the code says that, and so a later switch to quantize - which
     // *does* observe prec - cannot start capping silently.
+    //
+    // Every rescale in the family goes through this one lambda, the one-argument forms
+    // included, so the width bound below covers all five call sites. MaxContext() is what
+    // makes the bound necessary: libmpdec honours any int32 scale and materialises the whole
+    // coefficient, and a 2**31-digit rescale costs 918 MB. Zero is exempt - rescaling it
+    // never expands anything and its result stays compact, which BigDecimal agrees with
+    // (`new BigDecimal(BigInteger.ZERO, 2147483647)` is precision 1).
     auto roundTo = [](const decimal::Decimal& d, int32_t scale, int round) {
+        if (!d.iszero()) {
+            DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(scale, d),
+                                          "decimals.round",
+                                          "a scale of " + std::to_string(scale));
+        }
         decimal::Context c = decimal::MaxContext();
         c.round(round);
         return d.rescale(-static_cast<int64_t>(scale), c);
@@ -475,6 +539,15 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                     return absl::OkStatus();
                 }
                 auto d = decimalFromMessage(*args[0].MessageOrDie());
+                // `format("f")` writes every digit of the positional form, and that form can
+                // be enormous for a value that was cheap to compute: `div` holds its
+                // coefficient to 38 digits while its exponent runs free, so
+                // `decimals.div(decimal("1e-2147483647"), decimal("1e2147483647"))` costs
+                // nothing and renders as four billion characters. No zero shortcut here,
+                // unlike the rescale guard - a zero at an extreme scale renders as that many
+                // zeros.
+                DecimalUtil::requireSaneWidth(DecimalUtil::plainFormLength(d), "string",
+                                              "the plain form");
                 auto* str = Arena::Create<std::string>(arena, d.format("f"));
                 *out = cel::CelValue::CreateString(str);
                 return absl::OkStatus();
@@ -501,6 +574,9 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                 // leaves the value unspecified, so the limit is derived from the text: a
                 // magnitude with a nonzero integer part is too large (±Infinity), otherwise
                 // it is too small (±0.0). format("f") is plain (non-scientific) notation.
+                // Same bound as string(): this arm parses the plain form, so it builds it.
+                DecimalUtil::requireSaneWidth(DecimalUtil::plainFormLength(d), "double",
+                                              "the plain form");
                 const std::string text = d.format("f");
                 double val = 0.0;
                 const auto parsed =

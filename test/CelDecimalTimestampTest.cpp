@@ -30,12 +30,15 @@
 #include "confluent/type/decimal.pb.h"
 #include "google/protobuf/timestamp.pb.h"
 #include "schemaregistry/rules/cel/CelValidator.h"
+#include "schemaregistry/rules/cel/DecimalUtil.h"
 #include "schemaregistry/serdes/ValidationRule.h"
 #include "schemaregistry/serdes/json/JsonValue.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 
 using namespace schemaregistry::serdes;
 using schemaregistry::rules::cel::CelValidator;
+
+using schemaregistry::rules::cel::DecimalUtil;
 
 namespace {
 
@@ -343,6 +346,8 @@ TEST(CelDecimalTimestampTest, ContainerEqualityIsNumericForNestedDecimals) {
         auto dec = std::make_unique<confluent::type::Decimal>();
         dec->set_value(std::string("\x04\xd2", 2));
         dec->set_scale(2);
+        // 1234 is four digits; `in` below compares precision too, so it has to be set.
+        dec->set_precision(4);
         CelValidator validator;
         auto value =
             protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(dec)));
@@ -359,6 +364,11 @@ TEST(CelDecimalTimestampTest, ContainerEqualityIsNumericForNestedDecimals) {
     // `in` is NOT numeric here - cel-cpp's builtin @in cannot be taken over from the
     // registry (see registerEquality). Pinned as-is so the divergence from == is explicit,
     // and so this flips if membership is ever fixed.
+    //
+    // Note what that costs now that precision is written: `in` compares all three fields, so
+    // membership is sensitive to the producer's precision as well as its scale. Two encodings
+    // of one number differ under `in` for one more reason than before. `==` is unaffected -
+    // it goes through the numeric override above.
     EXPECT_FALSE(ev(R"(this in [decimal("12.340")])"));
     EXPECT_TRUE(ev(R"(this in [decimal("12.34")])"));
     // Negative controls.
@@ -646,6 +656,47 @@ TEST(CelDecimalTimestampTest, AWideCoefficientRoundTripsAtAnyWidth) {
         "\"3402823669209384634633746074317682114.55\""));
 }
 
+// `confluent.type.Decimal.precision` is the unscaled value's digit count, which is what
+// BigDecimal.precision() reports. This client set it nowhere, so every decimal it produced
+// carried 0 - a value the reference cannot produce, since precision() is never less than 1
+// (zero's precision is 1) - and a JVM consumer rewrites such a message on its next touch.
+// Measured against the JDK: new BigDecimal("12.34").precision() is 4, ("12.340") is 5,
+// ("0") is 1.
+TEST(CelDecimalTimestampTest, PrecisionIsTheUnscaledDigitCount) {
+    EXPECT_TRUE(evalBool(R"(decimal("12.34").precision == 4u)"));
+    EXPECT_TRUE(evalBool(R"(decimal("1").precision == 1u)"));
+    EXPECT_TRUE(evalBool(R"(decimal("0").precision == 1u)"));
+    EXPECT_TRUE(evalBool(R"(decimal("-999.5").precision == 4u)"));
+    // Trailing zeros count: 12.340 is unscaled 12340, five digits, not four.
+    EXPECT_TRUE(evalBool(R"(decimal("12.340").precision == 5u)"));
+    // It tracks the coefficient the encoder actually wrote, at any width.
+    EXPECT_TRUE(evalBool(
+        R"(decimals.mul(decimal("99999999999999999999999999999999999999"), )"
+        R"(decimal("99999999999999999999999999999999999999")).precision == 76u)"));
+    // Negative controls: 0 is what the old code wrote for everything.
+    EXPECT_FALSE(evalBool(R"(decimal("12.34").precision == 0u)"));
+    EXPECT_FALSE(evalBool(R"(decimal("12.34").precision == 2u)"));
+
+    // Reading ignores it, as every non-Java client does: a message whose declared precision
+    // disagrees with its coefficient is read for its value and scale alone, not rounded to
+    // the declared digits the way BigDecimal(unscaled, scale, MathContext(precision)) would.
+    // Declared 2 against a four-digit coefficient: 12.34 stays 12.34, it does not become 12.
+    auto readWithDeclaredPrecision = [](uint32_t precision) {
+        auto dec = std::make_unique<confluent::type::Decimal>();
+        dec->set_value(std::string("\x04\xd2", 2));  // unscaled 1234
+        dec->set_scale(2);
+        dec->set_precision(precision);
+        CelValidator validator;
+        auto value =
+            protobuf::makeProtobufValue(protobuf::ProtobufVariant(std::move(dec)));
+        auto result = validator.execute(rule(R"(string(decimal(this)))"), *value);
+        return std::get<std::string>(result);
+    };
+    EXPECT_EQ(readWithDeclaredPrecision(4), "12.34");
+    EXPECT_EQ(readWithDeclaredPrecision(2), "12.34");
+    EXPECT_EQ(readWithDeclaredPrecision(0), "12.34");
+}
+
 // The rounding family must not cap total precision: BigDecimal.setScale takes no MathContext,
 // so the JVM's round/trunc/floor/ceil rescale and never shorten the coefficient. That became
 // load-bearing once the coefficient stopped being capped at 128 bits - `decimals.add` on two
@@ -706,9 +757,16 @@ TEST(CelDecimalTimestampTest, TheRoundingFamilyDoesNotCapPrecision) {
 
 // confluent.type.Decimal.scale is a signed int32, and the scale is the negated exponent, so a
 // wide exponent wrapped it: 1e-2147483648 needs scale 2147483648, which wrapped to -2147483648
-// and turned a vanishingly small number into an enormous one (it compared >= 1). The accepted
-// band matches the JVM's, measured: BigDecimal refuses a literal at +/-2147483648 and takes
-// +/-2147483647.
+// and turned a vanishingly small number into an enormous one (it compared >= 1). The bug this
+// catches is the *wrapping*, and that is what the assertions are about.
+//
+// The band itself is this client's own, not a portable contract. The exponent range is
+// delegated to each native library and documented as a per-client limitation: libmpdec here,
+// decimal.js in JS, apd in Go (which caps at 100000, far narrower). What is portable is that
+// a value outside the range becomes a rule error rather than a silently different number. It
+// happens to coincide with the JVM's here because every C++ decimal is carried as a
+// confluent.type.Decimal message, whose int32 scale is exactly BigDecimal's - measured,
+// BigDecimal refuses a literal at +/-2147483648 and takes +/-2147483647.
 TEST(CelDecimalTimestampTest, WideExponentIsRefusedNotWrapped) {
     EXPECT_TRUE(evalBool("decimals.lt(decimal(\"1e-2147483647\"), decimal(\"1\"))"));
     EXPECT_TRUE(evalBool("decimals.gt(decimal(\"1e2147483647\"), decimal(\"1\"))"));
@@ -716,6 +774,190 @@ TEST(CelDecimalTimestampTest, WideExponentIsRefusedNotWrapped) {
                             "does not fit the confluent.type.Decimal int32 scale"));
     EXPECT_TRUE(errContains("decimals.lt(decimal(\"1e2147483648\"), decimal(\"1\"))",
                             "does not fit the confluent.type.Decimal int32 scale"));
+}
+
+// The width ceiling. libmpdec has no useful bound of its own - MAX_PREC is around 1e18 digits,
+// so it tries - and width failure is resource exhaustion, which cannot be turned into a rule
+// error after the fact. Java is the only client in the family that fails cleanly on width
+// (ArithmeticException at 646456993 digits); DecimalUtil::kSaneWidth stands in for that as a
+// bound rather than as a model of BigDecimal's domain, so the accepted/rejected split here is
+// this client's and is deliberately tighter than the JVM's.
+//
+// The dividing line is not arithmetic vs. rescale - it is whether the operation has to build a
+// positional form. Measured in the sibling Python client on the shared libmpdec, peak RSS,
+// operands 1e2147483647 and 3: mul, div, <, ==, min, neg, abs all 13 MB; add 1738 MB, sub
+// 1738 MB, remainder 1733 MB; add(1e2147483647, 1e-2147483647) 3125 MB. So three of six
+// arithmetic operations reach a multi-GB allocation from one expression over two operands each
+// cheap to construct, and the other three cost nothing at any width.
+TEST(CelDecimalTimestampTest, AlignmentWidthIsRefused) {
+    const std::string wide = "decimal(\"1e2147483647\")";
+    const std::string tiny = "decimal(\"1e-2147483647\")";
+    // add/sub expand the narrower operand into the wider one's frame.
+    EXPECT_TRUE(errContains("decimals.add(" + wide + ", decimal(\"1\"))", "aligning the operands"));
+    EXPECT_TRUE(errContains("decimals.sub(" + wide + ", decimal(\"1\"))", "aligning the operands"));
+    EXPECT_TRUE(errContains("decimals.add(" + tiny + ", decimal(\"1\"))", "aligning the operands"));
+    EXPECT_TRUE(errContains("decimals.add(" + wide + ", " + tiny + ")", "aligning the operands"));
+    EXPECT_TRUE(errContains("decimals.sub(" + wide + ", " + tiny + ")", "aligning the operands"));
+    // remainder, via the integral quotient it has to produce on the way.
+    EXPECT_TRUE(errContains("decimals.mod(" + wide + ", decimal(\"3\"))",
+                            "the integral quotient"));
+    EXPECT_TRUE(errContains("decimals.mod(" + wide + ", " + tiny + ")",
+                            "the integral quotient"));
+    EXPECT_TRUE(errContains("decimals.mod(decimal(\"1.5\"), " + tiny + ")",
+                            "the integral quotient"));
+}
+
+// The must-fail twin: everything that does not align stays unguarded at any width, and
+// alignment that stays narrow is accepted however extreme both operands are. A guard on the
+// operands' own magnitudes rather than on their difference would refuse all of these.
+TEST(CelDecimalTimestampTest, TheCheapOperationsStayUnguarded) {
+    const std::string wide = "decimal(\"1e2147483647\")";
+    const std::string tiny = "decimal(\"1e-2147483647\")";
+    // Comparison short-circuits on the adjusted exponent.
+    EXPECT_TRUE(evalBool("decimals.lt(" + tiny + ", " + wide + ")"));
+    EXPECT_TRUE(evalBool("decimals.gt(" + wide + ", " + tiny + ")"));
+    EXPECT_FALSE(evalBool("decimals.eq(" + wide + ", " + tiny + ")"));
+    // div holds the coefficient to the context precision and lets the exponent absorb the
+    // difference, so it costs nothing however far apart the operands are.
+    // div holds the coefficient to the context precision and lets the exponent absorb the
+    // difference, so it costs nothing however far apart the operands are. It is refused here
+    // only because the *result's* exponent, -4294967294, is outside the int32 scale that
+    // carries every decimal in this client - not by any width bound. Java agrees: the
+    // equivalent divide gives a scale no `int` can hold.
+    EXPECT_TRUE(errContains("decimals.eq(decimals.div(" + tiny + ", " + wide + "), decimal(\"0\"))",
+                            "int32 scale"));
+    // A legitimate division at a wide exponent, which is what makes the widened Emax/Emin on
+    // context() load-bearing. Default-constructed, its Emax is 999999 - narrower than the
+    // exponent this client's own constructor accepts - so this was `[Overflow]` where Java
+    // and Python both return a result.
+    EXPECT_TRUE(evalBool("decimals.gt(decimals.div(decimal(\"1e1000000\"), decimal(\"1\")), "
+                         "decimal(\"1\"))"));
+    EXPECT_TRUE(evalBool("decimals.gt(decimals.sqrt(decimal(\"1e1000000\")), decimal(\"1\"))"));
+    // mul is exact and cheap at any width. It is refused here only where its *result* needs a
+    // scale no int32 can carry, and that comes from wrapping the value back into a
+    // confluent.type.Decimal message, not from a width bound.
+    EXPECT_TRUE(errContains("decimals.mul(" + wide + ", " + wide + ") == " + wide,
+                            "int32 scale"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.mul(" + wide + ", " + tiny + "), decimal(\"1\"))"));
+    // Alignment that stays narrow because the exponents are close.
+    EXPECT_TRUE(evalBool("decimals.gt(decimals.add(" + wide + ", " + wide + "), decimal(\"1\"))"));
+    EXPECT_TRUE(evalBool(
+        "decimals.gt(decimals.sub(" + wide + ", decimal(\"1e2147483646\")), decimal(\"0\"))"));
+    // remainder whose integral quotient is small, however far apart the operands are.
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.mod(" + tiny + ", " + wide + "), " + tiny + ")"));
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.mod(" + wide + ", decimal(\"1e2147483000\")), decimal(\"0\"))"));
+    // And ordinary arithmetic, unchanged.
+    EXPECT_TRUE(evalBool("string(decimals.add(decimal(\"12.34\"), decimal(\"1.5\"))) == \"13.84\""));
+    EXPECT_TRUE(evalBool("string(decimals.mod(decimal(\"1E40\"), decimal(\"3\"))) == \"1\""));
+}
+
+// Rescaling is the second width site, and the one-argument forms are rescales too: `round(x)`,
+// `floor(x)` and `ceil(x)` target scale 0, so a value with a large negative exponent is a
+// multi-GB allocation from a rule that names no scale at all. floor/ceil do not go through
+// roundTo, so they carry the bound separately.
+TEST(CelDecimalTimestampTest, RescaleWidthIsRefused) {
+    // Only *expanding* a scale costs anything - the coefficient grows by the difference - so
+    // the cases are values whose integer part has to be built. Scale 0 against a large
+    // positive exponent is the one-argument forms' version of that.
+    const std::string tall = "decimal(\"1e20000000\")";
+    EXPECT_TRUE(errContains("decimals.round(" + tall + ") != decimal(\"0\")", "a scale of 0"));
+    EXPECT_TRUE(errContains("decimals.floor(" + tall + ") != decimal(\"0\")",
+                            "rounding to an integer"));
+    EXPECT_TRUE(errContains("decimals.ceil(" + tall + ") != decimal(\"0\")",
+                            "rounding to an integer"));
+    EXPECT_TRUE(errContains("decimals.round(decimal(\"1.23\"), 100000000) != decimal(\"0\")",
+                            "a scale of 100000000"));
+    // trunc is absent on purpose: its `scale >= current scale` early return - Java's
+    // `intScale >= v.scale()` - means it only ever coarsens, so it cannot reach an expanding
+    // rescale by any argument.
+}
+
+// Coarsening a scale is free at any distance: the coefficient shrinks to a single digit
+// rather than growing. Measured on the shared libmpdec, all instant and all one digit wide:
+// 1.23 at scale -1000000 / -100000000 / -2000000000, and 1e-1000000 and 1e-100000000 at
+// scale 0. Java agrees - BigDecimal("1.23").setScale(-100000000) is precision 1 - so an
+// `abs(shift) + digits` estimate, which is what this guard first carried, refused every one
+// of them wrongly.
+TEST(CelDecimalTimestampTest, CoarseningAScaleIsNeverRefused) {
+    const std::string deep = "decimal(\"1e-20000000\")";
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.round(" + deep + "), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.trunc(" + deep + "), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.floor(" + deep + "), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.ceil(" + deep + "), decimal(\"1\"))"));
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.round(decimal(\"1e-100000000\")), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.round(decimal(\"1.23\"), -100000000), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.round(decimal(\"1.23\"), -1000000000), decimal(\"0\"))"));
+    // Far enough to leave the int32 scale domain, which is refused when the result is wrapped
+    // back into a confluent.type.Decimal - by the scale field, not by any width bound.
+    EXPECT_TRUE(errContains("decimals.round(decimal(\"1.23\"), -2147483648) != decimal(\"0\")",
+                            "int32 scale"));
+}
+
+// The coefficient arriving through the (bytes, scale) constructor is the fourth width site,
+// and the only one not reachable from a CEL literal: it takes a 4 MB `bytes` value to cross
+// the ceiling, which a rule cannot spell but a `fixed` decimal field could carry. Checked
+// from the byte count before the digits are built - one byte is about 2.41 decimal digits -
+// so this asserts the arithmetic the constructor uses rather than routing 4 MB through CEL.
+TEST(CelDecimalTimestampTest, AWideCoefficientIsRefused) {
+    // 4300 digits is about 1785 bytes, so a literal is enough to cross it - no need to route
+    // megabytes through CEL.
+    EXPECT_TRUE(errContains("decimal(b\"" + std::string(2000, 'A') + "\", 0) != decimal(\"0\")",
+                            "the coefficient"));
+    // And the same ceiling on the way out, which is the one that matters: a rescale can
+    // produce a coefficient far wider than anything a literal can express.
+    // `decimals.round(x, 1000000)` used to grind here for minutes rather than fail.
+    EXPECT_TRUE(errContains("decimals.round(decimal(\"1.23\"), 1000000) != decimal(\"0\")",
+                            "the coefficient"));
+    EXPECT_TRUE(errContains("decimals.round(decimal(\"1.23\"), 5000) != decimal(\"0\")",
+                            "the coefficient"));
+    // The scale on the bytes path costs nothing: it only sets the exponent, so an extreme
+    // scale on a small coefficient is fine and the width guard fires later, where the digits
+    // are needed.
+    EXPECT_TRUE(evalBool("decimals.eq(decimal(b\"\\x04\\xd2\", 2), decimal(\"12.34\"))"));
+    EXPECT_TRUE(evalBool("decimals.lt(decimal(b\"\\x01\", 2147483647), decimal(\"1\"))"));
+    // Just inside the ceiling, both directions, and it round-trips.
+    EXPECT_TRUE(evalBool("decimals.round(decimal(\"1.23\"), 4000) != decimal(\"0\")"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimal(b\"" + std::string(1700, 'A') +
+                         "\", 0), decimal(b\"" + std::string(1700, 'A') + "\", 0))"));
+}
+
+// An order of magnitude under the ceiling, the same expressions answer - including the zero
+// exemption, which the width formula needs because rescaling a zero never expands anything
+// (its result stays compact) and BigDecimal agrees: new BigDecimal(BigInteger.ZERO,
+// 2147483647) is precision 1. Without it these are false rejections.
+TEST(CelDecimalTimestampTest, RescaleWithinTheCeilingStillAnswers) {
+    EXPECT_TRUE(evalBool("string(decimals.round(decimal(\"2.5\"))) == \"3\""));
+    EXPECT_TRUE(evalBool("string(decimals.floor(decimal(\"-1.5\"))) == \"-2\""));
+    EXPECT_TRUE(evalBool("string(decimals.ceil(decimal(\"1.5\"))) == \"2\""));
+    EXPECT_TRUE(evalBool("string(decimals.trunc(decimal(\"-1.9\"))) == \"-1\""));
+    // Zero at an extreme scale: exempt from the rescale bound in both directions.
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.round(decimal(b\"\", 2147483647), 0), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.round(decimal(\"0\"), 2147483647), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.floor(decimal(b\"\", 2147483647)), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.ceil(decimal(b\"\", 2147483647)), decimal(\"0\"))"));
+    // An ordinary coefficient through the bytes constructor, and an extreme scale on a small
+    // one - which only sets the exponent.
+    EXPECT_TRUE(evalBool("decimals.eq(decimal(b\"\\x04\\xd2\", 2), decimal(\"12.34\"))"));
+    EXPECT_TRUE(evalBool("decimals.lt(decimal(b\"\\x01\", 2147483647), decimal(\"1\"))"));
+}
+
+// Rendering is the third width site, and it does not come from a rescale: div holds its
+// coefficient to 38 digits while its exponent runs free. `double(Decimal)` parses the same
+// plain form, so it carries the same bound. No zero shortcut here, unlike the rescale guard -
+// a zero at an extreme scale renders as that many zeros.
+TEST(CelDecimalTimestampTest, RenderingAWidePlainFormIsRefused) {
+    EXPECT_TRUE(errContains("string(decimal(\"1e2147483647\")) == \"\"", "the plain form"));
+    EXPECT_TRUE(errContains("string(decimal(\"1e-2147483647\")) == \"\"", "the plain form"));
+    EXPECT_TRUE(errContains("string(decimal(b\"\", 2147483647)) == \"\"", "the plain form"));
+    EXPECT_TRUE(errContains("double(decimal(\"1e2147483647\")) == 0.0", "the plain form"));
+    // Still renders below the ceiling, coefficient and exponent independently.
+    EXPECT_TRUE(evalBool("string(decimal(\"12.34\")) == \"12.34\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"1e1000000\")) != \"\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"1e-1000000\")) != \"\""));
 }
 
 // double(Decimal) parses the plain-notation rendering, which always writes '.'. strtod reads
