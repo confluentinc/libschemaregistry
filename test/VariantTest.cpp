@@ -520,6 +520,30 @@ TEST(VariantTest, DoubleToJsonIsLocaleIndependent) {
     }
 }
 
+// The parse direction of the same hazard. The overflow rewrite used strtod, which reads its
+// radix character from LC_NUMERIC, so under a comma-radix locale "1.5e400" was not consumed
+// whole and was left for nlohmann to reject instead of becoming Infinity - parseJson's result
+// depended on the host's locale. std::from_chars ignores the locale.
+TEST(VariantTest, ParseJsonOverflowIsLocaleIndependent) {
+    EXPECT_EQ(Variant::parseJson("1.5e400").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("-1.5e400").toJson(), "-Infinity");
+
+    const char *saved = std::setlocale(LC_ALL, nullptr);
+    std::string savedLocale = saved ? saved : "C";
+    const char *applied = std::setlocale(LC_ALL, "de_DE.UTF-8");
+    if (applied == nullptr) {
+        applied = std::setlocale(LC_ALL, "de_DE");
+    }
+    if (applied != nullptr) {
+        EXPECT_EQ(Variant::parseJson("1.5e400").toJson(), "Infinity");
+        EXPECT_EQ(Variant::parseJson("-1.5e400").toJson(), "-Infinity");
+        EXPECT_EQ(Variant::parseJson("1.5e-400").toJson(), "0.0");
+        std::setlocale(LC_ALL, savedLocale.c_str());
+    } else {
+        GTEST_SKIP() << "de_DE locale not installed; skipping comma-radix assertion";
+    }
+}
+
 TEST(VariantTest, LargeDataRegionUses4ByteOffsets) {
     // Regression: a container whose data region exceeds 0xFFFFFF (16 MiB)
     // requires 4-byte offsets. A single string element of length 16777216
@@ -570,4 +594,27 @@ TEST(VariantTest, MalformedJsonThrows) {
     EXPECT_THROW(parse("{not valid"), VariantException);
     EXPECT_THROW(parse("[1,2,"), VariantException);
     EXPECT_THROW(parse(""), VariantException);
+}
+
+// The overflow rewrite used to scan C's number grammar, which is broader than JSON's: `01e400`
+// was consumed whole, judged to overflow and replaced with the placeholder, so a malformed
+// document parsed successfully as Infinity. nlohmann applies RFC 8259's grammar, so anything it
+// would reject has to be left for it. The accepted cases are the control - the rewrite itself
+// must keep working, or this test would pass with the feature removed.
+TEST(VariantTest, ParseJsonAppliesTheJsonNumberGrammar) {
+    // Rewritten to +/-Infinity, as Java, Go and JavaScript all read these.
+    EXPECT_EQ(Variant::parseJson("1e400").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("-1e400").toJson(), "-Infinity");
+    EXPECT_EQ(Variant::parseJson("1.5e400").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("1e+400").toJson(), "Infinity");
+    // Underflow is a number nlohmann reads natively; it must not be rewritten to Infinity.
+    EXPECT_EQ(Variant::parseJson("1e-400").toJson(), "0.0");
+    EXPECT_EQ(Variant::parseJson("1.5e-400").toJson(), "0.0");
+    EXPECT_EQ(Variant::parseJson("0.0e400").toJson(), "0.0");
+
+    // Not JSON numbers: a leading zero, a bare point either side, a leading plus, an empty
+    // exponent. Each was previously eligible for the rewrite.
+    for (const char *bad : {"01e400", "1.", ".5", "+1e400", "1e", "00"}) {
+        EXPECT_THROW(Variant::parseJson(bad), std::exception) << bad;
+    }
 }

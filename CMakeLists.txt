@@ -267,6 +267,11 @@ endif()
 if(SCHEMAREGISTRY_WITH_RULES)
     file(GLOB_RECURSE RULES_HEADERS "include/schemaregistry/rules/*.h")
     file(GLOB_RECURSE RULES_SOURCES "src/rules/*.cpp")
+    if(NOT SCHEMAREGISTRY_WITH_AVRO)
+        # The Avro result writer needs avro/Generic.hh. Rules and Avro are independent
+        # features, so a rules-without-Avro build must not compile it.
+        list(FILTER RULES_SOURCES EXCLUDE REGEX "rules/cel/AvroResultWriter\\.cpp$")
+    endif()
     file(GLOB_RECURSE RULES_INTERNAL_HEADERS "src/internal/schemaregistry/rules/*.h")
     target_sources(schemaregistry PRIVATE ${RULES_HEADERS} ${RULES_SOURCES} ${RULES_INTERNAL_HEADERS})
 endif()

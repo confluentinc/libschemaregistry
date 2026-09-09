@@ -55,6 +55,11 @@ using ::google::protobuf::Arena;
 
 namespace {
 
+// The CEL/protobuf timestamp range: 0001-01-01T00:00:00Z .. 9999-12-31T23:59:59.999999999Z.
+// Same values as Java's TimestampUtils.MIN_EPOCH_SECOND / MAX_EPOCH_SECOND.
+constexpr int64_t kMinEpochSecond = -62135596800LL;
+constexpr int64_t kMaxEpochSecond = 253402300799LL;
+
 // ---------------------------------------------------------------------------
 // A CelFunction backed by a std::function, so functions can be declared with
 // explicit argument-type descriptors (kMessage for Decimal, kAny for the
@@ -688,6 +693,17 @@ absl::Status registerTimestamp(::cel::FunctionRegistry& registry) {
                                           "; expected 0 (seconds), 3 (millis), 6 (micros) or "
                                           "9 (nanos)");
                     return absl::OkStatus();
+            }
+            // CEL timestamps span 0001-01-01T00:00:00Z..9999-12-31T23:59:59.999999999Z, and
+            // Java's instantOfEpoch enforces exactly that ("Timestamp out of range: ...").
+            // Without it timestamp(INT64_MAX, 0) produced an out-of-range absl::Time that was
+            // handed back as a timestamp, where the one-argument constructor reports overflow.
+            const int64_t seconds = absl::ToUnixSeconds(t);
+            if (seconds < kMinEpochSecond || seconds > kMaxEpochSecond) {
+                *out = err(arena, "timestamp: out of range: " + std::to_string(seconds) +
+                                      " seconds since the epoch is outside "
+                                      "0001-01-01T00:00:00Z..9999-12-31T23:59:59.999999999Z");
+                return absl::OkStatus();
             }
             *out = cel::CelValue::CreateTimestamp(t);
             return absl::OkStatus();

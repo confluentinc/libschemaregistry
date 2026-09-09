@@ -1623,43 +1623,139 @@ bool matchNonFiniteBareword(const std::string &json, std::size_t i, std::size_t 
 // an integer literal becomes an int or a scale-0 decimal, so an enormous one must keep reaching
 // the existing decimal path (and be rejected there for exceeding precision 38) rather than
 // quietly becoming Infinity here.
-bool matchOverflowingNumber(const std::string &json, std::size_t i, std::size_t &len,
-                            double &value) {
-    if (json[i] != '-' && !isDigit(json[i])) {
+// Scans a JSON number at `i` per RFC 8259: -? (0 | [1-9][0-9]*) ('.' [0-9]+)? ([eE][+-]?[0-9]+)?
+//
+// The scan used to accept C's number grammar instead, which is broader: `01e400` was consumed
+// whole, judged to overflow, and rewritten to the placeholder, so a malformed document parsed
+// successfully. nlohmann applies the JSON grammar, so anything it would reject has to be left
+// for it rather than replaced here.
+bool scanJsonNumber(const std::string &json, std::size_t i, std::size_t &len, bool &fractional,
+                    bool &hasExponent) {
+    std::size_t p = i;
+    if (p < json.size() && json[p] == '-') {
+        ++p;
+    }
+    if (p >= json.size() || !isDigit(json[p])) {
         return false;
     }
-    std::size_t end = i;
+    if (json[p] == '0') {
+        // A leading zero stands alone: "0", "0.5", "0e1" are numbers, "01" is not.
+        ++p;
+        if (p < json.size() && isDigit(json[p])) {
+            return false;
+        }
+    } else {
+        while (p < json.size() && isDigit(json[p])) {
+            ++p;
+        }
+    }
+    fractional = false;
+    hasExponent = false;
+    if (p < json.size() && json[p] == '.') {
+        ++p;
+        if (p >= json.size() || !isDigit(json[p])) {
+            return false;  // a trailing '.' is not a JSON number
+        }
+        while (p < json.size() && isDigit(json[p])) {
+            ++p;
+        }
+        fractional = true;
+    }
+    if (p < json.size() && (json[p] == 'e' || json[p] == 'E')) {
+        ++p;
+        if (p < json.size() && (json[p] == '+' || json[p] == '-')) {
+            ++p;
+        }
+        if (p >= json.size() || !isDigit(json[p])) {
+            return false;  // an exponent needs at least one digit
+        }
+        while (p < json.size() && isDigit(json[p])) {
+            ++p;
+        }
+        hasExponent = true;
+        fractional = true;
+    }
+    len = p - i;
+    return true;
+}
+
+// The base-10 exponent of a JSON number token's leading digit, i.e. `adjusted` such that the
+// value is d.ddd x 10^adjusted. Used only to tell an overflow from an underflow, because
+// std::from_chars reports both as result_out_of_range and leaves the value unspecified.
+// Returns false for a token whose value is exactly zero.
+bool adjustedExponent(const std::string &token, long long &adjusted) {
+    std::size_t p = token.empty() || token[0] != '-' ? 0 : 1;
+    std::string intDigits;
+    for (; p < token.size() && isDigit(token[p]); ++p) {
+        intDigits.push_back(token[p]);
+    }
+    std::string fracDigits;
+    if (p < token.size() && token[p] == '.') {
+        for (++p; p < token.size() && isDigit(token[p]); ++p) {
+            fracDigits.push_back(token[p]);
+        }
+    }
+    long long exponent = 0;
+    if (p < token.size() && (token[p] == 'e' || token[p] == 'E')) {
+        exponent = std::strtoll(token.c_str() + p + 1, nullptr, 10);
+    }
+
+    const std::size_t firstIntDigit = intDigits.find_first_not_of('0');
+    if (firstIntDigit != std::string::npos) {
+        adjusted = exponent +
+                   static_cast<long long>(intDigits.size() - firstIntDigit) - 1;
+        return true;
+    }
+    const std::size_t firstFracDigit = fracDigits.find_first_not_of('0');
+    if (firstFracDigit == std::string::npos) {
+        return false;  // the value is zero
+    }
+    adjusted = exponent - static_cast<long long>(firstFracDigit) - 1;
+    return true;
+}
+
+bool matchOverflowingNumber(const std::string &json, std::size_t i, std::size_t &len,
+                            double &value) {
+    std::size_t n = 0;
     bool fractional = false;
     bool hasExponent = false;
-    while (end < json.size()) {
-        char c = json[end];
-        if (c == 'e' || c == 'E') {
-            hasExponent = true;
-            fractional = true;
-        } else if (c == '.') {
-            fractional = true;
-        } else if (!isDigit(c) && c != '-' && c != '+') {
-            break;
-        }
-        ++end;
+    if (!scanJsonNumber(json, i, n, fractional, hasExponent)) {
+        return false;
     }
-    std::size_t n = end - i;
-    // DBL_MAX is ~1.8e308, so a literal with no exponent and fewer than 309 integer digits cannot
-    // overflow. Skipping those keeps the ordinary document free of any strtod call.
+    // DBL_MAX is ~1.8e308, so a literal with no exponent and fewer than 309 integer digits
+    // cannot overflow. Skipping those keeps the ordinary document free of any parse call.
     const std::size_t kOverflowFreeDigits = 309;
     if (!fractional || (!hasExponent && n < kOverflowFreeDigits)) {
         return false;
     }
-    std::string token = json.substr(i, n);
-    char *endptr = nullptr;
-    double d = std::strtod(token.c_str(), &endptr);
-    // strtod must have consumed the whole token: anything less means this is not a well-formed
-    // number, and it has to be left for the parser to reject rather than silently replaced.
-    if (endptr != token.c_str() + n || !std::isinf(d)) {
+
+    // std::from_chars, not strtod: strtod reads its radix character from LC_NUMERIC, so under a
+    // comma-radix locale "1.5e400" was not consumed whole and the rewrite silently stopped
+    // happening - parseJson became locale-dependent. from_chars ignores the locale.
+    const char *first = json.data() + i;
+    double parsed = 0.0;
+    const auto result = std::from_chars(first, first + n, parsed);
+    if (result.ptr != first + n) {
+        return false;
+    }
+    if (result.ec == std::errc::result_out_of_range) {
+        // Both overflow and underflow report this, and the value is left unspecified, so the
+        // direction comes from the token. Only an overflow is rewritten: an underflow is a
+        // number nlohmann reads natively as zero.
+        long long adjusted = 0;
+        if (!adjustedExponent(std::string(first, n), adjusted) || adjusted < 0) {
+            return false;
+        }
+        value = json[i] == '-' ? -std::numeric_limits<double>::infinity()
+                               : std::numeric_limits<double>::infinity();
+        len = n;
+        return true;
+    }
+    if (result.ec != std::errc() || !std::isinf(parsed)) {
         return false;
     }
     len = n;
-    value = d;
+    value = parsed;
     return true;
 }
 

@@ -1,5 +1,10 @@
 #include "schemaregistry/rules/cel/CelUtils.h"
+#ifdef SCHEMAREGISTRY_USE_AVRO
+// Pulls in avro/Generic.hh, which is absent from a rules-without-Avro build. Rules and Avro are
+// independent vcpkg features (only Protobuf is auto-enabled with rules), so that configuration
+// is supported and this include has to follow the same guard as the Avro code below.
 #include "schemaregistry/rules/cel/AvroResultWriter.h"
+#endif
 #include "schemaregistry/rules/cel/ProtobufResultWriter.h"
 
 #include <utility>

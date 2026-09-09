@@ -44,13 +44,45 @@ bool avroFieldAcceptsNull(const ::avro::NodePtr &field_schema) {
 /// index at all, and the record that comes off the wire is unreadable - avro-cpp reads the next
 /// field's bytes as the branch index and throws `std::out_of_range` from `selectBranch`. Every
 /// message-level `CEL` transform over a schema with a nullable field produced such a record.
+/// Whether `value` belongs to this union branch.
+///
+/// The base type alone is ambiguous: a union may legally hold several branches of the same
+/// kind (`["null","RecA","RecB"]`, two enums, two fixed). Selecting the first one whose
+/// `type()` matched wrote the value under the wrong branch index, so a reader either decoded
+/// it as the other type or failed outright. Java's AvroResultWriter.branchAccepts matches a
+/// record branch by full name, an enum by symbol validity and a fixed by size; comparing the
+/// value's own schema name is the equivalent here, since a GenericRecord/Enum/Fixed carries
+/// the schema it was built from.
+bool branchAccepts(const ::avro::NodePtr &branch, const ::avro::GenericDatum &value) {
+    if (branch->type() != value.type()) {
+        return false;
+    }
+    switch (value.type()) {
+        case ::avro::AVRO_RECORD:
+            return branch->name().fullname() ==
+                   value.value<::avro::GenericRecord>().schema()->name().fullname();
+        case ::avro::AVRO_ENUM:
+            return branch->name().fullname() ==
+                   value.value<::avro::GenericEnum>().schema()->name().fullname();
+        case ::avro::AVRO_FIXED:
+            // Name *and* size: a same-name-different-size branch would be selected and then
+            // encode the wrong number of bytes.
+            return branch->name().fullname() ==
+                       value.value<::avro::GenericFixed>().schema()->name().fullname() &&
+                   branch->fixedSize() ==
+                       value.value<::avro::GenericFixed>().schema()->fixedSize();
+        default:
+            return true;  // unnamed types are fully described by their base type
+    }
+}
+
 ::avro::GenericDatum wrapForUnionField(const ::avro::NodePtr &field_schema,
                                        const ::avro::GenericDatum &value) {
     if (field_schema->type() != ::avro::AVRO_UNION || value.isUnion()) {
         return value;
     }
     for (size_t branch = 0; branch < field_schema->leaves(); ++branch) {
-        if (field_schema->leafAt(branch)->type() != value.type()) {
+        if (!branchAccepts(field_schema->leafAt(branch), value)) {
             continue;
         }
         ::avro::GenericDatum out{field_schema};

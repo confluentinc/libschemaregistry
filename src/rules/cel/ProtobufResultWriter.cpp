@@ -5,6 +5,7 @@
 
 #include "schemaregistry/rules/cel/ProtobufResultWriter.h"
 
+#include <stdexcept>
 #include <string>
 
 #include "absl/status/statusor.h"
@@ -48,7 +49,19 @@ void fillFromCelMap(google::protobuf::Message *out,
 void fillMessageFromCel(google::protobuf::Message *nested,
                         const google::api::expr::runtime::CelValue &value) {
     if (value.IsMessage() && value.MessageOrDie() != nullptr) {
-        nested->CopyFrom(*value.MessageOrDie());
+        const google::protobuf::Message &source = *value.MessageOrDie();
+        // CopyFrom requires identical descriptors and ABSL_CHECKs otherwise, which aborts the
+        // process - verified with a death test. A CEL map can legitimately hand an unrelated
+        // message (a Decimal, say) to a differently-typed message field, so the mismatch is a
+        // rule-authoring error to report, which is what the JVM does: its message-level
+        // write-back goes through a protobuf JSON parse that rejects the type.
+        if (source.GetDescriptor() != nested->GetDescriptor()) {
+            throw std::runtime_error(
+                "cannot write " + std::string(source.GetDescriptor()->full_name()) +
+                " to a field of type " +
+                std::string(nested->GetDescriptor()->full_name()));
+        }
+        nested->CopyFrom(source);
         return;
     }
     if (value.IsTimestamp()) {

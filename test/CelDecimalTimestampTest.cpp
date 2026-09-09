@@ -666,3 +666,26 @@ TEST(CelDecimalTimestampTest, NonFiniteBarewordChecksBothBoundaries) {
     EXPECT_TRUE(
         evalBool("variants.toJson(variants.tryParseJson(\"[1,NaN]\")) == \"[1,NaN]\""));
 }
+
+// The two-argument timestamp(value, precision) never checked the CEL/protobuf timestamp range,
+// so timestamp(INT64_MAX, 0) produced an out-of-range absl::Time and handed it back as a
+// timestamp. Java's instantOfEpoch enforces 0001-01-01T00:00:00Z..9999-12-31T23:59:59.999999999Z
+// for every precision ("Timestamp out of range: ..."), which is what the one-argument
+// constructor already did here.
+TEST(CelDecimalTimestampTest, TwoArgTimestampChecksTheCelRange) {
+    // In range at each supported precision.
+    EXPECT_TRUE(evalBool("timestamp(1700000000, 0) == timestamp(\"2023-11-14T22:13:20Z\")"));
+    EXPECT_TRUE(evalBool("timestamp(1700000000123, 3) == timestamp(\"2023-11-14T22:13:20.123Z\")"));
+    // The exact bounds: 0001-01-01T00:00:00Z and 9999-12-31T23:59:59Z.
+    EXPECT_TRUE(evalBool("timestamp(-62135596800, 0) == timestamp(\"0001-01-01T00:00:00Z\")"));
+    EXPECT_TRUE(evalBool("timestamp(253402300799, 0) == timestamp(\"9999-12-31T23:59:59Z\")"));
+
+    // One second past each bound, and the extremes at every precision.
+    EXPECT_TRUE(errContains("timestamp(-62135596801, 0) == timestamp(0)", "out of range"));
+    EXPECT_TRUE(errContains("timestamp(253402300800, 0) == timestamp(0)", "out of range"));
+    for (const char *expr : {"timestamp(9223372036854775807, 0) == timestamp(0)",
+                             "timestamp(-9223372036854775808, 0) == timestamp(0)",
+                             "timestamp(9223372036854775807, 3) == timestamp(0)"}) {
+        EXPECT_TRUE(errContains(expr, "out of range")) << expr;
+    }
+}
