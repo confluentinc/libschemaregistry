@@ -17,11 +17,18 @@ CompileProtobuf(generated_test_proto ${CMAKE_SOURCE_DIR}/proto)
 set(TEST_SOURCES
     WildcardMatcherTest.cpp
     OAuthProviderTest.cpp  # OAuth provider tests
+    VariantTest.cpp  # Spark/Parquet Variant codec (core, no rules/avro/proto deps)
 )  # Always include base tests
 
 if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES AzureKmsAeadTest.cpp)  # Azure KMS AEAD wire-format tests
     list(APPEND TEST_SOURCES ValidationRuleTest.cpp)  # Inline validation rule tests
+    list(APPEND TEST_SOURCES CelDecimalTimestampTest.cpp)  # CEL decimal/timestamp + is* tests
+    list(APPEND TEST_SOURCES CelVariantTest.cpp)  # CEL variant() / variants.* tests
+    list(APPEND TEST_SOURCES CelAvroWriteBackTest.cpp)
+    list(APPEND TEST_SOURCES CelProtobufContainerWriteBackTest.cpp)
+    list(APPEND TEST_SOURCES CelProtobufScalarNarrowingTest.cpp)
+    list(APPEND TEST_SOURCES ProtobufFieldWriteBackTest.cpp)
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)
@@ -73,7 +80,17 @@ if(SCHEMAREGISTRY_WITH_RULES)
     target_link_libraries(schemaregistry-test
         PRIVATE
             tink::static
+            # mpdecimal, so a test can call DecimalUtil directly: its internal header
+            # includes decimal.hh, which is otherwise only on the library's own include path.
+            $<BUILD_INTERFACE:mpdecxx::mpdecxx>
     )
+endif()
+
+# CelDecimalTimestampTest is compiled whenever rules are enabled, but its Avro
+# marshalling cases need Avro, which rules do not force on. Flag their availability so
+# those cases compile only when Avro is present.
+if(SCHEMAREGISTRY_WITH_AVRO)
+    target_compile_definitions(schemaregistry-test PRIVATE SCHEMAREGISTRY_TEST_WITH_AVRO)
 endif()
 
 # Discover and register tests
