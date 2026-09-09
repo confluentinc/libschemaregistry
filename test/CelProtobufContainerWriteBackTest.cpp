@@ -165,3 +165,32 @@ TEST(CelProtobufContainerWriteBack, OmittingAContainerLeavesItEmpty) {
     EXPECT_TRUE(out.amount_map().empty());
     EXPECT_EQ(unscaledOf(out.nested().inner()), 444);
 }
+
+/// A wrong-typed value for a message field is a rule error, not a silent empty message.
+///
+/// `fillMessageFromCel` handled an echoed message, a CEL timestamp and a constructed map, then
+/// returned quietly for anything else - *after* the caller had already materialized the field,
+/// so `{'nested': 1}` looked applied and wrote an empty message. Two of the three shapes were
+/// also unsafe: CopyFrom requires identical descriptors and a timestamp written to a message
+/// with a differently-typed `seconds` field both fail protobuf's reflection CHECK, which aborts
+/// the process rather than reporting anything. The JVM rejects all of these, its message-level
+/// write-back going through a protobuf JSON parse.
+TEST(CelProtobufContainerWriteBack, WrongTypedMessageValueIsRejected) {
+    // A scalar where a message is declared.
+    EXPECT_THROW(transform("{'nested': 1, 'label': message.label}"), std::exception);
+    EXPECT_THROW(transform("{'nested': 'x', 'label': message.label}"), std::exception);
+    // A message of the wrong type: a Decimal is not the nested message type.
+    EXPECT_THROW(transform("{'nested': decimal('1.23'), 'label': message.label}"),
+                 std::exception);
+    // A timestamp is only valid for google.protobuf.Timestamp.
+    EXPECT_THROW(transform("{'nested': timestamp(0), 'label': message.label}"),
+                 std::exception);
+    // The control: the shapes that are valid still work, so this cannot pass by rejecting
+    // everything.
+    parity::ValueTypeContainers ok =
+        transform("{'nested': {'inner': decimal('8.88')}, 'label': message.label}");
+    EXPECT_EQ(unscaledOf(ok.nested().inner()), 888);
+    parity::ValueTypeContainers echoed =
+        transform("{'nested': message.nested, 'label': message.label}");
+    EXPECT_EQ(unscaledOf(echoed.nested().inner()), 444);
+}

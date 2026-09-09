@@ -17,6 +17,8 @@ using schemaregistry::serdes::protobuf::ProtobufVariant;
 
 namespace {
 
+constexpr const char *kTimestampTypeName = "google.protobuf.Timestamp";
+
 /// Resolves a result key to a field by declared name, then by JSON name: a rule may
 /// legitimately return either, so matching only the declared name would silently skip a field
 /// like `total_amount`.
@@ -65,22 +67,32 @@ void fillMessageFromCel(google::protobuf::Message *nested,
         return;
     }
     if (value.IsTimestamp()) {
-        const absl::Time time = value.TimestampOrDie();
         const google::protobuf::Descriptor *nd = nested->GetDescriptor();
+        // Only google.protobuf.Timestamp. Any other message was accepted before: one with a
+        // differently-typed `seconds` field made SetInt64 fail protobuf's reflection CHECK and
+        // abort the process, and one without those fields was written empty and silently
+        // wrong. The JVM rejects the mismatch, its write-back going through a protobuf JSON
+        // parse.
+        if (nd->full_name() != kTimestampTypeName) {
+            throw std::runtime_error("cannot write a timestamp to a field of type " +
+                                     std::string(nd->full_name()));
+        }
+        const absl::Time time = value.TimestampOrDie();
         const google::protobuf::Reflection *nr = nested->GetReflection();
-        if (const auto *sec = nd->FindFieldByName("seconds")) {
-            nr->SetInt64(nested, sec, absl::ToUnixSeconds(time));
-        }
-        if (const auto *nanos = nd->FindFieldByName("nanos")) {
-            nr->SetInt32(nested, nanos,
-                         static_cast<int32_t>(absl::ToInt64Nanoseconds(
-                             time - absl::FromUnixSeconds(absl::ToUnixSeconds(time)))));
-        }
+        nr->SetInt64(nested, nd->FindFieldByName("seconds"), absl::ToUnixSeconds(time));
+        nr->SetInt32(nested, nd->FindFieldByName("nanos"),
+                     static_cast<int32_t>(absl::ToInt64Nanoseconds(
+                         time - absl::FromUnixSeconds(absl::ToUnixSeconds(time)))));
         return;
     }
     if (value.IsMap()) {
         fillFromCelMap(nested, value);
+        return;
     }
+    // Anything else falls here *after* the caller materialized the field, so returning
+    // quietly left an empty nested message: `{"nested": 1}` looked like it had been applied.
+    throw std::runtime_error("cannot write this CEL value to a field of type " +
+                             std::string(nested->GetDescriptor()->full_name()));
 }
 
 /// Writes one message-valued field from a CEL value.

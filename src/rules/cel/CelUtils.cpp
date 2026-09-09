@@ -1,5 +1,23 @@
 #include "schemaregistry/rules/cel/CelUtils.h"
 #ifdef SCHEMAREGISTRY_USE_AVRO
+/// Sign-extends a minimal two's-complement coefficient to an Avro `fixed` decimal's declared
+/// width, in place.
+///
+/// DecimalUtil::toProto returns the minimal encoding, which is what a `bytes` decimal carries -
+/// but a `fixed` decimal must be exactly `fixedSize()` bytes. Writing the minimal bytes straight
+/// in produced an invalid datum for every value narrower than the field. Avro Java does this
+/// padding inside Conversions.DecimalConversion.toFixed, which the JVM writer delegates to:
+/// 12.34 at size 8 is 00000000000004d2 and -12.34 is fffffffffffffb2e.
+void result_bytes_for_fixed(std::vector<uint8_t> &bytes, size_t fixed_size) {
+    if (bytes.size() > fixed_size) {
+        throw std::out_of_range(
+            "decimal coefficient needs " + std::to_string(bytes.size()) +
+            " bytes and does not fit the Avro fixed size " + std::to_string(fixed_size));
+    }
+    const uint8_t pad = (!bytes.empty() && (bytes.front() & 0x80) != 0) ? 0xFF : 0x00;
+    bytes.insert(bytes.begin(), fixed_size - bytes.size(), pad);
+}
+
 // Pulls in avro/Generic.hh, which is absent from a rules-without-Avro build. Rules and Avro are
 // independent vcpkg features (only Protobuf is auto-enabled with rules), so that configuration
 // is supported and this include has to follow the same guard as the Avro code below.
@@ -313,7 +331,6 @@ namespace {
         }
         decimal_msg = &owned;
     }
-
     decimal::Decimal value = DecimalUtil::fromProto(*decimal_msg);
     const int32_t target_scale = original.logicalType().scale();
     decimal::Context ctx = DecimalUtil::exactContext();
@@ -327,8 +344,12 @@ namespace {
     std::string unscaled = DecimalUtil::toProto(rescaled).value();
     std::vector<uint8_t> bytes(unscaled.begin(), unscaled.end());
     if (original.type() == ::avro::AVRO_FIXED) {
-        ::avro::GenericDatum result{
-            ::avro::ValidSchema(original.value<::avro::GenericFixed>().schema())};
+        const auto &fixed_schema = original.value<::avro::GenericFixed>().schema();
+        result_bytes_for_fixed(bytes, fixed_schema->fixedSize());
+        // From the NodePtr, not a ValidSchema built around it: the ValidSchema constructor
+        // re-validates, and for a bare leaf node that threw - the exception was swallowed
+        // upstream and the field came back with its original value.
+        ::avro::GenericDatum result{fixed_schema};
         result.value<::avro::GenericFixed>().value() = bytes;
         return result;
     }
@@ -439,8 +460,17 @@ namespace {
         // directly. There was no bytes arm here at all before, so a rule returning bytes for
         // either shape fell through to the fallback and was silently discarded.
         if (original.type() == ::avro::AVRO_FIXED) {
-            ::avro::GenericDatum result{
-                ::avro::ValidSchema(original.value<::avro::GenericFixed>().schema())};
+            const auto &fixed_schema = original.value<::avro::GenericFixed>().schema();
+            // Raw bytes, unlike a decimal, are not padded: a `fixed` field is exactly
+            // fixedSize() bytes wide and Java's toFixed refuses a mismatch outright
+            // ("Fixed schema X expects N bytes, got M") rather than guessing an alignment.
+            if (bytes.size() != fixed_schema->fixedSize()) {
+                throw std::out_of_range(
+                    "fixed schema " + fixed_schema->name().fullname() + " expects " +
+                    std::to_string(fixed_schema->fixedSize()) + " bytes, got " +
+                    std::to_string(bytes.size()));
+            }
+            ::avro::GenericDatum result{::avro::ValidSchema(fixed_schema)};
             result.value<::avro::GenericFixed>().value() = bytes;
             return result;
         }

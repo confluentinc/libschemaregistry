@@ -1695,9 +1695,28 @@ bool adjustedExponent(const std::string &token, long long &adjusted) {
             fracDigits.push_back(token[p]);
         }
     }
+    // from_chars rather than strtoll, and clamped: strtoll saturates to LLONG_MIN/MAX for an
+    // out-of-range exponent, and the additions below would then overflow signed long long -
+    // undefined behaviour on a value parsed from untrusted JSON ("10e999999999999999999999").
+    // Only the sign of the result matters to the caller, so any exponent past the double range
+    // is clamped to a sentinel well inside it.
+    constexpr long long kExponentClamp = 1LL << 40;
     long long exponent = 0;
     if (p < token.size() && (token[p] == 'e' || token[p] == 'E')) {
-        exponent = std::strtoll(token.c_str() + p + 1, nullptr, 10);
+        const char *first = token.data() + p + 1;
+        const char *last = token.data() + token.size();
+        const bool negative = first < last && *first == '-';
+        const auto parsed = std::from_chars(first, last, exponent);
+        if (parsed.ec == std::errc::result_out_of_range) {
+            exponent = negative ? -kExponentClamp : kExponentClamp;
+        } else if (parsed.ec != std::errc()) {
+            exponent = 0;
+        }
+    }
+    if (exponent > kExponentClamp) {
+        exponent = kExponentClamp;
+    } else if (exponent < -kExponentClamp) {
+        exponent = -kExponentClamp;
     }
 
     const std::size_t firstIntDigit = intDigits.find_first_not_of('0');

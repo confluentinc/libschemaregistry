@@ -618,3 +618,20 @@ TEST(VariantTest, ParseJsonAppliesTheJsonNumberGrammar) {
         EXPECT_THROW(Variant::parseJson(bad), std::exception) << bad;
     }
 }
+
+// An exponent too large for `long long` must not reach the adjusted-exponent arithmetic
+// unclamped. strtoll saturates to LLONG_MIN/LLONG_MAX, and the additions that follow would then
+// overflow signed long long - undefined behaviour, on a token parsed from untrusted JSON. The
+// exponent is read with from_chars and clamped well inside the double range instead; only its
+// sign matters, since it just tells an overflow from an underflow.
+TEST(VariantTest, ParseJsonSurvivesAnAbsurdExponent) {
+    EXPECT_EQ(Variant::parseJson("10e999999999999999999999").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("-10e999999999999999999999").toJson(), "-Infinity");
+    EXPECT_EQ(Variant::parseJson("10e-999999999999999999999").toJson(), "0.0");
+    // A negative underflow: the sign of the resulting zero is the JSON parser's to decide,
+    // not something this fix governs.
+    EXPECT_EQ(Variant::parseJson("-10e-999999999999999999999").toJson(), "0.0");
+    // The ordinary magnitudes either side must keep their behaviour.
+    EXPECT_EQ(Variant::parseJson("1e400").toJson(), "Infinity");
+    EXPECT_EQ(Variant::parseJson("1e-400").toJson(), "0.0");
+}

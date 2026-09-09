@@ -5,6 +5,8 @@
 
 #include "schemaregistry/rules/cel/AvroResultWriter.h"
 
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -74,6 +76,130 @@ bool branchAccepts(const ::avro::NodePtr &branch, const ::avro::GenericDatum &va
         default:
             return true;  // unnamed types are fully described by their base type
     }
+}
+
+/// The full name of the proto message a CEL value carries, or "" if it carries none.
+std::string celMessageName(const google::api::expr::runtime::CelValue &value) {
+    if (!value.IsMessage()) {
+        return {};
+    }
+    const google::protobuf::Message *message = value.MessageOrDie();
+    return message == nullptr
+               ? std::string()
+               : std::string(message->GetDescriptor()->full_name());
+}
+
+/// Whether the value a rule returned can be written into this union branch.
+///
+/// The counterpart of `branchAccepts` on the CEL side, and the reason both exist: a branch has
+/// to be chosen *before* the conversion (to supply the template) and confirmed after it (to
+/// write the branch index), and only the first of those has a CEL value to look at.
+///
+/// Acceptance is judged against what this client's reader actually produces: `fromAvroValue`
+/// turns only DECIMAL and TIMESTAMP_* into semantic CEL types, so a date or time-millis branch
+/// is matched as the plain int or long it is read as - the JVM's branchAccepts has temporal
+/// arms there because its reader converts those too.
+bool branchAcceptsCel(const ::avro::NodePtr &branch,
+                      const google::api::expr::runtime::CelValue &value) {
+    const bool has_logical_type =
+        branch->logicalType().type() != ::avro::LogicalType::NONE;
+    switch (branch->type()) {
+        case ::avro::AVRO_NULL:
+            return value.IsNull();
+        case ::avro::AVRO_BOOL:
+            return value.IsBool();
+        case ::avro::AVRO_INT:
+            // CEL has no 32-bit integer, so an int branch takes an int64 that fits in one.
+            if (value.IsInt64()) {
+                return value.Int64OrDie() >=
+                           std::numeric_limits<int32_t>::min() &&
+                       value.Int64OrDie() <=
+                           std::numeric_limits<int32_t>::max();
+            }
+            return value.IsUint64() &&
+                   value.Uint64OrDie() <=
+                       static_cast<uint64_t>(
+                           std::numeric_limits<int32_t>::max());
+        case ::avro::AVRO_LONG:
+            return value.IsInt64() || value.IsUint64() ||
+                   (has_logical_type && value.IsTimestamp());
+        case ::avro::AVRO_FLOAT:
+        case ::avro::AVRO_DOUBLE:
+            return value.IsDouble() || value.IsInt64() || value.IsUint64();
+        case ::avro::AVRO_STRING:
+            return value.IsString();
+        case ::avro::AVRO_ENUM: {
+            if (!value.IsString()) {
+                return false;
+            }
+            size_t symbol = 0;
+            return branch->nameIndex(std::string(value.StringOrDie().value()),
+                                     symbol);
+        }
+        case ::avro::AVRO_BYTES:
+            return value.IsBytes() ||
+                   (has_logical_type &&
+                    celMessageName(value) == "confluent.type.Decimal");
+        case ::avro::AVRO_FIXED:
+            // Raw bytes have to be exactly the declared width, since toAvroValue refuses a
+            // mismatch rather than guessing an alignment; a decimal is padded up to it, so
+            // its width is not checkable here.
+            if (value.IsBytes()) {
+                return value.BytesOrDie().value().size() ==
+                       branch->fixedSize();
+            }
+            return has_logical_type &&
+                   celMessageName(value) == "confluent.type.Decimal";
+        case ::avro::AVRO_ARRAY:
+            return value.IsList();
+        case ::avro::AVRO_MAP:
+            return value.IsMap();
+        case ::avro::AVRO_RECORD: {
+            const std::string message = celMessageName(value);
+            if (!message.empty()) {
+                // A confluent.type.Variant record is read as a Variant message and written
+                // back from one; no other message has a record shape to go into.
+                return message == "confluent.type.Variant" &&
+                       branch->name().fullname() == "confluent.type.Variant";
+            }
+            // CEL returns a record as an untagged map, which cannot be told apart from a
+            // map for a different record branch, so the first record branch in declaration
+            // order wins - the same convention as the JVM writer.
+            return value.IsMap();
+        }
+        default:
+            // Avro disallows a union directly inside a union.
+            return false;
+    }
+}
+
+/// The datum `toAvroValue` converts a returned value against.
+///
+/// `toAvroValue` reads the field's logical type, scale and schema off the datum it is handed,
+/// and a union datum forwards all three to its *currently selected* branch. So the field's own
+/// value is only a usable template when it already holds the branch the returned value belongs
+/// in: a nullable decimal that is presently null offers no scale, which turned a computed
+/// `decimal('1.23')` into an error against a phantom scale of 0 (and a computed timestamp into
+/// a silently dropped field). Resolving the branch from the value first is what the JVM
+/// writer's resolveUnion does before it recurses into the branch schema.
+::avro::GenericDatum conversionTemplate(
+    const ::avro::NodePtr &field_schema, const ::avro::GenericDatum &original,
+    const google::api::expr::runtime::CelValue &cel_value) {
+    if (field_schema->type() != ::avro::AVRO_UNION) {
+        return original;
+    }
+    for (size_t branch = 0; branch < field_schema->leaves(); ++branch) {
+        if (!branchAcceptsCel(field_schema->leafAt(branch), cel_value)) {
+            continue;
+        }
+        if (original.isUnion() && original.unionBranch() == branch) {
+            return original;  // already this branch: keep the field's own datum
+        }
+        return ::avro::GenericDatum(field_schema->leafAt(branch));
+    }
+    // No branch matches. Leave the template alone rather than throwing here, so the value
+    // still reaches toAvroValue's own fallback and wrapForUnionField's.
+    return original;
 }
 
 ::avro::GenericDatum wrapForUnionField(const ::avro::NodePtr &field_schema,
@@ -181,11 +307,13 @@ bool branchAccepts(const ::avro::NodePtr &branch, const ::avro::GenericDatum &va
                          ++field_idx) {
                         if (orig_record_schema->nameAt(field_idx) ==
                             key) {
-                            // The original field is a *shape* template for the
-                            // conversion (it carries the logical type, scale and
-                            // unit); its value is not used.
-                            auto field_template =
-                                orig_record.fieldAt(field_idx);
+                            // The template is a *shape* for the conversion (it
+                            // carries the logical type, scale and unit); its value
+                            // is not used.
+                            auto field_template = conversionTemplate(
+                                orig_record_schema->leafAt(field_idx),
+                                orig_record.fieldAt(field_idx),
+                                value_lookup.value());
                             result_record.setFieldAt(
                                 field_idx,
                                 wrapForUnionField(

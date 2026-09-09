@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -577,9 +578,10 @@ const char *kNullableSchema = R"({
 })";
 
 /// Serializes with one message-level CEL transform and reads the record back off the bytes.
-::avro::GenericDatum roundTripMessageTransform(const std::string &schema_text,
-                                               const std::string &expr,
-                                               const std::string &subject) {
+::avro::GenericDatum roundTripMessageTransform(
+    const std::string &schema_text, const std::string &expr,
+    const std::string &subject,
+    const std::function<void(::avro::GenericRecord &)> &seed = nullptr) {
     std::vector<std::string> urls = {"mock://"};
     auto client_config = std::make_shared<const ClientConfiguration>(urls);
     auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
@@ -605,6 +607,9 @@ const char *kNullableSchema = R"({
     auto &record = datum.value<::avro::GenericRecord>();
     record.field("amount").selectBranch(0);
     record.field("label").value<std::string>() = "hi";
+    if (seed) {
+        seed(record);
+    }
 
     auto registry = std::make_shared<RuleRegistry>();
     registry->registerExecutor(std::make_shared<CelExecutor>());
@@ -646,6 +651,200 @@ TEST(CelAvroMessageTransform, UnnamedNullableFieldRoundTripsThroughTheWire) {
     const auto &record = result.value<::avro::GenericRecord>();
     EXPECT_EQ(record.field("amount").type(), ::avro::AVRO_NULL);
     EXPECT_EQ(record.field("label").value<std::string>(), "hi");
+}
+
+// ---- the union branch a computed value belongs in -------------------------------------------
+//
+// `toAvroValue` reads the logical type, scale and unit off the datum it is handed, and a union
+// datum forwards all three to its *currently selected* branch. The template was the field's own
+// datum, so for a nullable field that is presently null there was nothing to convert against:
+// a decimal was rescaled to a phantom scale of 0 and a timestamp had no unit at all. The branch
+// is now resolved from the returned value first, the way the JVM writer's resolveUnion does.
+
+namespace {
+
+const char *kNullableTimestampSchema = R"({
+  "type": "record",
+  "name": "N",
+  "fields": [
+    {"name": "amount", "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}]},
+    {"name": "label", "type": "string"}
+  ]
+})";
+
+}  // namespace
+
+/// A decimal computed for a null nullable field is written at the *field's* scale. 5 rescaled to
+/// scale 2 is unscaled 500 = 0x01F4; the value the bug produced is unscaled 5, which reads back
+/// as 0.05 - a silent wrong answer, not an error, which is why this asserts on both.
+TEST(CelAvroMessageTransform, NullBranchDecimalTakesTheBranchsScale) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableSchema, "{'amount': decimal('5'), 'label': message.label}",
+        "nullable-decimal-scale");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &amount = result.value<::avro::GenericRecord>().field("amount");
+    ASSERT_EQ(amount.type(), ::avro::AVRO_BYTES);
+    EXPECT_EQ(amount.value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{0x01, 0xF4})) << "expected 5.00 at scale 2";
+    EXPECT_NE(amount.value<std::vector<uint8_t>>(), (std::vector<uint8_t>{0x05}))
+        << "written at the phantom scale of the null branch, so it reads back as 0.05";
+}
+
+/// The scale that cannot round-trip at all: 1.23 rescaled to 0 is inexact, so before the branch
+/// was resolved this whole transform failed rather than writing 1.23.
+TEST(CelAvroMessageTransform, NullBranchDecimalKeepsItsFractionalDigits) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableSchema, "{'amount': decimal('1.23'), 'label': message.label}",
+        "nullable-decimal-fraction");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &amount = result.value<::avro::GenericRecord>().field("amount");
+    ASSERT_EQ(amount.type(), ::avro::AVRO_BYTES);
+    EXPECT_EQ(amount.value<std::vector<uint8_t>>(), (std::vector<uint8_t>{0x7B}));
+}
+
+/// A timestamp computed for a null nullable field is written in the branch's unit. With no unit
+/// on the template it hit the write-back switch's default and the field came back null.
+TEST(CelAvroMessageTransform, NullBranchTimestampTakesTheBranchsUnit) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableTimestampSchema,
+        "{'amount': timestamp('2023-11-14T22:13:20.123Z'), 'label': message.label}",
+        "nullable-timestamp-unit");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &amount = result.value<::avro::GenericRecord>().field("amount");
+    ASSERT_EQ(amount.type(), ::avro::AVRO_LONG) << "the computed timestamp was dropped";
+    EXPECT_EQ(amount.value<int64_t>(), 1700000000123L);
+}
+
+/// The control for the other half of the branch choice: a field that *already* holds the branch
+/// keeps its own datum as the template, so an arithmetic transform over it still works.
+/// 12.34 + 1.00 = 13.34, unscaled 1334 = 0x0536.
+TEST(CelAvroMessageTransform, NonNullBranchStillConvertsAgainstItself) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableSchema,
+        "{'amount': decimals.add(decimal(message.amount), decimal('1.00')), "
+        "'label': message.label}",
+        "nullable-decimal-present", [](::avro::GenericRecord &record) {
+            record.field("amount").selectBranch(1);
+            record.field("amount").value<std::vector<uint8_t>>() = {0x04, 0xD2};
+        });
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &amount = result.value<::avro::GenericRecord>().field("amount");
+    ASSERT_EQ(amount.type(), ::avro::AVRO_BYTES);
+    EXPECT_EQ(amount.value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{0x05, 0x36}));
+}
+
+// ---- decimal-on-fixed: the padding has to sign-extend -----------------------------------------
+//
+// A `fixed` field is exactly fixedSize() bytes wide, but a decimal's two's-complement encoding is
+// minimal, so it has to be padded up. The pad byte is 0xFF for a negative coefficient and 0x00
+// for a non-negative one - zero-padding a negative decimal turns it into a large positive one,
+// which is why the negative case is the one that matters. Raw bytes, by contrast, are not padded
+// at all: a width mismatch there is an error rather than a guessed alignment.
+
+namespace {
+
+/// `amount` is nullable so the shared fixture can seed it as null; the branch is resolved from
+/// the returned decimal.
+const char *kNullableFixedDecimalSchema = R"({
+  "type": "record",
+  "name": "N",
+  "fields": [
+    {"name": "amount",
+     "type": ["null", {"type": "fixed", "name": "Dec", "size": 8,
+                       "logicalType": "decimal", "precision": 18, "scale": 2}]},
+    {"name": "label", "type": "string"}
+  ]
+})";
+
+std::vector<uint8_t> fixedBytesOf(const ::avro::GenericDatum &datum) {
+    return datum.value<::avro::GenericFixed>().value();
+}
+
+}  // namespace
+
+/// A non-negative coefficient pads with 0x00. 1.23 is unscaled 123 = 0x7B in one byte.
+TEST(CelAvroMessageTransform, FixedDecimalPadsToTheDeclaredWidth) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableFixedDecimalSchema, "{'amount': decimal('1.23'), 'label': message.label}",
+        "fixed-decimal-positive");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &amount = result.value<::avro::GenericRecord>().field("amount");
+    ASSERT_EQ(amount.type(), ::avro::AVRO_FIXED);
+    EXPECT_EQ(fixedBytesOf(amount),
+              (std::vector<uint8_t>{0, 0, 0, 0, 0, 0, 0, 0x7B}));
+}
+
+/// The case zero-padding gets wrong: -1.23 is unscaled -123 = 0x85 minimally, so the seven pad
+/// bytes have to be 0xFF. Padded with 0x00 the same bytes read back as 133, not -1.23.
+TEST(CelAvroMessageTransform, FixedDecimalPadSignExtends) {
+    ::avro::GenericDatum result = roundTripMessageTransform(
+        kNullableFixedDecimalSchema, "{'amount': decimal('-1.23'), 'label': message.label}",
+        "fixed-decimal-negative");
+
+    ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
+    const auto &amount = result.value<::avro::GenericRecord>().field("amount");
+    ASSERT_EQ(amount.type(), ::avro::AVRO_FIXED);
+    EXPECT_EQ(fixedBytesOf(amount),
+              (std::vector<uint8_t>{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x85}));
+    EXPECT_NE(fixedBytesOf(amount),
+              (std::vector<uint8_t>{0, 0, 0, 0, 0, 0, 0, 0x85}))
+        << "zero-padded, so the field reads back as 1.33 instead of -1.23";
+}
+
+/// A coefficient wider than the field is refused at encode rather than truncated or widened:
+/// avro-cpp would not read back bytes wider than the declared size. 99999999 needs four bytes,
+/// the field holds two.
+TEST(CelAvroMessageTransform, FixedDecimalTooWideIsRefused) {
+    const char *narrow = R"({
+      "type": "record",
+      "name": "N",
+      "fields": [
+        {"name": "amount",
+         "type": ["null", {"type": "fixed", "name": "Dec", "size": 2,
+                           "logicalType": "decimal", "precision": 4, "scale": 0}]},
+        {"name": "label", "type": "string"}
+      ]
+    })";
+    EXPECT_THROW(roundTripMessageTransform(
+                     narrow, "{'amount': decimal('99999999'), 'label': message.label}",
+                     "fixed-decimal-too-wide"),
+                 std::exception);
+
+    // The must-fail twin: a coefficient that does fit still round-trips, so "throws" cannot
+    // just mean the fixed path stopped working. 1234 = 0x04D2.
+    ::avro::GenericDatum ok = roundTripMessageTransform(
+        narrow, "{'amount': decimal('1234'), 'label': message.label}",
+        "fixed-decimal-fits");
+    EXPECT_EQ(fixedBytesOf(ok.value<::avro::GenericRecord>().field("amount")),
+              (std::vector<uint8_t>{0x04, 0xD2}));
+}
+
+/// Raw bytes are not padded: a rule returning a byte string of the wrong width for a `fixed`
+/// field is an error, matching the JVM's toFixed ("expects N bytes, got M").
+TEST(CelAvroMessageTransform, FixedRawBytesMustMatchTheWidthExactly) {
+    const char *rawFixed = R"({
+      "type": "record",
+      "name": "N",
+      "fields": [
+        {"name": "amount", "type": ["null", {"type": "fixed", "name": "Id", "size": 4}]},
+        {"name": "label", "type": "string"}
+      ]
+    })";
+    EXPECT_THROW(roundTripMessageTransform(
+                     rawFixed, "{'amount': b'ab', 'label': message.label}",
+                     "fixed-raw-short"),
+                 std::exception);
+
+    ::avro::GenericDatum ok = roundTripMessageTransform(
+        rawFixed, "{'amount': b'abcd', 'label': message.label}", "fixed-raw-exact");
+    EXPECT_EQ(fixedBytesOf(ok.value<::avro::GenericRecord>().field("amount")),
+              (std::vector<uint8_t>{'a', 'b', 'c', 'd'}));
 }
 
 // ---- a rule that cannot handle a null must fail loudly ---------------------------------------
@@ -723,3 +922,49 @@ TEST(CelAvroNullCondition, AFalseConditionIsStillABool) {
     ASSERT_EQ(result.type(), ::avro::AVRO_BOOL);
     EXPECT_FALSE(result.value<bool>());
 }
+
+/// A decimal written back into a `bytes` decimal field carries the *minimal* two's-complement
+/// encoding, byte-for-byte what Avro Java's Conversions.DecimalConversion.toBytes produces.
+/// Measured against avro 1.12 at scale 2: 12.34 -> 04d2, -12.34 -> fb2e, 0.00 -> 00.
+///
+/// The sibling `fixed` shape is padded to the field's declared width instead (toFixed gives
+/// 00000000000004d2 for the same value); see toAvroValue in CelUtils.cpp.
+TEST(CelAvroWriteBack, ComputedDecimalUsesMinimalBytes) {
+    const char *bytesSchema = R"({
+      "type": "record",
+      "name": "R",
+      "fields": [
+        {"name": "amount",
+         "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2},
+         "confluent:tags": ["AMOUNT"]}
+      ]
+    })";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(bytesSchema);
+
+    struct Case {
+        const char *expr;
+        const char *expected;  // hex, from avro java's DecimalConversion.toBytes
+    };
+    for (const Case &c : {Case{"decimals.add(value, decimal('0.00'))", "04d2"},
+                          Case{"decimals.sub(value, decimal('24.68'))", "fb2e"},
+                          Case{"decimals.sub(value, decimal('12.34'))", "00"}}) {
+        ::avro::GenericDatum datum(schema);
+        // 0x04D2 = 1234 unscaled, i.e. 12.34 at scale 2.
+        datum.value<::avro::GenericRecord>().fieldAt(0).value<std::vector<uint8_t>>() =
+            std::vector<uint8_t>{0x04, 0xD2};
+
+        ::avro::GenericDatum result = runTransform(schema, datum, "AMOUNT", c.expr);
+        ASSERT_EQ(result.type(), ::avro::AVRO_RECORD) << c.expr;
+        const std::vector<uint8_t> &bytes =
+            result.value<::avro::GenericRecord>().fieldAt(0).value<std::vector<uint8_t>>();
+        std::string hex;
+        for (uint8_t b : bytes) {
+            static const char *digits = "0123456789abcdef";
+            hex.push_back(digits[b >> 4]);
+            hex.push_back(digits[b & 0x0F]);
+        }
+        EXPECT_EQ(hex, c.expected) << c.expr;
+        // Two of the three change the value, so a regression cannot pass by doing nothing.
+    }
+}
+
