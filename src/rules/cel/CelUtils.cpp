@@ -25,6 +25,7 @@ void result_bytes_for_fixed(std::vector<uint8_t> &bytes, size_t fixed_size) {
 #endif
 #include "schemaregistry/rules/cel/ProtobufResultWriter.h"
 
+#include <limits>
 #include <utility>
 
 #include "absl/time/time.h"
@@ -323,6 +324,79 @@ google::api::expr::runtime::CelValue fromAvroValue(
 
 namespace {
 
+/// A numeric CEL value as an int64, for an integer-typed field.
+int64_t celAsAvroInt(const ::avro::GenericDatum &original,
+                     const google::api::expr::runtime::CelValue &value) {
+    if (value.IsInt64()) {
+        return value.Int64OrDie();
+    }
+    const uint64_t u = value.Uint64OrDie();
+    if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::out_of_range("value " + std::to_string(u) +
+                                " is out of range for an Avro " +
+                                ::avro::toString(original.type()) + " field");
+    }
+    return static_cast<int64_t>(u);
+}
+
+/// A numeric CEL value as a double, for a floating-typed field.
+double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
+    if (value.IsDouble()) {
+        return value.DoubleOrDie();
+    }
+    if (value.IsInt64()) {
+        return static_cast<double>(value.Int64OrDie());
+    }
+    return static_cast<double>(value.Uint64OrDie());
+}
+
+/// A numeric CEL value as a datum of the *field's* type.
+///
+/// Each arm used to build a datum of the CEL value's own type, so an `int` field received an
+/// AVRO_LONG datum and a `float` field an AVRO_DOUBLE one - and from an *identity* transform,
+/// because fromAvroValue widens an int to CEL's only integer type and a float to its only
+/// floating one. The record then no longer matched its own schema, and the damage showed up
+/// on the wire rather than as an error: the encoder wrote eight bytes for the double where a
+/// reader expected four for the float, so that field and everything after it decoded from
+/// misaligned bytes (1.5f came back as 0 and the next double as 5.3e-315).
+///
+/// The JVM converts against the *schema* instead - AvroResultWriter's INT, LONG, FLOAT and
+/// DOUBLE cases call narrowToInt, narrowToLong, narrowToFloat and narrowToDouble - so the
+/// target type decides here too.
+::avro::GenericDatum numericToAvro(
+    const ::avro::GenericDatum &original,
+    const google::api::expr::runtime::CelValue &cel_value) {
+    switch (original.type()) {
+        case ::avro::AVRO_INT: {
+            // narrowToInt takes an in-range integer and nothing else: a double is a type
+            // mismatch there rather than a truncation, and branchAcceptsCel refuses one here
+            // for the same reason, so only an integer reaches this arm.
+            const int64_t v = celAsAvroInt(original, cel_value);
+            if (v < std::numeric_limits<int32_t>::min() ||
+                v > std::numeric_limits<int32_t>::max()) {
+                throw std::out_of_range("value " + std::to_string(v) +
+                                        " is out of range for an Avro int field");
+            }
+            return ::avro::GenericDatum(static_cast<int32_t>(v));
+        }
+        case ::avro::AVRO_LONG:
+            return ::avro::GenericDatum(celAsAvroInt(original, cel_value));
+        case ::avro::AVRO_FLOAT:
+            // narrowToFloat takes any number and calls floatValue(), accepting the precision
+            // loss a float field declares by being one.
+            return ::avro::GenericDatum(
+                static_cast<float>(celAsAvroDouble(cel_value)));
+        case ::avro::AVRO_DOUBLE:
+            return ::avro::GenericDatum(celAsAvroDouble(cel_value));
+        default:
+            // Not a numeric field. recordFromCelMap refuses this before converting, so this
+            // is reached only for an array element or a map value, where the element schema
+            // is the one that does not accept a number.
+            throw std::runtime_error("cannot write a number to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+    }
+}
+
 /// Writes a CEL decimal back into the shape the field's schema declares.
 ///
 /// `fromAvroValue` reads a DECIMAL logical type into a confluent.type.Decimal message, so a
@@ -459,14 +533,8 @@ namespace {
     }
     if (cel_value.IsBool()) {
         return ::avro::GenericDatum(cel_value.BoolOrDie());
-    } else if (cel_value.IsInt64()) {
-        return ::avro::GenericDatum(
-            static_cast<int64_t>(cel_value.Int64OrDie()));
-    } else if (cel_value.IsUint64()) {
-        return ::avro::GenericDatum(
-            static_cast<int64_t>(cel_value.Uint64OrDie()));
-    } else if (cel_value.IsDouble()) {
-        return ::avro::GenericDatum(cel_value.DoubleOrDie());
+    } else if (cel_value.IsInt64() || cel_value.IsUint64() || cel_value.IsDouble()) {
+        return numericToAvro(original, cel_value);
     } else if (cel_value.IsString()) {
         std::string text(cel_value.StringOrDie().value());
         // An enum field is read as its symbol name (see AVRO_ENUM in fromAvroValue), so a rule
@@ -515,18 +583,23 @@ namespace {
                 ::avro::ValidSchema(orig_array_schema)};
             auto &result_array = result_datum.value<::avro::GenericArray>();
 
-            ::avro::GenericDatum element_template;
-            auto &orig_array = original.value<::avro::GenericArray>().value();
-            if (!orig_array.empty()) {
-                element_template = orig_array[0];
-            }
+            // The element template comes from the array's schema, not from element [0]: an
+            // empty array offered none at all, so a rule that adds elements to one converted
+            // them against a default-constructed (null) datum. NodeArray carries the item
+            // type as its single leaf.
+            const ::avro::GenericDatum element_template{
+                orig_array_schema->leafAt(0)};
 
             for (int i = 0; i < cel_list->size(); ++i) {
                 auto item = cel_list->Get(nullptr, i);
-                if (!item.IsError()) {
-                    result_array.value().push_back(
-                        toAvroValue(element_template, item));
+                if (item.IsError()) {
+                    // Skipping shortened the array and reported success, so a failed element
+                    // expression looked like a shorter list than the rule wrote.
+                    throw std::runtime_error(
+                        "a CEL rule failed for element " + std::to_string(i) +
+                        " of an array field");
                 }
+                result_array.value().push_back(toAvroValue(element_template, item));
             }
 
             return result_datum;
@@ -545,11 +618,9 @@ namespace {
                 ::avro::ValidSchema(orig_map_schema)};
             auto &result_map = result_datum.value<::avro::GenericMap>();
 
-            ::avro::GenericDatum value_template;
-            auto &orig_map = original.value<::avro::GenericMap>().value();
-            if (!orig_map.empty()) {
-                value_template = orig_map.begin()->second;
-            }
+            // From the schema, for the reason given in the array arm above. NodeMap holds
+            // the key type at leaf 0 and the value type at leaf 1.
+            const ::avro::GenericDatum value_template{orig_map_schema->leafAt(1)};
 
             auto map_keys = cel_map->ListKeys(nullptr);
             if (map_keys.ok()) {

@@ -393,8 +393,18 @@ void setRepeatedField(google::protobuf::Message *out,
     const auto *list = value.ListOrDie();
     for (int i = 0; i < list->size(); ++i) {
         auto element = list->Get(nullptr, i);
-        if (element.IsError() || element.IsNull()) {
-            continue;
+        if (element.IsNull()) {
+            // Skipping changed the list's length and reported success, so `[1, null, 2]`
+            // came back as a two-element field. protobuf has no null to store, and the JVM's
+            // write-back parse says "Repeated field elements cannot be null in field: X".
+            throw std::runtime_error("cannot write null to element " + std::to_string(i) +
+                                     " of repeated field " +
+                                     std::string(fd->full_name()));
+        }
+        if (element.IsError()) {
+            throw std::runtime_error("a CEL rule failed for element " + std::to_string(i) +
+                                     " of repeated field " +
+                                     std::string(fd->full_name()));
         }
         if (fd->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
             fillMessageFromCel(out->GetReflection()->AddMessage(out, fd), element);
@@ -434,11 +444,21 @@ void setMapField(google::protobuf::Message *out,
     for (int i = 0; i < keys_list->size(); ++i) {
         auto key_val = keys_list->Get(nullptr, i);
         if (key_val.IsError()) {
-            continue;
+            throw std::runtime_error("a CEL rule failed for a key of map field " +
+                                     std::string(fd->full_name()));
         }
         auto lookup = cel_map->Get(nullptr, key_val);
-        if (!lookup.has_value() || lookup.value().IsNull()) {
-            continue;
+        if (!lookup.has_value()) {
+            throw std::runtime_error("a key of map field " +
+                                     std::string(fd->full_name()) +
+                                     " has no value");
+        }
+        if (lookup.value().IsNull()) {
+            // Dropping the entry reported success while deleting it. A protobuf map value
+            // cannot be null, and the JVM's write-back parse says "Map value cannot be
+            // null." - measured against protobuf-java 4.35.1.
+            throw std::runtime_error("cannot write a null value to map field " +
+                                     std::string(fd->full_name()));
         }
         google::protobuf::Message *pair = out->GetReflection()->AddMessage(out, fd);
         writeScalar(ScalarSink{pair, key_fd, /*append=*/false}, key_fd, key_val);

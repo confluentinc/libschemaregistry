@@ -223,3 +223,35 @@ TEST(CelProtobufContainerWriteBack, AWrongShapeForAContainerIsRejected) {
     EXPECT_EQ(ok.amounts_size(), 2);
     EXPECT_EQ(ok.amount_map().size(), 1u);
 }
+
+/// A null or failed element inside a container was silently omitted, so `[1, null, 2]` came
+/// back as a two-element field and a map entry with a null value came back deleted - both
+/// reported as a successful transform. protobuf has no null to store in either place, and the
+/// JVM's write-back parse says so: "Repeated field elements cannot be null in field: X" and
+/// "Map value cannot be null." (measured against protobuf-java 4.35.1, which also accepts a
+/// null for the *whole* field - that clears it, and is handled before this point).
+TEST(CelProtobufContainerWriteBack, ANullInsideAContainerIsRejected) {
+    // A null element in the repeated decimal field, and in a repeated scalar.
+    EXPECT_THROW(transform("{'amounts': [decimal('1.00'), null], "
+                           "'amount_map': message.amount_map, 'nested': message.nested, "
+                           "'label': message.label}"),
+                 std::exception);
+    EXPECT_THROW(transform("{'amounts': message.amounts, 'amount_map': message.amount_map, "
+                           "'nested': message.nested, 'label': message.label, "
+                           "'codes': ['a', null, 'b']}"),
+                 std::exception);
+    // A null value in the map.
+    EXPECT_THROW(transform("{'amounts': message.amounts, "
+                           "'amount_map': {'a': decimal('1.00'), 'b': null}, "
+                           "'nested': message.nested, 'label': message.label}"),
+                 std::exception);
+
+    // The must-fail twins: the same shapes without the null still work, so "throws" cannot
+    // mean the container paths stopped accepting elements.
+    parity::ValueTypeContainers ok = transform(
+        "{'amounts': [decimal('1.00')], 'amount_map': {'a': decimal('1.00')}, "
+        "'nested': message.nested, 'label': message.label, 'codes': ['a', 'b']}");
+    EXPECT_EQ(ok.amounts_size(), 1);
+    EXPECT_EQ(ok.amount_map().size(), 1u);
+    EXPECT_EQ(ok.codes_size(), 2);
+}

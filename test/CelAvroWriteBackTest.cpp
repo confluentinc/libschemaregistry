@@ -629,10 +629,13 @@ const char *kNullableSchema = R"({
     ::avro::ValidSchema avro_schema = AvroSerializer::compileJsonSchema(schema_text);
     ::avro::GenericDatum datum(avro_schema);
     auto &record = datum.value<::avro::GenericRecord>();
-    record.field("amount").selectBranch(0);
-    record.field("label").value<std::string>() = "hi";
     if (seed) {
+        // A seed owns the whole record: the defaults below name this file's nullable fixture,
+        // which not every schema passed here declares.
         seed(record);
+    } else {
+        record.field("amount").selectBranch(0);
+        record.field("label").value<std::string>() = "hi";
     }
 
     auto registry = std::make_shared<RuleRegistry>();
@@ -753,6 +756,7 @@ TEST(CelAvroMessageTransform, NonNullBranchStillConvertsAgainstItself) {
         "nullable-decimal-present", [](::avro::GenericRecord &record) {
             record.field("amount").selectBranch(1);
             record.field("amount").value<std::vector<uint8_t>>() = {0x04, 0xD2};
+            record.field("label").value<std::string>() = "hi";
         });
 
     ASSERT_EQ(result.type(), ::avro::AVRO_RECORD);
@@ -923,6 +927,141 @@ TEST(CelAvroMessageTransform, TimestampNanosRangeIsChecked) {
     msDatum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() = 0;
     EXPECT_NO_THROW(runMessageTransform(ms, msDatum,
                                         "{'ts': timestamp('9999-12-31T23:59:59.999Z')}"));
+}
+
+// ---- a numeric field has to get a datum of its own type ---------------------------------------
+//
+// `toAvroValue` built a datum of the CEL value's type, not the field's. `fromAvroValue` widens
+// an Avro int to CEL's only integer type and an Avro float to its only floating one, so an
+// **identity** transform handed an `int` field an AVRO_LONG datum and a `float` field an
+// AVRO_DOUBLE one. The record no longer matched its own schema, and nothing reported it - the
+// damage appeared on the wire, because the encoder wrote eight bytes for the double where the
+// reader expected four for the float and every field after it decoded from misaligned bytes:
+//
+//   declared:   int long float double
+//   before:     long long double double     -> read back f=0, d=5.3024e-315
+//   after:      int  long float  double     -> read back f=1.5, d=2.5
+//
+// The JVM converts against the schema instead: AvroResultWriter's INT/LONG/FLOAT/DOUBLE cases
+// call narrowToInt/narrowToLong/narrowToFloat/narrowToDouble.
+
+namespace {
+
+const char *kNumericSchema = R"({
+  "type": "record",
+  "name": "N2",
+  "fields": [
+    {"name": "i", "type": "int"},
+    {"name": "l", "type": "long"},
+    {"name": "f", "type": "float"},
+    {"name": "d", "type": "double"}
+  ]
+})";
+
+::avro::GenericDatum numericRecord(const ::avro::ValidSchema &schema) {
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<int32_t>() = 7;
+    record.fieldAt(1).value<int64_t>() = 8;
+    record.fieldAt(2).value<float>() = 1.5f;
+    record.fieldAt(3).value<double>() = 2.5;
+    return datum;
+}
+
+const char *kNumericIdentity = "{'i': message.i, 'l': message.l, 'f': message.f, "
+                               "'d': message.d}";
+
+}  // namespace
+
+/// The datum types themselves, which is where the fault was.
+TEST(CelAvroMessageTransform, ANumericFieldKeepsItsOwnDatumType) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kNumericSchema);
+    ::avro::GenericDatum out =
+        runMessageTransform(schema, numericRecord(schema), kNumericIdentity);
+
+    ASSERT_EQ(out.type(), ::avro::AVRO_RECORD);
+    const auto &record = out.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.field("i").type(), ::avro::AVRO_INT);
+    EXPECT_EQ(record.field("l").type(), ::avro::AVRO_LONG);
+    EXPECT_EQ(record.field("f").type(), ::avro::AVRO_FLOAT);
+    EXPECT_EQ(record.field("d").type(), ::avro::AVRO_DOUBLE);
+    EXPECT_EQ(record.field("i").value<int32_t>(), 7);
+    EXPECT_EQ(record.field("f").value<float>(), 1.5f);
+}
+
+/// And the consequence, through the real serializer and back: asserting on the datum alone is
+/// what let this hide, since a wrong-typed datum reports its own type quite happily.
+TEST(CelAvroMessageTransform, ANumericRecordSurvivesTheWire) {
+    ::avro::GenericDatum out = roundTripMessageTransform(
+        kNumericSchema, kNumericIdentity, "numeric-wire",
+        [](::avro::GenericRecord &record) {
+            record.field("i").value<int32_t>() = 7;
+            record.field("l").value<int64_t>() = 8;
+            record.field("f").value<float>() = 1.5f;
+            record.field("d").value<double>() = 2.5;
+        });
+
+    ASSERT_EQ(out.type(), ::avro::AVRO_RECORD);
+    const auto &record = out.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.field("i").value<int32_t>(), 7);
+    EXPECT_EQ(record.field("l").value<int64_t>(), 8);
+    // The two that came back as 0 and 5.3024e-315 before, from the misalignment.
+    EXPECT_EQ(record.field("f").value<float>(), 1.5f);
+    EXPECT_EQ(record.field("d").value<double>(), 2.5);
+}
+
+/// An int field takes an integer in int32 range and refuses one outside it, which is
+/// narrowToInt's "Value X out of range for INT field". A float field takes any number and
+/// accepts the precision loss, as narrowToFloat's floatValue() does.
+TEST(CelAvroMessageTransform, NumericNarrowingIsRangeChecked) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kNumericSchema);
+    ::avro::GenericDatum in = numericRecord(schema);
+
+    auto with = [&](const std::string &field, const std::string &value) {
+        std::string expr = "{";
+        for (const char *name : {"i", "l", "f", "d"}) {
+            if (expr.size() > 1) {
+                expr += ", ";
+            }
+            expr += std::string("'") + name + "': " +
+                    (field == name ? value : std::string("message.") + name);
+        }
+        return runMessageTransform(schema, in, expr + "}");
+    };
+
+    EXPECT_EQ(with("i", "2147483647").value<::avro::GenericRecord>()
+                  .field("i").value<int32_t>(), 2147483647);
+    EXPECT_EQ(with("i", "-2147483648").value<::avro::GenericRecord>()
+                  .field("i").value<int32_t>(), -2147483648);
+    EXPECT_THROW(with("i", "2147483648"), std::exception);
+    EXPECT_THROW(with("i", "-2147483649"), std::exception);
+    // An integer for a floating field is a widening both clients allow.
+    EXPECT_EQ(with("f", "3").value<::avro::GenericRecord>().field("f").value<float>(), 3.0f);
+    EXPECT_EQ(with("d", "3").value<::avro::GenericRecord>().field("d").value<double>(), 3.0);
+    // A double for an int field is a type mismatch on the JVM, not a truncation.
+    EXPECT_THROW(with("i", "2.0"), std::exception);
+    EXPECT_THROW(with("l", "2.0"), std::exception);
+}
+
+/// An array's element template now comes from its schema rather than from element [0], so a
+/// rule that adds elements to an **empty** array converts them against the declared item type
+/// instead of against a default-constructed null datum.
+TEST(CelAvroMessageTransform, ElementsAddedToAnEmptyArrayGetTheDeclaredType) {
+    const char *arraySchema = R"({
+      "type": "record", "name": "N2",
+      "fields": [{"name": "ns", "type": {"type": "array", "items": "int"}}]
+    })";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(arraySchema);
+    ::avro::GenericDatum datum(schema);  // ns is empty
+
+    ::avro::GenericDatum out = runMessageTransform(schema, datum, "{'ns': [1, 2]}");
+    const auto &array = out.value<::avro::GenericRecord>()
+                            .field("ns").value<::avro::GenericArray>().value();
+    ASSERT_EQ(array.size(), 2u);
+    EXPECT_EQ(array[0].type(), ::avro::AVRO_INT);
+    EXPECT_EQ(array[0].value<int32_t>(), 1);
+    // Out of int32 range is refused per element, the same as for a scalar field.
+    EXPECT_THROW(runMessageTransform(schema, datum, "{'ns': [2147483648]}"), std::exception);
 }
 
 // ---- decimal-on-fixed: the padding has to sign-extend -----------------------------------------

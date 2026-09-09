@@ -77,6 +77,9 @@ message ValueTypeContainers {
   }];
   ValueTypeNested nested = 3;
   string label = 4;
+  // A repeated *scalar*, so a container test can cover the element path that does not go
+  // through the value-type leaf. The other clients' parity fixtures already declare it.
+  repeated string codes = 5;
 }
 
 message ValueTypeNested {
