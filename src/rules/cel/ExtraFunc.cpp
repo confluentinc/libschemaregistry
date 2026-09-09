@@ -171,9 +171,18 @@ absl::optional<decimal::Decimal> toDecimalDyn(const cel::CelValue& v, std::strin
         return decimal::Decimal(std::to_string(v.Uint64OrDie()));
     }
     if (v.IsDouble()) {
-        // Shortest round-tripping form, matching BigDecimal.valueOf(double). NaN/Inf have
-        // no decimal representation (BigDecimal.valueOf throws on them), and std::to_chars
-        // would otherwise emit "nan"/"inf" that Decimal would parse into a non-finite value.
+        // Shortest round-tripping form, via std::to_chars. This deliberately does *not*
+        // reproduce BigDecimal.valueOf(double), which routes through Double.toString: that
+        // always writes at least one fractional digit and uses plain notation only for
+        // 1e-3 <= |d| < 1e7, so Java reads 5.0 at scale 1 and 1e7 at scale -6 where
+        // to_chars gives "5" (scale 0) and "1e+07" (scale -7). Byte-identical float/double
+        // rendering across the clients was designed, implemented in all seven and then
+        // deliberately backed out on cost, so each client keeps its native rendering; do not
+        // "fix" this toward Java without revisiting that.
+        //
+        // NaN/Inf have no decimal representation (BigDecimal.valueOf throws on them), and
+        // std::to_chars would otherwise emit "nan"/"inf" that Decimal would parse into a
+        // non-finite value.
         double d = v.DoubleOrDie();
         if (!std::isfinite(d)) {
             *error_out = "decimal: cannot convert non-finite double to Decimal";
