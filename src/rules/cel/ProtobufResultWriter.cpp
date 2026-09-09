@@ -5,6 +5,9 @@
 
 #include "schemaregistry/rules/cel/ProtobufResultWriter.h"
 
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -179,60 +182,209 @@ struct ScalarSink {
     }
 };
 
-/// Writes one scalar, narrowing the CEL value to what the field's type accepts. CEL has
-/// one integer type, so a narrower field needs converting back rather than rejecting.
+/// The CEL type a value carries, for an error message.
+const char *celTypeName(const google::api::expr::runtime::CelValue &value) {
+    if (value.IsBool()) return "a bool";
+    if (value.IsInt64()) return "an int";
+    if (value.IsUint64()) return "a uint";
+    if (value.IsDouble()) return "a double";
+    if (value.IsString()) return "a string";
+    if (value.IsBytes()) return "bytes";
+    if (value.IsList()) return "a list";
+    if (value.IsMap()) return "a map";
+    if (value.IsMessage()) return "a message";
+    if (value.IsTimestamp()) return "a timestamp";
+    if (value.IsDuration()) return "a duration";
+    if (value.IsNull()) return "null";
+    return "this value";
+}
+
+[[noreturn]] void refuseScalar(const google::protobuf::FieldDescriptor *fd,
+                               const google::api::expr::runtime::CelValue &value,
+                               const char *kind) {
+    throw std::runtime_error("cannot write " + std::string(celTypeName(value)) + " to " +
+                             kind + " field " + std::string(fd->full_name()));
+}
+
+[[noreturn]] void refuseRange(const google::protobuf::FieldDescriptor *fd,
+                              const std::string &shown) {
+    throw std::runtime_error("value " + shown + " is out of range for field " +
+                             std::string(fd->full_name()));
+}
+
+/// A double as an integer, only when it is exactly integral and inside the int64 range. A
+/// fractional value is a rule-authoring mistake rather than something to truncate.
+///
+/// The upper bound is exclusive of 2^63: `int64 max` as a double rounds *up* to 2^63, so
+/// comparing against it would admit 2^63 itself, which the cast then makes undefined.
+/// `-(int64 min as double)` is exactly 2^63. NaN fails the integral test and an infinity fails
+/// the range test.
+int64_t exactlyIntegral(const google::protobuf::FieldDescriptor *fd, double d) {
+    const double truncated = std::trunc(d);
+    if (truncated != d) {
+        throw std::runtime_error("cannot write non-integral " + std::to_string(d) +
+                                 " to integer field " + std::string(fd->full_name()));
+    }
+    constexpr double kMin = static_cast<double>(std::numeric_limits<int64_t>::min());
+    if (!(truncated >= kMin && truncated < -kMin)) {
+        refuseRange(fd, std::to_string(d));
+    }
+    return static_cast<int64_t>(truncated);
+}
+
+/// A CEL value as a signed integer.
+int64_t celAsInt(const google::protobuf::FieldDescriptor *fd,
+                 const google::api::expr::runtime::CelValue &value) {
+    // A bool is checked first because protobuf JSON refuses `true` for an integer field, and
+    // it would otherwise be a perfectly good 1.
+    if (value.IsBool()) refuseScalar(fd, value, "integer");
+    if (value.IsInt64()) return value.Int64OrDie();
+    if (value.IsUint64()) {
+        const uint64_t u = value.Uint64OrDie();
+        if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            refuseRange(fd, std::to_string(u));
+        }
+        return static_cast<int64_t>(u);
+    }
+    if (value.IsDouble()) return exactlyIntegral(fd, value.DoubleOrDie());
+    refuseScalar(fd, value, "integer");
+}
+
+/// A CEL value as an unsigned integer. Kept separate from `celAsInt` because routing an
+/// unsigned value through int64 would reject everything above int64 max - half the protobuf
+/// uint64 domain, which an identity transform has to round-trip.
+uint64_t celAsUint(const google::protobuf::FieldDescriptor *fd,
+                   const google::api::expr::runtime::CelValue &value) {
+    if (value.IsUint64()) return value.Uint64OrDie();
+    const int64_t i = celAsInt(fd, value);
+    if (i < 0) {
+        refuseRange(fd, std::to_string(i));
+    }
+    return static_cast<uint64_t>(i);
+}
+
+/// A CEL value as a double. A bool is refused rather than written as 1, matching protobuf
+/// JSON ("Not a double value: true") and the integer path above.
+double celAsDouble(const google::protobuf::FieldDescriptor *fd,
+                   const google::api::expr::runtime::CelValue &value) {
+    if (value.IsBool()) refuseScalar(fd, value, "float");
+    if (value.IsDouble()) return value.DoubleOrDie();
+    // An integer for a floating field is a widening, not a coercion, and every other client
+    // takes it. Missing this, `{"price": 3}` for a double field silently wrote 0.0.
+    if (value.IsInt64()) return static_cast<double>(value.Int64OrDie());
+    if (value.IsUint64()) return static_cast<double>(value.Uint64OrDie());
+    refuseScalar(fd, value, "float");
+}
+
+/// Narrows a double the way `JsonFormat.parseFloat` does: a finite value outside the float
+/// range is an error rather than an infinity, with the same 1e-6 slack that method allows.
+/// NaN and the infinities pass through - it accepts those explicitly.
+float narrowToFloat(const google::protobuf::FieldDescriptor *fd, double d) {
+    constexpr double kEpsilon = 1e-6;
+    const double limit = static_cast<double>(std::numeric_limits<float>::max()) * (1 + kEpsilon);
+    if (std::isfinite(d) && (d > limit || d < -limit)) {
+        throw std::runtime_error("out of range float value for field " +
+                                 std::string(fd->full_name()) + ": " + std::to_string(d));
+    }
+    return static_cast<float>(d);
+}
+
+int64_t boundedInt(const google::protobuf::FieldDescriptor *fd, int64_t v, int64_t min,
+                   int64_t max) {
+    if (v < min || v > max) {
+        refuseRange(fd, std::to_string(v));
+    }
+    return v;
+}
+
+uint64_t boundedUint(const google::protobuf::FieldDescriptor *fd, uint64_t v, uint64_t max) {
+    if (v > max) {
+        refuseRange(fd, std::to_string(v));
+    }
+    return v;
+}
+
+/// Writes one scalar, narrowing the CEL value to what the field's type accepts. CEL has one
+/// integer type and one floating type, so a narrower field needs converting back - but only
+/// where the conversion is exact, and only from a value of the field's own kind.
+///
+/// Every arm used to be `if (it matches) write it;` with no else and no error path anywhere
+/// above, so a wrong-typed value was **silently dropped** and the field came back as its
+/// proto3 default. Under replace semantics that is a wrong answer, not a no-op, and two of the
+/// cases were ordinary rules rather than mistakes: `{"price": 3}` for a `double` field wrote
+/// 0.0 (an int is not `IsDouble()`), and `2.0` for an `int32` wrote 0. Where a value was
+/// written, `static_cast` did the narrowing, so 2147483648 became -2147483648.
+///
+/// The contract is protobuf's own JSON parser, which is what the JVM's write-back parses the
+/// result map with. Measured against protobuf-java 4.35.1:
+///
+///     int32 <- 1.9        REJECT "Not an int32 value: 1.9"
+///     int32 <- 2.0        2
+///     int32 <- 2147483648 REJECT "Not an int32 value"
+///     bool  <- 0          REJECT "Invalid bool value: 0"
+///     bytes <- 5          REJECT
+///     float <- 1.0e40     REJECT "Out of range float value"
+///     double <- 3         3.0
+///
+/// That parser is also lenient the other way - it stringifies a number into a string field,
+/// reads "true"/"false" as a bool and base64-decodes a string into a bytes field - and none of
+/// that is followed here. Those coercions exist only because its input crossed a JSON
+/// transport, which this writer does not cross, and each one turns a rule-authoring mistake
+/// into silently wrong data.
 void writeScalar(const ScalarSink &sink,
                  const google::protobuf::FieldDescriptor *fd,
                  const google::api::expr::runtime::CelValue &value) {
     switch (fd->cpp_type()) {
         case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
-            if (value.IsBool()) sink.setBool(value.BoolOrDie());
+            if (!value.IsBool()) refuseScalar(fd, value, "bool");
+            sink.setBool(value.BoolOrDie());
             return;
-        case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
-            if (value.IsString()) {
-                sink.setString(std::string(value.StringOrDie().value()));
-            } else if (value.IsBytes()) {
-                auto b = value.BytesOrDie().value();
-                sink.setString(std::string(b.begin(), b.end()));
+        case google::protobuf::FieldDescriptor::CPPTYPE_STRING: {
+            // protobuf gives `string` and `bytes` the same C++ type, so the two have to be
+            // told apart by `type()`. A CEL string is text and CEL bytes are bytes; neither
+            // substitutes for the other. Accepting bytes for a string field produced a string
+            // that need not be valid UTF-8, and a string for a bytes field stored the text of
+            // a base64 literal rather than the bytes it encodes.
+            if (fd->type() == google::protobuf::FieldDescriptor::TYPE_BYTES) {
+                if (!value.IsBytes()) refuseScalar(fd, value, "bytes");
+                const auto bytes = value.BytesOrDie().value();
+                sink.setString(std::string(bytes.begin(), bytes.end()));
+                return;
             }
+            if (!value.IsString()) refuseScalar(fd, value, "string");
+            sink.setString(std::string(value.StringOrDie().value()));
             return;
+        }
         case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
-            if (value.IsInt64()) {
-                sink.setInt32(static_cast<int32_t>(value.Int64OrDie()));
-            }
+            sink.setInt32(static_cast<int32_t>(
+                boundedInt(fd, celAsInt(fd, value), std::numeric_limits<int32_t>::min(),
+                           std::numeric_limits<int32_t>::max())));
             return;
         case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
-            if (value.IsInt64()) sink.setInt64(value.Int64OrDie());
+            sink.setInt64(celAsInt(fd, value));
             return;
         case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
-            if (value.IsUint64()) {
-                sink.setUInt32(static_cast<uint32_t>(value.Uint64OrDie()));
-            } else if (value.IsInt64()) {
-                sink.setUInt32(static_cast<uint32_t>(value.Int64OrDie()));
-            }
+            sink.setUInt32(static_cast<uint32_t>(boundedUint(
+                fd, celAsUint(fd, value), std::numeric_limits<uint32_t>::max())));
             return;
         case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
-            if (value.IsUint64()) {
-                sink.setUInt64(value.Uint64OrDie());
-            } else if (value.IsInt64()) {
-                sink.setUInt64(static_cast<uint64_t>(value.Int64OrDie()));
-            }
+            sink.setUInt64(celAsUint(fd, value));
             return;
         case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
-            if (value.IsDouble()) sink.setDouble(value.DoubleOrDie());
+            sink.setDouble(celAsDouble(fd, value));
             return;
         case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT:
-            if (value.IsDouble()) {
-                sink.setFloat(static_cast<float>(value.DoubleOrDie()));
-            }
+            sink.setFloat(narrowToFloat(fd, celAsDouble(fd, value)));
             return;
         case google::protobuf::FieldDescriptor::CPPTYPE_ENUM:
-            if (value.IsInt64()) {
-                sink.setEnumValue(static_cast<int>(value.Int64OrDie()));
-            }
+            // This client presents a protobuf enum as its number, not its symbol, so that is
+            // what a rule hands back.
+            sink.setEnumValue(static_cast<int>(
+                boundedInt(fd, celAsInt(fd, value), std::numeric_limits<int32_t>::min(),
+                           std::numeric_limits<int32_t>::max())));
             return;
         default:
-            return;
+            refuseScalar(fd, value, "this");
     }
 }
 

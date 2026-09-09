@@ -27,6 +27,7 @@ if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES CelVariantTest.cpp)  # CEL variant() / variants.* tests
     list(APPEND TEST_SOURCES CelAvroWriteBackTest.cpp)
     list(APPEND TEST_SOURCES CelProtobufContainerWriteBackTest.cpp)
+    list(APPEND TEST_SOURCES CelProtobufScalarNarrowingTest.cpp)
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)

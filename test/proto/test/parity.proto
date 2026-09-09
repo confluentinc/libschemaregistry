@@ -85,3 +85,17 @@ message ValueTypeNested {
     rules: [{name: "fldInner", expr: "decimals.gt(this, decimal('1.00'))"}]
   }];
 }
+
+// One field of each scalar kind, for the message-level write-back's narrowing. Every arm of
+// that conversion has to be exercised against a value of the wrong kind, and no other fixture
+// here declares a bool, bytes, float or integer field.
+message ScalarKinds {
+  string text = 1;
+  bool flag = 2;
+  bytes blob = 3;
+  int32 i32 = 4;
+  uint32 u32 = 5;
+  uint64 u64 = 6;
+  double dbl = 7;
+  float flt = 8;
+}
