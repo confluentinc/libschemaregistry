@@ -28,6 +28,7 @@ if(SCHEMAREGISTRY_WITH_RULES)
     list(APPEND TEST_SOURCES CelAvroWriteBackTest.cpp)
     list(APPEND TEST_SOURCES CelProtobufContainerWriteBackTest.cpp)
     list(APPEND TEST_SOURCES CelProtobufScalarNarrowingTest.cpp)
+    list(APPEND TEST_SOURCES ProtobufFieldWriteBackTest.cpp)
 endif()
 
 if(SCHEMAREGISTRY_WITH_AVRO)

@@ -459,10 +459,74 @@ ProtobufVariant getMessageFieldValue(
 }
 
 // Helper function to set field value in protobuf message
+/// Whether `value` can be written into `fd` through reflection.
+///
+/// protobuf's reflection setters CHECK the field's type and *abort the process* on a
+/// mismatch, so this has to be settled before the call. The JVM gets a reported failure for
+/// free - setField raises ClassCastException - and its setTransformedField turns the
+/// value-type case into a named rule error rather than that bare cast failure, deliberately
+/// for "a broad untagged masking or redaction rule reaching one of these fields". So the
+/// shortcut above stays ungated, as it is on the JVM, and the mismatch it can produce is
+/// reported here instead.
+///
+/// A confluent.type.Decimal field is what made this visible: the walk hands such a field to
+/// the rule whole rather than descending into value/scale, so any field executor that answers
+/// with a scalar - a mask, a redaction, ENCRYPT - hands back bytes for a message-typed field.
+///
+/// `string` and `bytes` share CPPTYPE_STRING and both go through SetString, so either variant
+/// is accepted for either: that is what the existing walk does, and narrowing it would break
+/// an encryption rule on a string field.
+bool acceptsVariant(const google::protobuf::FieldDescriptor* fd,
+                    const ProtobufVariant& value) {
+    using VT = ProtobufVariant::ValueType;
+    if (value.type == VT::Map) {
+        return fd->is_map();
+    }
+    if (value.type == VT::List) {
+        return fd->is_repeated();
+    }
+    if (fd->is_repeated()) {
+        return false;
+    }
+    switch (fd->cpp_type()) {
+        case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
+            return value.type == VT::Bool;
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
+            return value.type == VT::I32;
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
+            return value.type == VT::I64;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
+            return value.type == VT::U32;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
+            return value.type == VT::U64;
+        case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT:
+            return value.type == VT::F32;
+        case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
+            return value.type == VT::F64;
+        case google::protobuf::FieldDescriptor::CPPTYPE_ENUM:
+            return value.type == VT::EnumNumber;
+        case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
+            return value.type == VT::String || value.type == VT::Bytes;
+        case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE:
+            return value.type == VT::Message;
+        default:
+            return false;
+    }
+}
+
 void setMessageField(google::protobuf::Message* message,
                      const google::protobuf::FieldDescriptor* fd,
                      const ProtobufVariant& value) {
     const google::protobuf::Reflection* reflection = message->GetReflection();
+
+    if (!acceptsVariant(fd, value)) {
+        throw std::runtime_error(
+            "a rule returned a value that field " + std::string(fd->full_name()) +
+            " cannot hold; it is a " +
+            (fd->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE
+                 ? std::string(fd->message_type()->full_name())
+                 : std::string(fd->type_name())));
+    }
 
     switch (value.type) {
         case ProtobufVariant::ValueType::Bool: {

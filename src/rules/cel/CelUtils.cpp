@@ -330,6 +330,16 @@ int64_t celAsAvroInt(const ::avro::GenericDatum &original,
     if (value.IsInt64()) {
         return value.Int64OrDie();
     }
+    // A field-level CEL_FIELD rule reaches toAvroValue directly, with no branchAcceptsCel to
+    // gate it, so the "only an integer gets here" this arm used to assume held for a record
+    // field and an array element and not for a tagged field: a rule returning 2.0 for an
+    // `int` field fell through to Uint64OrDie(), whose absl CHECK aborts the process instead
+    // of reporting the type error.
+    if (!value.IsUint64()) {
+        throw std::runtime_error("cannot write " + std::string(celTypeName(value)) +
+                                 " to an Avro " +
+                                 ::avro::toString(original.type()) + " value");
+    }
     const uint64_t u = value.Uint64OrDie();
     if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
         throw std::out_of_range("value " + std::to_string(u) +
@@ -340,12 +350,19 @@ int64_t celAsAvroInt(const ::avro::GenericDatum &original,
 }
 
 /// A numeric CEL value as a double, for a floating-typed field.
-double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
+double celAsAvroDouble(const ::avro::GenericDatum &original,
+                       const google::api::expr::runtime::CelValue &value) {
     if (value.IsDouble()) {
         return value.DoubleOrDie();
     }
     if (value.IsInt64()) {
         return static_cast<double>(value.Int64OrDie());
+    }
+    // Same unguarded Uint64OrDie() as celAsAvroInt above.
+    if (!value.IsUint64()) {
+        throw std::runtime_error("cannot write " + std::string(celTypeName(value)) +
+                                 " to an Avro " +
+                                 ::avro::toString(original.type()) + " value");
     }
     return static_cast<double>(value.Uint64OrDie());
 }
@@ -385,9 +402,9 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
             // narrowToFloat takes any number and calls floatValue(), accepting the precision
             // loss a float field declares by being one.
             return ::avro::GenericDatum(
-                static_cast<float>(celAsAvroDouble(cel_value)));
+                static_cast<float>(celAsAvroDouble(original, cel_value)));
         case ::avro::AVRO_DOUBLE:
-            return ::avro::GenericDatum(celAsAvroDouble(cel_value));
+            return ::avro::GenericDatum(celAsAvroDouble(original, cel_value));
         default:
             // Not a numeric field. recordFromCelMap refuses this before converting, so this
             // is reached only for an array element or a map value, where the element schema
@@ -548,11 +565,26 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
         }
     }
     if (cel_value.IsBool()) {
+        // Each arm below checks the target, not just the value. `recordFromCelMap` and the
+        // container arms resolve the schema before converting, but a field-level CEL_FIELD
+        // rule calls straight in, so a rule returning 'x' for an `int` field used to install
+        // a string datum in an int slot - a record that no longer matches its own schema,
+        // reported as a success. The JVM dispatches on the schema throughout, so every one of
+        // these is an AvroTypeException there.
+        if (original.type() != ::avro::AVRO_BOOL) {
+            throw std::runtime_error("cannot write a bool to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+        }
         return ::avro::GenericDatum(cel_value.BoolOrDie());
     } else if (cel_value.IsInt64() || cel_value.IsUint64() || cel_value.IsDouble()) {
         return numericToAvro(original, cel_value);
     } else if (cel_value.IsString()) {
         std::string text(cel_value.StringOrDie().value());
+        if (original.type() != ::avro::AVRO_STRING &&
+            original.type() != ::avro::AVRO_ENUM) {
+            throw std::runtime_error("cannot write a string to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+        }
         // An enum field is read as its symbol name (see AVRO_ENUM in fromAvroValue), so a rule
         // that returns a string for one has to be written back as a GenericEnum carrying that
         // symbol - a plain string datum does not satisfy an enum schema. The original datum is the
@@ -568,6 +600,11 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
     } else if (cel_value.IsBytes()) {
         auto bytes_view = cel_value.BytesOrDie().value();
         std::vector<uint8_t> bytes(bytes_view.begin(), bytes_view.end());
+        if (original.type() != ::avro::AVRO_BYTES &&
+            original.type() != ::avro::AVRO_FIXED) {
+            throw std::runtime_error("cannot write bytes to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+        }
         // A fixed field needs a GenericFixed of its own schema; plain `bytes` takes the vector
         // directly. There was no bytes arm here at all before, so a rule returning bytes for
         // either shape fell through to the fallback and was silently discarded.

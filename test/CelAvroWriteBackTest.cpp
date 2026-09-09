@@ -1064,6 +1064,99 @@ TEST(CelAvroMessageTransform, ElementsAddedToAnEmptyArrayGetTheDeclaredType) {
     EXPECT_THROW(runMessageTransform(schema, datum, "{'ns': [2147483648]}"), std::exception);
 }
 
+// ---- the field-level path needs the same check as every other -------------------------------
+//
+// `recordFromCelMap` resolves a field's schema before converting, and the container arms now do
+// the same per element - but a **tagged CEL_FIELD rule** calls `toAvroValue` straight from the
+// executor, with nothing in between. So the "only a value of the right kind gets here" that the
+// converters assumed held for a record field and an array element and not for a tagged one:
+//
+//   * `int` or `long` <- 2.0 reached Uint64OrDie(), whose absl CHECK **aborts the process**;
+//   * `int` <- 'x' and `float` <- 'x' were accepted, installing a string datum in a numeric
+//     slot - a record that no longer matches its own schema, reported as a success.
+//
+// The JVM dispatches on the schema throughout, so each of these is an AvroTypeException there.
+// The checks now live in `toAvroValue` itself, which is the one place all three callers meet.
+
+namespace {
+
+const char *kTaggedSchema = R"({
+  "type": "record",
+  "name": "T",
+  "fields": [
+    {"name": "i", "type": "int", "confluent:tags": ["I"]},
+    {"name": "l", "type": "long", "confluent:tags": ["L"]},
+    {"name": "f", "type": "float", "confluent:tags": ["F"]},
+    {"name": "s", "type": "string", "confluent:tags": ["S"]}
+  ]
+})";
+
+/// Runs one tagged CEL_FIELD transform over the fixture and returns the record.
+::avro::GenericDatum runTagged(const std::string &tag, const std::string &expr) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kTaggedSchema);
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<int32_t>() = 7;
+    record.fieldAt(1).value<int64_t>() = 8;
+    record.fieldAt(2).value<float>() = 1.5f;
+    record.fieldAt(3).value<std::string>() = "hi";
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+    rule.setTags(std::vector<std::string>{tag});
+
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"T.i", {"I"}}, {"T.l", {"L"}}, {"T.f", {"F"}}, {"T.s", {"S"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+
+    return schemaregistry::serdes::avro::utils::transformFields(ctx, schema, datum);
+}
+
+}  // namespace
+
+/// The must-fail twin: a well-typed field rule still applies, and to the field's own type.
+TEST(CelAvroFieldLevel, AWellTypedFieldRuleStillApplies) {
+    ::avro::GenericDatum out = runTagged("I", "9");
+
+    ASSERT_EQ(out.type(), ::avro::AVRO_RECORD);
+    const auto &record = out.value<::avro::GenericRecord>();
+    EXPECT_EQ(record.field("i").type(), ::avro::AVRO_INT);
+    EXPECT_EQ(record.field("i").value<int32_t>(), 9);
+    // The untagged fields keep their own types, which is what a field walk does.
+    EXPECT_EQ(record.field("f").type(), ::avro::AVRO_FLOAT);
+    EXPECT_EQ(record.field("s").value<std::string>(), "hi");
+    EXPECT_EQ(runTagged("S", "value + '!'").value<::avro::GenericRecord>()
+                  .field("s").value<std::string>(), "hi!");
+}
+
+/// The two that aborted the process: a double for an integer field.
+TEST(CelAvroFieldLevel, ADoubleForAnIntegerFieldIsRefused) {
+    EXPECT_THROW(runTagged("I", "2.0"), std::exception);
+    EXPECT_THROW(runTagged("L", "2.0"), std::exception);
+    EXPECT_THROW(runTagged("I", "1.9"), std::exception);
+}
+
+/// And the ones that were accepted, installing a datum of the wrong type.
+TEST(CelAvroFieldLevel, AWrongTypedFieldResultIsRefused) {
+    EXPECT_THROW(runTagged("I", "'x'"), std::exception);
+    EXPECT_THROW(runTagged("F", "'x'"), std::exception);
+    EXPECT_THROW(runTagged("S", "1"), std::exception);
+    EXPECT_THROW(runTagged("I", "true"), std::exception);
+    EXPECT_THROW(runTagged("S", "true"), std::exception);
+    EXPECT_THROW(runTagged("I", "b'ab'"), std::exception);
+    // Out of int32 range is refused per field, as it is per element and per record field.
+    EXPECT_THROW(runTagged("I", "2147483648"), std::exception);
+}
+
 // ---- a container's elements need the same schema check its fields get ------------------------
 //
 // `recordFromCelMap` has checked each field against its schema since unions were resolved by
