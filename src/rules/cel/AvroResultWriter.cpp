@@ -173,12 +173,14 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
     }
 }
 
-[[noreturn]] void refuseField(const std::string &field,
-                              const ::avro::NodePtr &field_schema,
-                              const google::api::expr::runtime::CelValue &value) {
+/// `what` names the slot, and supplies its own noun so that the message reads for a field, an
+/// array element and a map value alike.
+[[noreturn]] void refuseSlot(const std::string &what,
+                             const ::avro::NodePtr &schema,
+                             const google::api::expr::runtime::CelValue &value) {
     throw std::runtime_error(
-        "cannot write " + std::string(utils::celTypeName(value)) + " to field '" + field +
-        "', which is " + ::avro::toString(field_schema->type()));
+        "cannot write " + std::string(utils::celTypeName(value)) + " to " + what +
+        ", which is " + ::avro::toString(schema->type()));
 }
 
 /// The datum `toAvroValue` converts a returned value against, or a rule error if the field
@@ -203,27 +205,44 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
 /// matches its schema (an int returned for a string field, a string for a long). The JVM
 /// dispatches on the schema instead and throws `typeMismatch` for every one of these, so the
 /// value is checked against the field's schema here before any of it runs.
+/// The branch of `schema` that can hold `value`, or nullptr if none can. A non-union schema is
+/// its own single "branch".
+::avro::NodePtr resolveWritableBranch(
+    const ::avro::NodePtr &schema,
+    const google::api::expr::runtime::CelValue &value, size_t *branch_index) {
+    if (schema->type() != ::avro::AVRO_UNION) {
+        return branchAcceptsCel(schema, value) ? schema : nullptr;
+    }
+    for (size_t branch = 0; branch < schema->leaves(); ++branch) {
+        if (branchAcceptsCel(schema->leafAt(branch), value)) {
+            if (branch_index != nullptr) {
+                *branch_index = branch;
+            }
+            return schema->leafAt(branch);
+        }
+    }
+    return nullptr;
+}
+
 ::avro::GenericDatum conversionTemplate(
     const std::string &field, const ::avro::NodePtr &field_schema,
     const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelValue &cel_value) {
-    if (field_schema->type() != ::avro::AVRO_UNION) {
-        if (!branchAcceptsCel(field_schema, cel_value)) {
-            refuseField(field, field_schema, cel_value);
-        }
+    size_t branch = 0;
+    const ::avro::NodePtr target =
+        resolveWritableBranch(field_schema, cel_value, &branch);
+    if (target == nullptr) {
+        // No branch can hold it, which is an UnresolvedUnionException on the JVM.
+        refuseSlot(field, field_schema, cel_value);
+    }
+    if (field_schema->type() != ::avro::AVRO_UNION ||
+        (original.isUnion() && original.unionBranch() == branch)) {
+        // The field's own datum already has the target's shape; keeping it preserves a
+        // logical type and scale that a schema-built template would carry anyway, and a
+        // record's nested field values along with it.
         return original;
     }
-    for (size_t branch = 0; branch < field_schema->leaves(); ++branch) {
-        if (!branchAcceptsCel(field_schema->leafAt(branch), cel_value)) {
-            continue;
-        }
-        if (original.isUnion() && original.unionBranch() == branch) {
-            return original;  // already this branch: keep the field's own datum
-        }
-        return ::avro::GenericDatum(field_schema->leafAt(branch));
-    }
-    // No branch can hold it, which is an UnresolvedUnionException on the JVM.
-    refuseField(field, field_schema, cel_value);
+    return ::avro::GenericDatum(target);
 }
 
 ::avro::GenericDatum wrapForUnionField(const ::avro::NodePtr &field_schema,
@@ -296,6 +315,18 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
 
 }  // namespace
 
+::avro::GenericDatum avroValueFor(
+    const std::string &what, const ::avro::NodePtr &schema,
+    const google::api::expr::runtime::CelValue &cel_value) {
+    size_t branch = 0;
+    const ::avro::NodePtr target = resolveWritableBranch(schema, cel_value, &branch);
+    if (target == nullptr) {
+        refuseSlot(what, schema, cel_value);
+    }
+    return wrapForUnionField(schema,
+                             toAvroValue(::avro::GenericDatum(target), cel_value));
+}
+
 ::avro::GenericDatum recordFromCelMap(
     const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelMap &cel_map_ref) {
@@ -335,7 +366,8 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
                             // carries the logical type, scale and unit); its value
                             // is not used.
                             auto field_template = conversionTemplate(
-                                key, orig_record_schema->leafAt(field_idx),
+                                "field '" + key + "'",
+                                orig_record_schema->leafAt(field_idx),
                                 orig_record.fieldAt(field_idx),
                                 value_lookup.value());
                             result_record.setFieldAt(

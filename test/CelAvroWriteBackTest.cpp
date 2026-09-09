@@ -1064,6 +1064,140 @@ TEST(CelAvroMessageTransform, ElementsAddedToAnEmptyArrayGetTheDeclaredType) {
     EXPECT_THROW(runMessageTransform(schema, datum, "{'ns': [2147483648]}"), std::exception);
 }
 
+// ---- a container's elements need the same schema check its fields get ------------------------
+//
+// `recordFromCelMap` has checked each field against its schema since unions were resolved by
+// value, but an array element and a map value had no such check: `toAvroValue` dispatches on
+// the CEL value, so the element went in as whatever the value happened to be. `[true]` for an
+// `array<int>` installed a boolean datum in an int array, and `[2.0]` reached the integer
+// converter, whose Uint64OrDie() **aborts the process** on a value that is not an integer -
+// the comment there said only an integer could reach it, which was true of a field and false
+// of an element.
+//
+// The JVM has no such split: AvroResultWriter's convertArray and convertMap call convert() per
+// element against the item/value schema, which is the same walk a field takes.
+
+namespace {
+
+const char *kElementSchema = R"({
+  "type": "record",
+  "name": "E",
+  "fields": [
+    {"name": "ns", "type": {"type": "array", "items": "int"}},
+    {"name": "m", "type": {"type": "map", "values": "string"}}
+  ]
+})";
+
+::avro::GenericDatum elementRecord(const ::avro::ValidSchema &schema) {
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<::avro::GenericArray>().value().push_back(
+        ::avro::GenericDatum(1));
+    record.fieldAt(1).value<::avro::GenericMap>().value().emplace_back(
+        "k", ::avro::GenericDatum(std::string("v")));
+    return datum;
+}
+
+::avro::GenericDatum runElements(const std::string &ns, const std::string &m) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kElementSchema);
+    return runMessageTransform(schema, elementRecord(schema),
+                               "{'ns': " + ns + ", 'm': " + m + "}");
+}
+
+}  // namespace
+
+/// The must-fail twin first: well-typed elements still convert, and to the item type.
+TEST(CelAvroMessageTransform, WellTypedContainerElementsStillConvert) {
+    ::avro::GenericDatum out = runElements("[1, 2]", "{'a': 'b'}");
+
+    ASSERT_EQ(out.type(), ::avro::AVRO_RECORD);
+    const auto &record = out.value<::avro::GenericRecord>();
+    const auto &array = record.field("ns").value<::avro::GenericArray>().value();
+    ASSERT_EQ(array.size(), 2u);
+    EXPECT_EQ(array[0].type(), ::avro::AVRO_INT);
+    EXPECT_EQ(array[1].value<int32_t>(), 2);
+    const auto &map = record.field("m").value<::avro::GenericMap>().value();
+    ASSERT_EQ(map.size(), 1u);
+    EXPECT_EQ(map[0].second.type(), ::avro::AVRO_STRING);
+}
+
+/// An element of the wrong type. The `[2.0]` case aborted the process rather than reporting
+/// anything, so this is the one that has to hold.
+TEST(CelAvroMessageTransform, AWrongTypedContainerElementIsRefused) {
+    EXPECT_THROW(runElements("[true]", "{'a': 'b'}"), std::exception);
+    EXPECT_THROW(runElements("['x']", "{'a': 'b'}"), std::exception);
+    EXPECT_THROW(runElements("[2.0]", "{'a': 'b'}"), std::exception);
+    EXPECT_THROW(runElements("[2147483648]", "{'a': 'b'}"), std::exception);
+    EXPECT_THROW(runElements("[[1]]", "{'a': 'b'}"), std::exception);
+    // And the map values, which had the same gap.
+    EXPECT_THROW(runElements("[1]", "{'a': 1}"), std::exception);
+    EXPECT_THROW(runElements("[1]", "{'a': true}"), std::exception);
+    EXPECT_THROW(runElements("[1]", "{'a': ['x']}"), std::exception);
+}
+
+/// A nullable element type is resolved and wrapped per element, the same as a nullable field.
+/// A bare datum in a union slot encodes with no branch index and the record is unreadable.
+TEST(CelAvroMessageTransform, AUnionElementIsResolvedPerElement) {
+    const char *nullableItems = R"({
+      "type": "record", "name": "E",
+      "fields": [{"name": "ns", "type": {"type": "array", "items": ["null", "int"]}}]
+    })";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(nullableItems);
+    ::avro::GenericDatum datum(schema);
+
+    ::avro::GenericDatum out = runMessageTransform(schema, datum, "{'ns': [1]}");
+    const auto &array = out.value<::avro::GenericRecord>()
+                            .field("ns").value<::avro::GenericArray>().value();
+    ASSERT_EQ(array.size(), 1u);
+    EXPECT_TRUE(array[0].isUnion());
+    EXPECT_EQ(array[0].type(), ::avro::AVRO_INT);
+    // A string has no branch in ["null","int"].
+    EXPECT_THROW(runMessageTransform(schema, datum, "{'ns': ['x']}"), std::exception);
+}
+
+// ---- a decimal has a declared precision, not just a scale ------------------------------------
+//
+// Only the scale was checked, so a coefficient wider than the field's declared precision was
+// encoded anyway and the record was one no Avro reader accepts. Avro's own DecimalConversion
+// validates both, and the precision *after* the rescale. Measured against avro 1.12.2 on a
+// bytes decimal(precision=4, scale=2):
+//
+//   99.99   (precision 4) -> 2 bytes
+//   1.23    (precision 3) -> 1 byte
+//   999.99  (precision 5) -> "Cannot encode decimal with precision 5 as max precision 4"
+//   99999   -> rescaled to 99999.00, precision 7: "Cannot encode decimal with precision 7 as
+//              max precision 4. This is after safely adjusting scale from 0 to required 2"
+//
+// and a decimal(8,2) takes all four.
+TEST(CelAvroMessageTransform, ADecimalIsCheckedAgainstItsDeclaredPrecision) {
+    auto schemaFor = [](int precision) {
+        return std::string(R"({"type": "record", "name": "D2", "fields": [
+          {"name": "d", "type": {"type": "bytes", "logicalType": "decimal",
+                                 "precision": )") + std::to_string(precision) +
+               R"(, "scale": 2}}]})";
+    };
+    auto run = [&](int precision, const std::string &literal) {
+        ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(schemaFor(precision));
+        ::avro::GenericDatum datum(schema);
+        datum.value<::avro::GenericRecord>().fieldAt(0)
+            .value<std::vector<uint8_t>>() = {0x04, 0xD2};
+        return runMessageTransform(schema, datum, "{'d': decimal('" + literal + "')}");
+    };
+
+    // 99.99 is unscaled 9999, four digits, which is exactly the declared precision.
+    EXPECT_EQ(run(4, "99.99").value<::avro::GenericRecord>()
+                  .fieldAt(0).value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{0x27, 0x0F}));
+    EXPECT_NO_THROW(run(4, "1.23"));
+    // Wider than the field declares, both before and after the rescale.
+    EXPECT_THROW(run(4, "999.99"), std::exception);
+    EXPECT_THROW(run(4, "99999"), std::exception);
+    // A wider field takes all of them, so the guard reads the declared precision rather than
+    // capping every decimal at some fixed width.
+    EXPECT_NO_THROW(run(8, "999.99"));
+    EXPECT_NO_THROW(run(8, "99999"));
+}
+
 // ---- decimal-on-fixed: the padding has to sign-extend -----------------------------------------
 //
 // A `fixed` field is exactly fixedSize() bytes wide, but a decimal's two's-complement encoding is

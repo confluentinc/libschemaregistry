@@ -430,6 +430,22 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
             "decimal result does not fit the field's scale of " +
             std::to_string(target_scale));
     }
+    // Avro's own DecimalConversion validates the declared *precision* as well as the scale,
+    // and does so after the rescale - `mpd_t::digits` is the coefficient's digit count, which
+    // is what BigDecimal.precision() reports. Only the scale was checked here, so a
+    // five-digit coefficient went into a precision-4 field and produced a record no Avro
+    // reader accepts. Measured against avro 1.12.2 on decimal(4,2):
+    //   99.99   (precision 4) -> 2 bytes
+    //   999.99  (precision 5) -> "Cannot encode decimal with precision 5 as max precision 4"
+    //   99999   -> rescaled to 99999.00, precision 7, refused "after safely adjusting scale
+    //             from 0 to required 2"
+    const int32_t declared_precision = original.logicalType().precision();
+    const auto digits = static_cast<int32_t>(rescaled.getconst()->digits);
+    if (declared_precision > 0 && digits > declared_precision) {
+        throw std::out_of_range(
+            "cannot encode a decimal with precision " + std::to_string(digits) +
+            " as max precision " + std::to_string(declared_precision));
+    }
 
     std::string unscaled = DecimalUtil::toProto(rescaled).value();
     std::vector<uint8_t> bytes(unscaled.begin(), unscaled.end());
@@ -583,12 +599,13 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
                 ::avro::ValidSchema(orig_array_schema)};
             auto &result_array = result_datum.value<::avro::GenericArray>();
 
-            // The element template comes from the array's schema, not from element [0]: an
-            // empty array offered none at all, so a rule that adds elements to one converted
-            // them against a default-constructed (null) datum. NodeArray carries the item
-            // type as its single leaf.
-            const ::avro::GenericDatum element_template{
-                orig_array_schema->leafAt(0)};
+            // Each element is converted against the array's declared item type - NodeArray
+            // carries it as its single leaf - and checked against it first. Dispatching on
+            // the CEL value alone put a boolean datum in an `array<int>` for `[true]`, and
+            // `[2.0]` reached the integer converter, which aborts the process on a value
+            // that is not an integer. A record field has had this check since unions were
+            // resolved by value; an element had none.
+            const ::avro::NodePtr element_schema = orig_array_schema->leafAt(0);
 
             for (int i = 0; i < cel_list->size(); ++i) {
                 auto item = cel_list->Get(nullptr, i);
@@ -599,7 +616,8 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
                         "a CEL rule failed for element " + std::to_string(i) +
                         " of an array field");
                 }
-                result_array.value().push_back(toAvroValue(element_template, item));
+                result_array.value().push_back(avroValueFor(
+                    "element " + std::to_string(i) + " of an array", element_schema, item));
             }
 
             return result_datum;
@@ -618,9 +636,9 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
                 ::avro::ValidSchema(orig_map_schema)};
             auto &result_map = result_datum.value<::avro::GenericMap>();
 
-            // From the schema, for the reason given in the array arm above. NodeMap holds
-            // the key type at leaf 0 and the value type at leaf 1.
-            const ::avro::GenericDatum value_template{orig_map_schema->leafAt(1)};
+            // From the schema and checked against it, for the reason given in the array arm
+            // above. NodeMap holds the key type at leaf 0 and the value type at leaf 1.
+            const ::avro::NodePtr map_value_schema = orig_map_schema->leafAt(1);
 
             auto map_keys = cel_map->ListKeys(nullptr);
             if (map_keys.ok()) {
@@ -633,8 +651,9 @@ double celAsAvroDouble(const google::api::expr::runtime::CelValue &value) {
                         auto value_lookup = cel_map->Get(nullptr, key_val);
                         if (value_lookup.has_value()) {
                             result_map.value().emplace_back(
-                                key, toAvroValue(value_template,
-                                                 value_lookup.value()));
+                                key, avroValueFor("the map value for '" + key + "'",
+                                                  map_value_schema,
+                                                  value_lookup.value()));
                         }
                     }
                 }

@@ -31,4 +31,18 @@ namespace schemaregistry::rules::cel::utils {
     const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelMap &cel_map);
 
+/**
+ * Converts one CEL value for a slot of the given schema, or reports that the schema cannot
+ * hold it. A union is resolved to the branch that accepts the value and the result is wrapped
+ * as that branch, exactly as a record field is.
+ *
+ * `recordFromCelMap` applies this to every field it names. Array elements and map values need
+ * the same thing and had none: `toAvroValue` dispatches on the CEL value, so `[true]` for an
+ * `array<int>` installed a boolean datum in an int array and `[2.0]` reached an integer
+ * converter that aborts the process on a non-integer. `what` names the slot in the error.
+ */
+::avro::GenericDatum avroValueFor(
+    const std::string &what, const ::avro::NodePtr &schema,
+    const google::api::expr::runtime::CelValue &cel_value);
+
 }  // namespace schemaregistry::rules::cel::utils
