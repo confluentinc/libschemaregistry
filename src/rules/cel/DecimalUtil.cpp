@@ -16,6 +16,7 @@
 
 #include "schemaregistry/rules/cel/DecimalUtil.h"
 
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 
@@ -148,6 +149,35 @@ confluent::type::Decimal DecimalUtil::toProto(const decimal::Decimal &d) {
     if (triple.tag != MPD_TRIPLE_NORMAL) {
         throw std::runtime_error(
             "cannot convert non-finite or out-of-range decimal to confluent.type.Decimal");
+    }
+    // The scale is a signed int32 on the wire, and negating a wide exponent silently wrapped
+    // it: decimal("1e-2147483648") needs scale 2147483648, which wrapped to -2147483648 and
+    // turned a vanishingly small number into an enormous one. The accepted band matches the
+    // JVM's, measured: BigDecimal refuses a literal at +/-2147483648 and takes +/-2147483647.
+    if (triple.exp < -static_cast<int64_t>(INT32_MAX) ||
+        triple.exp > static_cast<int64_t>(INT32_MAX)) {
+        throw std::out_of_range(
+            "decimal scale does not fit the confluent.type.Decimal int32 scale field");
+    }
+    // The wire form is a signed two's-complement integer, so the representable range is
+    // [-2^127, 2^127-1] -- but the triple carries an *unsigned* 128-bit magnitude. A
+    // coefficient at or above 2^127 set the top bit of the 16-byte encoding and read back as
+    // its own negation: decimal("340282366920938463463374607431768211455") became -1.
+    //
+    // Refused at encode rather than widened to a 17th byte, so this client never writes bytes
+    // it cannot itself decode (bytesToMagnitude is bounded by the same 128-bit triple). Only
+    // 39-digit coefficients can reach this: the largest 38-digit value is ~1e38, below
+    // 2^127 ~ 1.70e38. Java has no such bound - BigInteger is unbounded - so this is the
+    // existing "exceeds 128 bits" limitation of the C++ triple, now enforced on both sides
+    // instead of corrupting the value.
+    constexpr uint64_t kHiSignBit = uint64_t{1} << 63;
+    const bool magnitudeTooWide =
+        triple.sign ? (triple.hi > kHiSignBit || (triple.hi == kHiSignBit && triple.lo != 0))
+                    : (triple.hi >= kHiSignBit);
+    if (magnitudeTooWide) {
+        throw std::out_of_range(
+            "decimal coefficient exceeds the signed 128-bit range of "
+            "confluent.type.Decimal.value");
     }
     confluent::type::Decimal out;
     out.set_value(magnitudeToBytes(triple.sign, triple.hi, triple.lo));

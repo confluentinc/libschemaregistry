@@ -1582,11 +1582,24 @@ bool isBarewordChar(char c) {
 
 bool isDigit(char c) { return c >= '0' && c <= '9'; }
 
-// Matches one of the non-finite barewords at `i`, as a whole token. A trailing letter or digit
-// means some longer (and invalid) literal such as `NaNny`, which must be left for the parser to
-// reject rather than silently truncated.
+// Matches one of the non-finite barewords at `i`, as a whole token. Both boundaries are
+// checked. A trailing letter or digit means some longer (and invalid) literal such as `NaNny`,
+// which must be left for the parser to reject rather than silently truncated.
+//
+// The leading boundary matters just as much, because the scanner retries at every byte: with
+// only the trailing check, `1NaN` matched `NaN` at offset 1 and was rewritten to the *valid*
+// number `10.0`, so malformed input parsed as a wrong value instead of being rejected. A
+// bareword can only begin where a JSON value may begin.
+bool isValueStart(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '[' || c == '{' ||
+           c == ':' || c == ',';
+}
+
 bool matchNonFiniteBareword(const std::string &json, std::size_t i, std::size_t &len,
                             double &value) {
+    if (i > 0 && !isValueStart(json[i - 1])) {
+        return false;
+    }
     for (const auto &lit : kNonFiniteLiterals) {
         std::size_t n = std::strlen(lit.text);
         if (json.compare(i, n, lit.text) != 0) {

@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -462,14 +463,36 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                     return absl::OkStatus();
                 }
                 auto d = decimalFromMessage(*args[0].MessageOrDie());
-                // Use strtod, not std::stod: std::stod throws std::out_of_range on BOTH
-                // overflow AND underflow, so a tiny magnitude (e.g. 1e-320) would wrongly
-                // become ±Infinity. strtod never throws — on overflow it returns ±HUGE_VAL
-                // (±Infinity) and sets errno=ERANGE; on underflow it returns the nearest
-                // subnormal or 0.0. That matches Java's BigDecimal.doubleValue():
-                // 1e-400 -> 0.0, 1e-320 -> a tiny subnormal, 1e400 -> +Infinity,
-                // -1e400 -> -Infinity. format("f") is plain (non-scientific) notation.
-                double val = std::strtod(d.format("f").c_str(), nullptr);
+                // std::from_chars, not std::stod or strtod. std::stod throws
+                // std::out_of_range on BOTH overflow AND underflow, so a tiny magnitude
+                // (e.g. 1e-320) would wrongly become ±Infinity. strtod does not throw, but it
+                // reads the radix character from LC_NUMERIC while format("f") always writes
+                // '.', so a comma-radix locale in the host process stopped the parse at the
+                // dot and double(decimal("100.50")) returned 100. from_chars is defined to
+                // ignore the locale.
+                //
+                // The target behaviour is Java's BigDecimal.doubleValue(): 1e-400 -> 0.0,
+                // 1e-320 -> a tiny subnormal, 1e400 -> +Infinity, -1e400 -> -Infinity.
+                // from_chars reports an unrepresentable magnitude as result_out_of_range and
+                // leaves the value unspecified, so the limit is derived from the text: a
+                // magnitude with a nonzero integer part is too large (±Infinity), otherwise
+                // it is too small (±0.0). format("f") is plain (non-scientific) notation.
+                const std::string text = d.format("f");
+                double val = 0.0;
+                const auto parsed =
+                    std::from_chars(text.data(), text.data() + text.size(), val);
+                if (parsed.ec == std::errc::result_out_of_range) {
+                    const bool negative = !text.empty() && text[0] == '-';
+                    const std::size_t intStart = negative ? 1 : 0;
+                    const std::size_t dot = text.find('.', intStart);
+                    const std::size_t intEnd =
+                        dot == std::string::npos ? text.size() : dot;
+                    const bool tooLarge =
+                        text.find_first_not_of('0', intStart) < intEnd;
+                    const double magnitude =
+                        tooLarge ? std::numeric_limits<double>::infinity() : 0.0;
+                    val = negative ? -magnitude : magnitude;
+                }
                 *out = cel::CelValue::CreateDouble(val);
                 return absl::OkStatus();
             });

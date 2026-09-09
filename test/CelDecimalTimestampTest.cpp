@@ -584,3 +584,85 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampNeedsNoConstructor) {
     EXPECT_TRUE(evalTs("this.ts.getFullYear() == 2023", 1700000000123LL));
 }
 #endif  // SCHEMAREGISTRY_TEST_WITH_AVRO
+
+// A coefficient at or above 2^127 does not fit confluent.type.Decimal.value, which is a signed
+// two's-complement integer, even though mpdecimal's triple carries an *unsigned* 128-bit
+// magnitude. Encoding one into 16 bytes set the top bit and the value read back as its own
+// negation: 2^127 became -2^127, and 2^128-1 became -1.
+//
+// Refused at encode rather than widened to a 17th byte, so this client never writes bytes it
+// cannot itself decode. Only 39-digit coefficients can reach the bound, because the largest
+// 38-digit value (~1e38) is below 2^127 (~1.70e38). Java has no such bound - BigInteger is
+// unbounded - so this enforces the C++ triple's existing 128-bit limitation on both sides
+// instead of corrupting the value.
+TEST(CelDecimalTimestampTest, WideCoefficientIsRefusedNotSignFlipped) {
+    // Exactly representable: the signed range is [-2^127, 2^127-1].
+    EXPECT_TRUE(evalBool(
+        "string(decimal(\"170141183460469231731687303715884105727\")) == "
+        "\"170141183460469231731687303715884105727\""));
+    EXPECT_TRUE(evalBool(
+        "string(decimal(\"-170141183460469231731687303715884105728\")) == "
+        "\"-170141183460469231731687303715884105728\""));
+    // 38 digits always fit, whatever the digits are.
+    EXPECT_TRUE(evalBool(
+        "string(decimal(\"99999999999999999999999999999999999999\")) == "
+        "\"99999999999999999999999999999999999999\""));
+
+    // One past the signed range, in both directions.
+    EXPECT_TRUE(errContains("string(decimal(\"170141183460469231731687303715884105728\"))",
+                            "exceeds the signed 128-bit range"));
+    EXPECT_TRUE(errContains("string(decimal(\"340282366920938463463374607431768211455\"))",
+                            "exceeds the signed 128-bit range"));
+    EXPECT_TRUE(errContains("string(decimal(\"-340282366920938463463374607431768211455\"))",
+                            "exceeds the signed 128-bit range"));
+}
+
+// confluent.type.Decimal.scale is a signed int32, and the scale is the negated exponent, so a
+// wide exponent wrapped it: 1e-2147483648 needs scale 2147483648, which wrapped to -2147483648
+// and turned a vanishingly small number into an enormous one (it compared >= 1). The accepted
+// band matches the JVM's, measured: BigDecimal refuses a literal at +/-2147483648 and takes
+// +/-2147483647.
+TEST(CelDecimalTimestampTest, WideExponentIsRefusedNotWrapped) {
+    EXPECT_TRUE(evalBool("decimals.lt(decimal(\"1e-2147483647\"), decimal(\"1\"))"));
+    EXPECT_TRUE(evalBool("decimals.gt(decimal(\"1e2147483647\"), decimal(\"1\"))"));
+    EXPECT_TRUE(errContains("decimals.lt(decimal(\"1e-2147483648\"), decimal(\"1\"))",
+                            "does not fit the confluent.type.Decimal int32 scale"));
+    EXPECT_TRUE(errContains("decimals.lt(decimal(\"1e2147483648\"), decimal(\"1\"))",
+                            "does not fit the confluent.type.Decimal int32 scale"));
+}
+
+// double(Decimal) parses the plain-notation rendering, which always writes '.'. strtod reads
+// its radix character from LC_NUMERIC, so a comma-radix locale in the host process stopped the
+// parse at the dot and double(decimal("100.50")) returned 100. std::from_chars ignores the
+// locale by definition. The over/underflow behaviour must survive the change: Java's
+// BigDecimal.doubleValue() gives 1e-400 -> 0.0, 1e-320 -> a subnormal, +/-1e400 -> +/-Infinity.
+TEST(CelDecimalTimestampTest, DoubleOfDecimalIsLocaleIndependent) {
+    EXPECT_TRUE(evalBool("double(decimal(\"100.50\")) == 100.5"));
+    EXPECT_TRUE(evalBool("double(decimal(\"-100.50\")) == -100.5"));
+    EXPECT_TRUE(evalBool("double(decimal(\"1e-400\")) == 0.0"));
+    EXPECT_TRUE(evalBool("double(decimal(\"1e400\")) > 1.0e308"));
+    EXPECT_TRUE(evalBool("double(decimal(\"-1e400\")) < -1.0e308"));
+    // A subnormal must stay a subnormal rather than collapsing to zero or blowing up.
+    EXPECT_TRUE(evalBool("double(decimal(\"1e-320\")) > 0.0"));
+    EXPECT_TRUE(evalBool("double(decimal(\"1e-320\")) < 1.0e-300"));
+}
+
+// A non-finite bareword is rewritten before nlohmann sees it, and the scanner retries at every
+// byte. With only a trailing-boundary check, `1NaN` matched `NaN` at offset 1 and was rewritten
+// to the *valid* number `10.0` - malformed input parsed as a wrong value rather than being
+// rejected. Jackson refuses these, so a bareword may only begin where a JSON value may begin.
+TEST(CelDecimalTimestampTest, NonFiniteBarewordChecksBothBoundaries) {
+    // Rejected: tryParseJson yields CEL null, so toJson does not return a string.
+    for (const char *bad : {"1NaN", "1Infinity", "NaN1", "NaNny"}) {
+        const std::string expr =
+            std::string("variants.toJson(variants.tryParseJson(\"") + bad + "\")) == \"\"";
+        EXPECT_FALSE(evalBool(expr)) << bad << " must not parse";
+    }
+    // Still accepted, at each position a value may start.
+    EXPECT_TRUE(evalBool("variants.toJson(variants.tryParseJson(\"NaN\")) == \"NaN\""));
+    EXPECT_TRUE(
+        evalBool("variants.toJson(variants.tryParseJson(\"-Infinity\")) == \"-Infinity\""));
+    EXPECT_TRUE(evalBool("variants.toJson(variants.tryParseJson(\"[NaN]\")) == \"[NaN]\""));
+    EXPECT_TRUE(
+        evalBool("variants.toJson(variants.tryParseJson(\"[1,NaN]\")) == \"[1,NaN]\""));
+}
