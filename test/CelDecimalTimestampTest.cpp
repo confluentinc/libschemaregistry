@@ -807,6 +807,36 @@ TEST(CelDecimalTimestampTest, AlignmentWidthIsRefused) {
                             "the integral quotient"));
 }
 
+// Expanding a *zero* is free, so the aligned frame is set by the operands that actually have
+// digits - several of these turn on which operand expands rather than on how far apart the
+// scales are. A zero also keeps whatever scale it was built with, so its adjusted exponent says
+// nothing about the cost, which is what an earlier estimate got wrong. Every row measured on
+// libmpdec and on the JDK, which agree throughout:
+//
+//   0E+2e9 + 0E-2e9      free, 1 digit           precision 1
+//   0E+2e9 + 1           free, 1 digit           precision 1, scale 0 (the zero expands)
+//   0E+2e9 mod 1E-2e9    free, 1 digit           precision 1
+//   1 + 0E-2e9           1601 MB, 2e9+1 digits   ArithmeticException  (the *one* expands)
+TEST(CelDecimalTimestampTest, ExpandingAZeroOperandIsFree) {
+    const std::string zeroCoarse = "decimal(\"0E+2000000000\")";
+    const std::string zeroFine = "decimal(\"0E-2000000000\")";
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.add(" + zeroCoarse + ", " + zeroFine + "), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.sub(" + zeroCoarse + ", " + zeroFine + "), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool(
+        "decimals.eq(decimals.add(" + zeroCoarse + ", decimal(\"1\")), decimal(\"1\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.mod(" + zeroCoarse +
+                         ", decimal(\"1E-2000000000\")), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.mod(" + zeroFine +
+                         ", decimal(\"1E+2000000000\")), decimal(\"0\"))"));
+    EXPECT_TRUE(evalBool("decimals.eq(decimals.mod(decimal(\"0\"), decimal(\"3\")), decimal(\"0\"))"));
+    // The row that must still be refused: here the *one* expands into the zero's scale. A
+    // blanket zero exemption would have let this through.
+    EXPECT_TRUE(errContains("decimals.add(decimal(\"1\"), " + zeroFine + ") != decimal(\"0\")",
+                            "aligning the operands"));
+}
+
 // The must-fail twin: everything that does not align stays unguarded at any width, and
 // alignment that stays narrow is accepted however extreme both operands are. A guard on the
 // operands' own magnitudes rather than on their difference would refuse all of these.

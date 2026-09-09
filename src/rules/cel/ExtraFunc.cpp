@@ -354,9 +354,13 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                     // frame would refuse `1e-2147483647 mod 1e2147483647` (which is the
                     // dividend itself) and `1e2147483647 mod 1e2147483000` (647 quotient
                     // digits), both free and both accepted by the JVM.
+                    // A zero dividend has a quotient of zero whatever the scales, and its
+                    // adjusted exponent says nothing useful - a zero keeps the scale it was
+                    // built with, so `0E+2e9 mod 1E-2e9` estimated 4e9 digits for a result
+                    // that is just zero. Free on libmpdec; the JDK returns 0 at precision 1.
                     DecimalUtil::requireSaneWidth(
-                        std::max<int64_t>(0, a.adjexp() - b.adjexp()) + 1, "decimals.mod",
-                        "the integral quotient");
+                        a.iszero() ? 1 : std::max<int64_t>(0, a.adjexp() - b.adjexp()) + 1,
+                        "decimals.mod", "the integral quotient");
                     return a.rem(b, DecimalUtil::exactContext());
                 });
         !s.ok())

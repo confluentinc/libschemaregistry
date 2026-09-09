@@ -213,18 +213,40 @@ void DecimalUtil::requireSaneWidth(int64_t needed, const std::string &fn,
     }
 }
 
+int64_t DecimalUtil::operandWidth(int64_t target_scale, const decimal::Decimal &d) {
+    if (!d.isfinite()) {
+        throw std::runtime_error("cannot measure a non-finite decimal");
+    }
+    // A zero contributes one digit whatever the distance: expanding a zero appends none. That
+    // decides several cases outright, because alignment expands only the operand whose scale is
+    // coarser. Measured on libmpdec, and the JDK agrees on every row:
+    //
+    //   0E+2e9 + 0E-2e9      free, 1 digit             precision 1
+    //   0E+2e9 + 1           free, 1 digit             precision 1
+    //   0E+2e9 mod 1E-2e9    free, 1 digit             precision 1
+    //   0E-2e9 + 1           1601 MB, 2e9+1 digits     ArithmeticException
+    //
+    // Only the last must be refused, and the difference is purely which operand expands.
+    if (d.iszero()) {
+        return 1;
+    }
+    const int64_t exponent = d.exponent();
+    const int64_t digits = d.adjexp() - exponent + 1;
+    return digits + target_scale + exponent;
+}
+
 void DecimalUtil::requireAlignable(const decimal::Decimal &a, const decimal::Decimal &b,
                                    const std::string &fn) {
-    // Addition and subtraction expand the narrower operand into the wider one's frame before
-    // computing a single digit, so the frame carries the smaller exponent and spans both
-    // magnitudes. No exemption for a zero operand: aligning a zero at an extreme scale with
-    // 1 still expands the *one* into the zero's scale.
+    // Addition and subtraction align both operands on the finer scale, so the frame is the
+    // widest either of them needs there - computed per operand, because of the zero case
+    // above.
     if (!a.isfinite() || !b.isfinite()) {
         throw std::runtime_error("cannot measure a non-finite decimal");
     }
-    const int64_t exponent = std::min(a.exponent(), b.exponent());
-    const int64_t adjusted = std::max(a.adjexp(), b.adjexp()) + 1;
-    requireSaneWidth(adjusted - exponent + 1, fn, "aligning the operands");
+    const int64_t target_scale = -std::min(a.exponent(), b.exponent());
+    const int64_t needed =
+        std::max(operandWidth(target_scale, a), operandWidth(target_scale, b)) + 1;
+    requireSaneWidth(needed, fn, "aligning the operands");
 }
 
 decimal::Decimal DecimalUtil::fromProto(const confluent::type::Decimal &d) {

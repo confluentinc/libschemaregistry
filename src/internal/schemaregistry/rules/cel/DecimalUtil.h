@@ -116,6 +116,9 @@ class DecimalUtil {
     static void requireSaneWidth(int64_t needed, const std::string &fn, const std::string &what,
                                  int64_t limit = kSaneWidth);
 
+    /** Digits `d` needs once expanded to `target_scale`; a zero needs one, at any distance. */
+    static int64_t operandWidth(int64_t target_scale, const decimal::Decimal &d);
+
     /** Guard A: the frame `add`/`sub` align their operands in. */
     static void requireAlignable(const decimal::Decimal &a, const decimal::Decimal &b,
                                  const std::string &fn);
