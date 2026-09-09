@@ -483,6 +483,13 @@ bool acceptsVariant(const google::protobuf::FieldDescriptor* fd,
         return fd->is_map();
     }
     if (value.type == VT::List) {
+        // A map field answers is_repeated() too, and that is deliberate: this walk hands a
+        // map field back as a *list of its synthetic entry messages*, which the list path
+        // then adds one at a time. Excluding maps here breaks the ordinary map write-back
+        // (ValidationRuleTest.ProtobufFieldTransformLeavesMapKeysAlone catches it). What the
+        // list path needed was not a narrower guard but a per-element descriptor check,
+        // which it now has - an item that is not the entry message is reported rather than
+        // reaching CopyFrom's CHECK.
         return fd->is_repeated();
     }
     if (fd->is_repeated()) {
@@ -507,8 +514,20 @@ bool acceptsVariant(const google::protobuf::FieldDescriptor* fd,
             return value.type == VT::EnumNumber;
         case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
             return value.type == VT::String || value.type == VT::Bytes;
-        case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE:
-            return value.type == VT::Message;
+        case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE: {
+            // The *descriptor*, not just the kind. CopyFrom ABSL_CHECKs on a mismatch and
+            // aborts, which is the failure this whole function exists to prevent - and it is
+            // reachable, because the two CEL leaf messages are the message-typed fields a
+            // field executor does fire on: a Decimal handed to a google.protobuf.Timestamp
+            // field aborted the process, and so did a Timestamp handed to a Decimal field.
+            if (value.type != VT::Message) {
+                return false;
+            }
+            const auto& nested =
+                std::get<std::unique_ptr<google::protobuf::Message>>(value.value);
+            return nested == nullptr ||
+                   nested->GetDescriptor() == fd->message_type();
+        }
         default:
             return false;
     }
@@ -677,6 +696,16 @@ void setMessageField(google::protobuf::Message* message,
                                 std::unique_ptr<google::protobuf::Message>>(
                                 item.value);
                             if (msg_ptr) {
+                                // Per element, for the reason given in acceptsVariant: the
+                                // top-level guard sees the list, not its items.
+                                if (msg_ptr->GetDescriptor() != fd->message_type()) {
+                                    throw std::runtime_error(
+                                        "a rule returned " +
+                                        std::string(msg_ptr->GetDescriptor()->full_name()) +
+                                        " for an element of repeated field " +
+                                        std::string(fd->full_name()) + ", which holds " +
+                                        std::string(fd->message_type()->full_name()));
+                                }
                                 google::protobuf::Message* added_msg =
                                     reflection->AddMessage(message, fd);
                                 added_msg->CopyFrom(*msg_ptr);
@@ -803,6 +832,19 @@ void setMessageField(google::protobuf::Message* message,
                             std::unique_ptr<google::protobuf::Message>>(
                             map_value.value);
                         if (msg_ptr) {
+                            // Per value, for the reason given in acceptsVariant.
+                            if (msg_ptr->GetDescriptor() !=
+                                value_field->message_type()) {
+                                throw std::runtime_error(
+                                    "a rule returned " +
+                                    std::string(
+                                        msg_ptr->GetDescriptor()->full_name()) +
+                                    " for a value of map field " +
+                                    std::string(fd->full_name()) +
+                                    ", which holds " +
+                                    std::string(value_field->message_type()
+                                                    ->full_name()));
+                            }
                             google::protobuf::Message* mutable_value_msg =
                                 entry_reflection->MutableMessage(entry_msg,
                                                                  value_field);

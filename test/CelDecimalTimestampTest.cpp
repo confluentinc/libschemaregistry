@@ -585,36 +585,65 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampNeedsNoConstructor) {
 }
 #endif  // SCHEMAREGISTRY_TEST_WITH_AVRO
 
-// A coefficient at or above 2^127 does not fit confluent.type.Decimal.value, which is a signed
-// two's-complement integer, even though mpdecimal's triple carries an *unsigned* 128-bit
-// magnitude. Encoding one into 16 bytes set the top bit and the value read back as its own
-// negation: 2^127 became -2^127, and 2^128-1 became -1.
+// The coefficient goes out at whatever width it needs. `confluent.type.Decimal.value` is a
+// variable-length bytes field and the JVM fills it from `BigInteger.toByteArray()`, which has
+// no ceiling; this codec used to read the coefficient out of an `mpd_uint128_triple_t` and
+// refuse anything past signed 128 bits, on both sides.
 //
-// Refused at encode rather than widened to a 17th byte, so this client never writes bytes it
-// cannot itself decode. Only 39-digit coefficients can reach the bound, because the largest
-// 38-digit value (~1e38) is below 2^127 (~1.70e38). Java has no such bound - BigInteger is
-// unbounded - so this enforces the C++ triple's existing 128-bit limitation on both sides
-// instead of corrupting the value.
-TEST(CelDecimalTimestampTest, WideCoefficientIsRefusedNotSignFlipped) {
-    // Exactly representable: the signed range is [-2^127, 2^127-1].
+// That bound was not an edge: CEL's decimal precision is 38 significant digits, and adding or
+// multiplying two values at that precision crosses it immediately. Measured against the JDK:
+//
+//   38 nines                      precision 38  16 bytes  round-trips
+//   38 nines + 38 nines           precision 39  17 bytes  round-trips
+//   38 nines * 38 nines           precision 76  32 bytes  round-trips
+//   2^127                         precision 39  17 bytes  round-trips
+//
+// so `decimals.add` on two values at the documented precision was an error here and ordinary
+// there. What the old bound was really guarding against - a magnitude whose top bit is set
+// reading back as its own negation, 2^127 becoming -2^127 - is now handled by prepending the
+// zero byte `BigInteger.toByteArray()` prepends, rather than by refusing the value.
+TEST(CelDecimalTimestampTest, AWideCoefficientRoundTripsAtAnyWidth) {
+    // The old boundary, from both sides of it.
     EXPECT_TRUE(evalBool(
         "string(decimal(\"170141183460469231731687303715884105727\")) == "
         "\"170141183460469231731687303715884105727\""));
     EXPECT_TRUE(evalBool(
+        "string(decimal(\"170141183460469231731687303715884105728\")) == "
+        "\"170141183460469231731687303715884105728\""));
+    EXPECT_TRUE(evalBool(
         "string(decimal(\"-170141183460469231731687303715884105728\")) == "
         "\"-170141183460469231731687303715884105728\""));
-    // 38 digits always fit, whatever the digits are.
     EXPECT_TRUE(evalBool(
-        "string(decimal(\"99999999999999999999999999999999999999\")) == "
-        "\"99999999999999999999999999999999999999\""));
+        "string(decimal(\"340282366920938463463374607431768211455\")) == "
+        "\"340282366920938463463374607431768211455\""));
+    EXPECT_TRUE(evalBool(
+        "string(decimal(\"-340282366920938463463374607431768211455\")) == "
+        "\"-340282366920938463463374607431768211455\""));
 
-    // One past the signed range, in both directions.
-    EXPECT_TRUE(errContains("string(decimal(\"170141183460469231731687303715884105728\"))",
-                            "exceeds the signed 128-bit range"));
-    EXPECT_TRUE(errContains("string(decimal(\"340282366920938463463374607431768211455\"))",
-                            "exceeds the signed 128-bit range"));
-    EXPECT_TRUE(errContains("string(decimal(\"-340282366920938463463374607431768211455\"))",
-                            "exceeds the signed 128-bit range"));
+    // Exact arithmetic at CEL's own precision, which is what made the bound reachable.
+    EXPECT_TRUE(evalBool(
+        "string(decimals.add(decimal(\"99999999999999999999999999999999999999\"), "
+        "decimal(\"99999999999999999999999999999999999999\"))) == "
+        "\"199999999999999999999999999999999999998\""));
+    EXPECT_TRUE(evalBool(
+        "string(decimals.mul(decimal(\"99999999999999999999999999999999999999\"), "
+        "decimal(\"99999999999999999999999999999999999999\"))) == "
+        "\"9999999999999999999999999999999999999800000000000000000000000000000000000001\""));
+
+    // The small and awkward widths, which the two's-complement trimming has to get exactly
+    // right: -1 is one byte, -128 is one byte (not 0xFF,0x80), -256 is two.
+    EXPECT_TRUE(evalBool("string(decimal(\"-1\")) == \"-1\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"-128\")) == \"-128\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"-129\")) == \"-129\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"-256\")) == \"-256\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"127\")) == \"127\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"128\")) == \"128\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"0\")) == \"0\""));
+    EXPECT_TRUE(evalBool("string(decimal(\"0.00\")) == \"0.00\""));
+    // And a wide coefficient with a scale, so the two are independent.
+    EXPECT_TRUE(evalBool(
+        "string(decimal(\"3402823669209384634633746074317682114.55\")) == "
+        "\"3402823669209384634633746074317682114.55\""));
 }
 
 // confluent.type.Decimal.scale is a signed int32, and the scale is the negated exponent, so a

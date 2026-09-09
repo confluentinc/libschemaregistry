@@ -26,6 +26,8 @@
 #include "schemaregistry/serdes/Serde.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 #include "schemaregistry/serdes/protobuf/ProtobufUtils.h"
+#include "confluent/type/decimal.pb.h"
+#include "google/protobuf/timestamp.pb.h"
 #include "test/parity.pb.h"
 
 using namespace schemaregistry::serdes;
@@ -42,6 +44,20 @@ class BytesReturningExecutor : public FieldRuleExecutor {
         RuleContext &ctx, const SerdeValue &field_value) override {
         return makeProtobufValue(ProtobufVariant(std::vector<uint8_t>{0xDE, 0xAD}));
     }
+};
+
+/// Returns a value the caller chooses, whatever the field's shape.
+class Fixed : public FieldRuleExecutor {
+  public:
+    explicit Fixed(ProtobufVariant v) : value_(std::move(v)) {}
+    std::string getType() const override { return "MASK"; }
+    std::unique_ptr<SerdeValue> transformField(
+        RuleContext &ctx, const SerdeValue &field_value) override {
+        return makeProtobufValue(ProtobufVariant(value_));
+    }
+
+  private:
+    ProtobufVariant value_;
 };
 
 /// Echoes the field back unchanged, so the same walk can be shown to work.
@@ -118,4 +134,34 @@ TEST(ProtobufFieldWriteBack, AnEchoingRuleLeavesAValueTypeFieldIntact) {
     EXPECT_EQ(out.amount().value(), std::string("\x04\xD2", 2));
     EXPECT_EQ(out.amount().scale(), 2);
     EXPECT_EQ(out.plain(), "hi");
+}
+
+/// A message of the *wrong type* for a message-typed field. `acceptsVariant` checked only that
+/// the value was a Message, so `CopyFrom` still reached its descriptor ABSL_CHECK and **aborted
+/// the process** - the exact failure the guard exists to prevent. Reachable because the two CEL
+/// leaf messages are the message-typed fields a field executor does fire on: `confluent.type
+/// .Decimal` and `google.protobuf.Timestamp`, each of which the walk hands over whole.
+TEST(ProtobufFieldWriteBack, AMessageOfTheWrongTypeIsReported) {
+    auto decimal = [] {
+        auto d = std::make_unique<confluent::type::Decimal>();
+        d->set_scale(7);
+        return ProtobufVariant(std::move(d));
+    };
+    auto timestamp = [] {
+        auto t = std::make_unique<google::protobuf::Timestamp>();
+        t->set_seconds(1);
+        return ProtobufVariant(std::move(t));
+    };
+
+    // Crossed: a Decimal for the Timestamp field, a Timestamp for the Decimal field.
+    EXPECT_THROW(runFieldRule(std::make_shared<Fixed>(decimal()), "TS"), std::exception);
+    EXPECT_THROW(runFieldRule(std::make_shared<Fixed>(timestamp()), "AMOUNT"),
+                 std::exception);
+
+    // The must-fail twin: the right message type still reaches each field, so "throws" cannot
+    // mean the guard now refuses every message.
+    parity::ParityPlain dec = runFieldRule(std::make_shared<Fixed>(decimal()), "AMOUNT");
+    EXPECT_EQ(dec.amount().scale(), 7);
+    parity::ParityPlain ts = runFieldRule(std::make_shared<Fixed>(timestamp()), "TS");
+    EXPECT_EQ(ts.ts().seconds(), 1);
 }
