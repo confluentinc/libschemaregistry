@@ -255,3 +255,41 @@ TEST(CelProtobufContainerWriteBack, ANullInsideAContainerIsRejected) {
     EXPECT_EQ(ok.amount_map().size(), 1u);
     EXPECT_EQ(ok.codes_size(), 2);
 }
+
+/// A result key that names no field was dropped, which reported success while rebuilding the
+/// message without it - and under replace semantics a mistyped name takes with it every field
+/// the rule *did* name correctly. The JVM parses the result with a bare `JsonFormat.parser()`
+/// (ProtobufSchemaUtils.toObject), which refuses an unknown field outright: measured against
+/// protobuf-java 4.35.1, `{"nope": 1}` gives "Cannot find field: nope in message p.M", and
+/// `ignoringUnknownFields()` - which would have accepted it - is not used.
+///
+/// A non-string key is not a separate case. The JVM looks a key up as `String.valueOf(key)`
+/// and Jackson renders that same text for the parse, so an int or bool key simply has to name
+/// a field like any other - and a protobuf field name cannot look like an integer, so it never
+/// does. Skipping such a key instead dropped the entry silently; the error below shows the key
+/// was stringified and looked up.
+///
+/// The Avro writer still drops an unnamed key, and that is not an inconsistency: the JVM's
+/// AvroResultWriter.convertRecord iterates the *schema's* fields and looks each one up in the
+/// map, so an extra key there is never read.
+TEST(CelProtobufContainerWriteBack, AResultKeyThatNamesNoFieldIsRejected) {
+    EXPECT_THROW(transform("{'nope': 1, 'amounts': message.amounts, "
+                           "'amount_map': message.amount_map, 'nested': message.nested, "
+                           "'label': message.label}"),
+                 std::exception);
+    // A key that names nothing alongside keys that name everything: the whole result is
+    // refused rather than the mistyped entry being dropped.
+    EXPECT_THROW(transform("{'labl': 'typo', 'amounts': message.amounts, "
+                           "'amount_map': message.amount_map, 'nested': message.nested}"),
+                 std::exception);
+    // A non-string key, stringified and then looked up.
+    EXPECT_THROW(transform("{1: 'x', 'amounts': message.amounts, "
+                           "'amount_map': message.amount_map, 'nested': message.nested, "
+                           "'label': message.label}"),
+                 std::exception);
+
+    // The must-fail twin: the identity still round-trips.
+    parity::ValueTypeContainers ok = transform(kIdentity);
+    EXPECT_EQ(ok.amounts_size(), 2);
+    EXPECT_EQ(ok.label(), "hi");
+}

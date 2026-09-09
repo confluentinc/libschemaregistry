@@ -1157,6 +1157,102 @@ TEST(CelAvroFieldLevel, AWrongTypedFieldResultIsRefused) {
     EXPECT_THROW(runTagged("I", "2147483648"), std::exception);
 }
 
+// ---- a logical-type value belongs only in a field that declares that logical type ------------
+//
+// The two arms at the top of `toAvroValue` dispatched on the *returned* value and never looked
+// at the target, so a tagged CEL_FIELD rule - which calls in without the schema check
+// `recordFromCelMap` and the container arms apply - could write:
+//
+//   * `decimal('5')` into a plain `bytes` field, as decimal wire bytes, with no logical type
+//     to read them back by;
+//   * `timestamp(0)` into a plain `long` field, where the write-back switch had no unit to use
+//     and returned the original - reporting success while leaving the old value in place.
+//
+// The JVM refuses both: branchAccepts requires `hasLogicalType && value instanceof BigDecimal`
+// for BYTES and FIXED, and its LONG case calls narrowToLong, which takes no Instant.
+
+namespace {
+
+const char *kPlainAndLogical = R"({
+  "type": "record",
+  "name": "PL",
+  "fields": [
+    {"name": "plainBytes", "type": "bytes", "confluent:tags": ["PB"]},
+    {"name": "plainLong", "type": "long", "confluent:tags": ["PL"]},
+    {"name": "dec",
+     "type": {"type": "bytes", "logicalType": "decimal", "precision": 8, "scale": 2},
+     "confluent:tags": ["DEC"]},
+    {"name": "ts",
+     "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "confluent:tags": ["TS"]}
+  ]
+})";
+
+::avro::GenericDatum runPlain(const std::string &tag, const std::string &expr) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kPlainAndLogical);
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<std::vector<uint8_t>>() = {0x01};
+    record.fieldAt(1).value<int64_t>() = 5;
+    record.fieldAt(2).value<std::vector<uint8_t>>() = {0x04, 0xD2};
+    record.fieldAt(3).value<int64_t>() = 1700000000123L;
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+    rule.setTags(std::vector<std::string>{tag});
+
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"PL.plainBytes", {"PB"}}, {"PL.plainLong", {"PL"}},
+        {"PL.dec", {"DEC"}}, {"PL.ts", {"TS"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+
+    return schemaregistry::serdes::avro::utils::transformFields(ctx, schema, datum);
+}
+
+}  // namespace
+
+/// A decimal or a timestamp needs the matching logical type on the target.
+TEST(CelAvroFieldLevel, ALogicalTypeValueNeedsAMatchingField) {
+    // The one that wrote decimal bytes into a field with nothing to read them back by.
+    EXPECT_THROW(runPlain("PB", "decimal('5')"), std::exception);
+    EXPECT_THROW(runPlain("PB", "decimal('1.23')"), std::exception);
+    // The one that reported success and changed nothing.
+    EXPECT_THROW(runPlain("PL", "timestamp(0)"), std::exception);
+    // And the crossed pair: a timestamp for the decimal field, a decimal for the timestamp.
+    EXPECT_THROW(runPlain("DEC", "timestamp(0)"), std::exception);
+    EXPECT_THROW(runPlain("TS", "decimal('5')"), std::exception);
+}
+
+/// The must-fail twins: each value still reaches the field that does declare its logical type,
+/// so "throws" above cannot mean the logical-type arms stopped working.
+TEST(CelAvroFieldLevel, ALogicalTypeValueStillReachesItsOwnField) {
+    ::avro::GenericDatum out =
+        runPlain("DEC", "decimals.add(decimal(value), decimal('1.00'))");
+    // 12.34 + 1.00 = 13.34, unscaled 1334 = 0x0536.
+    EXPECT_EQ(out.value<::avro::GenericRecord>().field("dec").value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{0x05, 0x36}));
+
+    ::avro::GenericDatum out2 = runPlain("TS", "value + duration('60s')");
+    EXPECT_EQ(out2.value<::avro::GenericRecord>().field("ts").value<int64_t>(),
+              1700000060123L);
+
+    // A plain field still takes a plain value.
+    EXPECT_EQ(runPlain("PL", "7").value<::avro::GenericRecord>()
+                  .field("plainLong").value<int64_t>(), 7);
+    EXPECT_EQ(runPlain("PB", "b'ab'").value<::avro::GenericRecord>()
+                  .field("plainBytes").value<std::vector<uint8_t>>(),
+              (std::vector<uint8_t>{'a', 'b'}));
+}
+
 // ---- a container's elements need the same schema check its fields get ------------------------
 //
 // `recordFromCelMap` has checked each field against its schema since unions were resolved by

@@ -23,6 +23,24 @@ namespace {
 
 constexpr const char *kTimestampTypeName = "google.protobuf.Timestamp";
 
+/// The field name a result key stands for. The JVM looks a key up as `String.valueOf(key)`,
+/// so an int, uint or bool key names a field by its text rather than being skipped.
+std::string celKeyName(const google::api::expr::runtime::CelValue &key) {
+    if (key.IsString()) {
+        return std::string(key.StringOrDie().value());
+    }
+    if (key.IsInt64()) {
+        return std::to_string(key.Int64OrDie());
+    }
+    if (key.IsUint64()) {
+        return std::to_string(key.Uint64OrDie());
+    }
+    if (key.IsBool()) {
+        return key.BoolOrDie() ? "true" : "false";
+    }
+    return std::string(utils::celTypeName(key));
+}
+
 /// Resolves a result key to a field by declared name, then by JSON name: a rule may
 /// legitimately return either, so matching only the declared name would silently skip a field
 /// like `total_amount`.
@@ -485,14 +503,31 @@ void fillFromCelMap(google::protobuf::Message *out,
     const auto *keys_list = map_keys.value();
     for (int i = 0; i < keys_list->size(); ++i) {
         auto key_val = keys_list->Get(nullptr, i);
-        if (key_val.IsError() || !key_val.IsString()) {
-            continue;
+        if (key_val.IsError()) {
+            throw std::runtime_error(
+                "a CEL rule failed while producing a field name for " +
+                std::string(desc->full_name()));
         }
-        const auto *fd = findResultField(desc, std::string(key_val.StringOrDie().value()));
+        // A CEL map key may be an int, uint or bool as well as a string, and the JVM reaches
+        // the field the same way: ProtobufResultWriter.convert looks it up as
+        // String.valueOf(key), and Jackson renders that same text for the JSON parse. So a
+        // non-string key is not skipped - it has to name a field like any other, and normally
+        // does not, which the check below then reports. Skipping it dropped the entry
+        // silently, and under replace semantics that deletes the field.
+        const std::string key_name = celKeyName(key_val);
+        const auto *fd = findResultField(desc, key_name);
         if (fd == nullptr) {
-            // A key the schema does not declare has nowhere to go. Dropping it matches the
-            // JVM client, whose JSON parse ignores unknown fields.
-            continue;
+            // The JVM parses the result with a bare JsonFormat.parser(), which refuses an
+            // unknown field - "Cannot find field: nope in message p.M" - because
+            // ignoringUnknownFields() is not used (ProtobufSchemaUtils.toObject). Dropping
+            // the key reported success while rebuilding the message without it, and under
+            // replace semantics a mistyped name takes the field it meant to set with it.
+            //
+            // The Avro writer does drop an unnamed key, and that is not an inconsistency:
+            // the JVM's AvroResultWriter.convertRecord iterates the *schema's* fields and
+            // looks each one up in the map, so an extra key there is simply never read.
+            throw std::runtime_error("cannot find field " + key_name + " in message " +
+                                     std::string(desc->full_name()));
         }
         auto lookup = cel_map->Get(nullptr, key_val);
         if (!lookup.has_value()) {

@@ -527,16 +527,38 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
     // Before this they all reached the trailing `return original` and were discarded.
     if (cel_value.IsMessage()) {
         const google::protobuf::Message *message = cel_value.MessageOrDie();
-        if (message != nullptr) {
-            const auto name = message->GetDescriptor()->full_name();
-            if (name == "confluent.type.Decimal") {
-                return decimalToAvro(original, *message);
+        const std::string name =
+            message == nullptr ? std::string()
+                               : std::string(message->GetDescriptor()->full_name());
+        // The target decides, not just the returned message. Dispatching on the message alone
+        // wrote decimal wire bytes into a plain `bytes` or `fixed` field, and a bytes datum
+        // into a *record* slot, which does not even match the schema. The JVM's branchAccepts
+        // requires `hasLogicalType && value instanceof BigDecimal` for BYTES and FIXED, and a
+        // Variant only for a record carrying the variant logical type, so every other target
+        // is an AvroTypeException there. Reachable from a tagged CEL_FIELD rule, which calls
+        // in without the schema check recordFromCelMap and the container arms apply.
+        if (name == "confluent.type.Decimal") {
+            if (original.logicalType().type() != ::avro::LogicalType::DECIMAL) {
+                throw std::runtime_error(
+                    "cannot write a decimal to an Avro " +
+                    ::avro::toString(original.type()) +
+                    " value, which does not declare the decimal logical type");
             }
-            if (name == "confluent.type.Variant") {
-                return variantToAvro(original, *message);
-            }
+            return decimalToAvro(original, *message);
         }
-        return original;
+        if (name == "confluent.type.Variant") {
+            if (original.type() != ::avro::AVRO_RECORD ||
+                original.value<::avro::GenericRecord>().schema()->name().fullname() !=
+                    "confluent.type.Variant") {
+                throw std::runtime_error("cannot write a variant to an Avro " +
+                                         ::avro::toString(original.type()) + " value");
+            }
+            return variantToAvro(original, *message);
+        }
+        throw std::runtime_error("cannot write " +
+                                 (name.empty() ? std::string("a message") : name) +
+                                 " to an Avro " + ::avro::toString(original.type()) +
+                                 " value");
     } else if (cel_value.IsTimestamp()) {
         const absl::Time time = cel_value.TimestampOrDie();
         switch (original.logicalType().type()) {
@@ -559,9 +581,15 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
                 return ::avro::GenericDatum(nanos);
             }
             default:
-                // A timestamp computed for a field that is not a timestamp logical type has
-                // no unit to be written in; leaving the field alone matches the fallback.
-                return original;
+                // A field that is not a timestamp logical type declares no unit to write the
+                // instant in, so there is nothing to convert against - and returning the
+                // original silently discarded the rule's result, reporting success while
+                // leaving the old value in place. The JVM's LONG case calls narrowToLong,
+                // which refuses an Instant outright.
+                throw std::runtime_error(
+                    "cannot write a timestamp to an Avro " +
+                    ::avro::toString(original.type()) +
+                    " value, which does not declare a timestamp logical type");
         }
     }
     if (cel_value.IsBool()) {
