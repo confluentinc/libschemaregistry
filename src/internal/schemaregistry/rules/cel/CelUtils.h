@@ -6,7 +6,11 @@
 #include <vector>
 
 #include "absl/status/statusor.h"
+#ifdef SCHEMAREGISTRY_USE_AVRO
+// Guarded like the Avro declarations below: rules and Avro are independent features (only
+// Protobuf is auto-enabled with rules), so a rules-without-Avro build has no avro headers.
 #include "avro/Generic.hh"
+#endif
 #include "eval/public/cel_value.h"
 #include "google/protobuf/arena.h"
 #include "google/protobuf/descriptor.h"
