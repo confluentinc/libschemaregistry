@@ -73,6 +73,59 @@ bool evalNanosTsTz(int64_t nanos, const std::string &expr) {
 
 }  // namespace
 
+// A variant timestamp spans the whole int64 range while a CEL timestamp is 0001-9999, so an
+// out-of-range value is reachable from data. It used to be built anyway, leaving an instant
+// cel-cpp refuses to render but will still compare - `< now` answered a confident false for a
+// value that is not a time. Refused now, and routed through the as/tryAs split so a rule can
+// guard, matching the reference's variantGetTimestamp.
+TEST(CelVariantTest, VariantAsTimestampIsRangeChecked) {
+    constexpr int64_t kMaxMicros = 253402300799LL * 1000000 + 999999;
+    constexpr int64_t kMinMicros = -62135596800LL * 1000000;
+
+    auto bind = [](int64_t micros) {
+        VariantBuilder builder;
+        builder.appendTimestampTz(micros);
+        return builder.build();
+    };
+    auto evalTs = [](const Variant &parsed, const std::string &expr) {
+        auto msg = std::make_unique<confluent::type::Variant>();
+        msg->set_metadata(std::string(parsed.metadataBytes().begin(),
+                                      parsed.metadataBytes().end()));
+        msg->set_value(std::string(parsed.valueBytes().begin(),
+                                   parsed.valueBytes().end()));
+        auto value = protobuf::makeProtobufValue(
+            protobuf::ProtobufVariant(std::move(msg)));
+        CelValidator validator;
+        auto r = validator.execute(rule(expr), *value);
+        return std::holds_alternative<bool>(r) && std::get<bool>(r);
+    };
+
+    // The boundaries are inside the range, and tryAs answers a timestamp there.
+    for (int64_t micros : {int64_t(0), kMaxMicros, kMinMicros}) {
+        Variant v = bind(micros);
+        EXPECT_TRUE(evalTs(v, "variants.as(this, \"timestamp\") == "
+                              "variants.as(this, \"timestamp\")"))
+            << micros;
+        EXPECT_FALSE(evalTs(v, "variants.tryAs(this, \"timestamp\") == null")) << micros;
+    }
+
+    // Out of range: as refuses and names the range, tryAs answers CEL null.
+    for (int64_t micros : {int64_t(9223372036854775807LL),
+                           int64_t(-9223372036854775807LL),
+                           kMaxMicros + 1000000}) {
+        Variant v = bind(micros);
+        try {
+            evalTs(v, "variants.as(this, \"timestamp\") != null");
+            ADD_FAILURE() << "variants.as should have refused " << micros;
+        } catch (const std::exception &e) {
+            EXPECT_NE(std::string(e.what()).find("is outside 0001-01-01T00:00:00Z"),
+                      std::string::npos)
+                << "should name the range: " << e.what();
+        }
+        EXPECT_TRUE(evalTs(v, "variants.tryAs(this, \"timestamp\") == null")) << micros;
+    }
+}
+
 // ---- variants.* over a parsed JSON string bound as `this` ----
 
 TEST(CelVariantTest, VariantFunctions) {

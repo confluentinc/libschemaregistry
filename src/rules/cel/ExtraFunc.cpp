@@ -1178,10 +1178,33 @@ absl::Status variantAsImpl(absl::Span<const cel::CelValue> args, cel::CelValue* 
             // fromEpochNanos, which use Math.floorDiv into a seconds+nanos proto Timestamp.
             // A raw/1000 truncation would drop the sub-micro nanos and mis-round negative
             // timestamps toward zero.
-            absl::Time t = (vt == VariantType::TimestampTz ||
-                            vt == VariantType::TimestampNtz)
-                               ? absl::FromUnixMicros(raw)
-                               : absl::FromUnixNanos(raw);
+            bool micros = vt == VariantType::TimestampTz ||
+                          vt == VariantType::TimestampNtz;
+            // A variant timestamp spans the whole int64 range while a CEL timestamp is
+            // 0001-9999, so an out-of-range value is reachable from data. Refused rather
+            // than built, and routed through nullOnError like a type mismatch:
+            // variants.as errors and names the range, variants.tryAs answers CEL null so a
+            // rule can guard. Built regardless, it left an invalid instant in the type
+            // system - cel-cpp refuses to render it, so only comparisons could consume it,
+            // which is where a wrong answer hides. Mirrors the reference's
+            // variantGetTimestamp.
+            int64_t perSecond = micros ? 1000000 : 1000000000;
+            int64_t seconds = raw / perSecond;
+            if (raw % perSecond != 0 && raw < 0) {
+                seconds--;  // floor, matching Math.floorDiv
+            }
+            if (seconds < kMinEpochSecond || seconds > kMaxEpochSecond) {
+                if (nullOnError) {
+                    *out = cel::CelValue::CreateNull();
+                    return absl::OkStatus();
+                }
+                *out = err(arena, "variants.as: timestamp " + std::to_string(raw) +
+                                      " is outside 0001-01-01T00:00:00Z.."
+                                      "9999-12-31T23:59:59.999999999Z");
+                return absl::OkStatus();
+            }
+            absl::Time t = micros ? absl::FromUnixMicros(raw)
+                                  : absl::FromUnixNanos(raw);
             *out = cel::CelValue::CreateTimestamp(t);
             return absl::OkStatus();
         }
