@@ -179,7 +179,17 @@ decimal::Decimal applyPreferredScale(const decimal::Decimal& value, int64_t pref
         return value.rescale(-preferred_scale, c);
     }
     decimal::Decimal minimal = value.reduce(c);
-    const int64_t target = std::max(preferred_scale, -minimal.exponent());
+    const int64_t minimal_scale = -minimal.exponent();
+    // The preferred scale does not override the context precision. The reference pads toward
+    // it only while the result still fits in mc.precision significant digits, and stops short
+    // otherwise: `1.<40 zeros> / 1` is scale 37 there and not the preferred 40, and
+    // `1.<100 zeros> / 8` is scale 38 because 0.125 already spends 3 of the 38 on digits that
+    // are not padding. This rescale runs in MaxContext(), so nothing else caps it - the raw
+    // preferred scale padded sqrt(1.<100 zeros>) to 51 digits.
+    const int64_t digits = minimal.adjexp() - minimal.exponent() + 1;
+    const int64_t headroom = DecimalUtil::context().prec() - digits;
+    const int64_t target =
+        std::max(minimal_scale, std::min(preferred_scale, minimal_scale + headroom));
     DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(target, minimal), fn,
                                   "a scale of " + std::to_string(target));
     return minimal.rescale(-target, c);

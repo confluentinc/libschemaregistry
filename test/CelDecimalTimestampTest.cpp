@@ -1155,3 +1155,41 @@ TEST(CelDecimalTimestampTest, TwoArgTimestampChecksTheCelRange) {
         EXPECT_TRUE(errContains(expr, "out of range")) << expr;
     }
 }
+
+// The preferred scale does not override the 38-digit context precision. The reference pads
+// toward the preferred scale only while the result still fits in mc.precision significant
+// digits, and stops short otherwise - so the target is
+// min(preferred, minimalScale + (38 - minimalPrecision)), floored at the minimal scale.
+//
+// Division needs no code of ours: libmpdec applies the cap to its own ideal exponent, as the
+// decimal arithmetic spec requires. Square root goes through applyPreferredScale, which
+// rescales in MaxContext() and so had nothing capping it - sqrt(1.<100 zeros>) padded to 51
+// significant digits against the reference's 38.
+TEST(CelDecimalTimestampTest, ThePreferredScaleCannotExceedTheContextPrecision) {
+    // 37 zeros is exactly 38 significant digits: the last preferred scale that is reachable.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.div(decimal("1.0000000000000000000000000000000000000"), decimal("1"))) == "1.0000000000000000000000000000000000000")"));
+    // 40 and 100 would need 41 and 101; both stop at 37.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.div(decimal("1.0000000000000000000000000000000000000000"), decimal("1"))) == "1.0000000000000000000000000000000000000")"));
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.div(decimal("1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("1"))) == "1.0000000000000000000000000000000000000")"));
+    // The cap is on *precision*, not on scale: 0.5 spends one digit before the padding starts,
+    // so it reaches scale 38 where 1 reaches only 37.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.div(decimal("1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("2"))) == "0.50000000000000000000000000000000000000")"));
+    // ...and 0.125 spends three, so it reaches scale 38 too but from a minimal scale of 3.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.div(decimal("1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("8"))) == "0.12500000000000000000000000000000000000")"));
+    // sqrt: preferred 20 fits, preferred 37 is exactly the ceiling, preferred 50 does not.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.sqrt(decimal("1.0000000000000000000000000000000000000000"))) == "1.00000000000000000000")"));
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.sqrt(decimal("1.00000000000000000000000000000000000000000000000000000000000000000000000000"))) == "1.0000000000000000000000000000000000000")"));
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.sqrt(decimal("1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"))) == "1.0000000000000000000000000000000000000")"));
+    // A zero is exempt: it is one digit at any scale, so it keeps the full preferred scale.
+    // Measured on the reference: 0.<100 zeros> / 1 is scale 100, precision 1.
+    EXPECT_TRUE(evalBool(R"(decimals.div(decimal("0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("1")).scale == 100)"));
+    EXPECT_TRUE(evalBool(R"(decimals.div(decimal("0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("3.0")).scale == 99)"));
+}
