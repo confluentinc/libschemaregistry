@@ -1,0 +1,624 @@
+/**
+ * Rebuilds a protobuf message from the map a message-level `CEL` transform returned.
+ * See ProtobufResultWriter.h for the contract.
+ */
+
+#include "schemaregistry/rules/cel/ProtobufResultWriter.h"
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <map>
+#include <string>
+
+#include "absl/status/statusor.h"
+#include "google/protobuf/descriptor.h"
+#include "schemaregistry/rules/cel/CelUtils.h"
+
+namespace schemaregistry::rules::cel::utils {
+
+using schemaregistry::serdes::protobuf::ProtobufVariant;
+
+namespace {
+
+constexpr const char *kTimestampTypeName = "google.protobuf.Timestamp";
+
+/// The field name a result key stands for. The JVM looks a key up as `String.valueOf(key)`,
+/// so an int, uint or bool key names a field by its text rather than being skipped.
+std::string celKeyName(const google::api::expr::runtime::CelValue &key) {
+    if (key.IsString()) {
+        return std::string(key.StringOrDie().value());
+    }
+    if (key.IsInt64()) {
+        return std::to_string(key.Int64OrDie());
+    }
+    if (key.IsUint64()) {
+        return std::to_string(key.Uint64OrDie());
+    }
+    if (key.IsBool()) {
+        return key.BoolOrDie() ? "true" : "false";
+    }
+    return std::string(utils::celTypeName(key));
+}
+
+/// Resolves a result key to a field by declared name, then by JSON name: a rule may
+/// legitimately return either, so matching only the declared name would silently skip a field
+/// like `total_amount`.
+const google::protobuf::FieldDescriptor *findResultField(
+    const google::protobuf::Descriptor *desc, const std::string &name) {
+    if (const auto *fd = desc->FindFieldByName(name)) {
+        return fd;
+    }
+    for (int i = 0; i < desc->field_count(); ++i) {
+        const auto *candidate = desc->field(i);
+        if (candidate->json_name() == name) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+/// Fills `out` from a CEL map, one entry per declared field. Defined below; declared here
+/// because a constructed nested message sends the walk back through it.
+void fillFromCelMap(google::protobuf::Message *out,
+                    const google::api::expr::runtime::CelValue &cel_value);
+
+/// Fills a message from whatever shape the runtime handed back for it.
+///
+/// Three shapes reach here and only the first two used to: a message the rule **echoed** (this
+/// client carries a decimal and a variant as proto messages), a CEL **timestamp**, and a
+/// **map** - which is what a rule that *constructs* a nested message returns. Without the third,
+/// a computed `{"inner": decimal("8.88")}` wrote nothing at all and the field came back at its
+/// default, silently.
+void fillMessageFromCel(google::protobuf::Message *nested,
+                        const google::api::expr::runtime::CelValue &value) {
+    if (value.IsMessage() && value.MessageOrDie() != nullptr) {
+        const google::protobuf::Message &source = *value.MessageOrDie();
+        // CopyFrom requires identical descriptors and ABSL_CHECKs otherwise, which aborts the
+        // process - verified with a death test. A CEL map can legitimately hand an unrelated
+        // message (a Decimal, say) to a differently-typed message field, so the mismatch is a
+        // rule-authoring error to report, which is what the JVM does: its message-level
+        // write-back goes through a protobuf JSON parse that rejects the type.
+        if (source.GetDescriptor() != nested->GetDescriptor()) {
+            throw std::runtime_error(
+                "cannot write " + std::string(source.GetDescriptor()->full_name()) +
+                " to a field of type " +
+                std::string(nested->GetDescriptor()->full_name()));
+        }
+        nested->CopyFrom(source);
+        return;
+    }
+    if (value.IsTimestamp()) {
+        const google::protobuf::Descriptor *nd = nested->GetDescriptor();
+        // Only google.protobuf.Timestamp. Any other message was accepted before: one with a
+        // differently-typed `seconds` field made SetInt64 fail protobuf's reflection CHECK and
+        // abort the process, and one without those fields was written empty and silently
+        // wrong. The JVM rejects the mismatch, its write-back going through a protobuf JSON
+        // parse.
+        if (nd->full_name() != kTimestampTypeName) {
+            throw std::runtime_error("cannot write a timestamp to a field of type " +
+                                     std::string(nd->full_name()));
+        }
+        const absl::Time time = value.TimestampOrDie();
+        const google::protobuf::Reflection *nr = nested->GetReflection();
+        nr->SetInt64(nested, nd->FindFieldByName("seconds"), absl::ToUnixSeconds(time));
+        nr->SetInt32(nested, nd->FindFieldByName("nanos"),
+                     static_cast<int32_t>(absl::ToInt64Nanoseconds(
+                         time - absl::FromUnixSeconds(absl::ToUnixSeconds(time)))));
+        return;
+    }
+    if (value.IsMap()) {
+        fillFromCelMap(nested, value);
+        return;
+    }
+    // Anything else falls here *after* the caller materialized the field, so returning
+    // quietly left an empty nested message: `{"nested": 1}` looked like it had been applied.
+    throw std::runtime_error("cannot write this CEL value to a field of type " +
+                             std::string(nested->GetDescriptor()->full_name()));
+}
+
+/// Writes one message-valued field from a CEL value.
+void setMessageField(google::protobuf::Message *out,
+                     const google::protobuf::FieldDescriptor *fd,
+                     const google::api::expr::runtime::CelValue &value) {
+    fillMessageFromCel(out->GetReflection()->MutableMessage(out, fd), value);
+}
+
+/// Where a scalar goes: the field itself, or a new element appended to a repeated one.
+///
+/// One switch serves both. A second, parallel switch is exactly how the two Avro converters in
+/// this client drifted apart - one grew a `variant` arm and the other did not - and
+/// a scalar switch has thirteen arms to keep in step rather than one.
+struct ScalarSink {
+    google::protobuf::Message *msg;
+    const google::protobuf::FieldDescriptor *fd;
+    bool append;
+
+    const google::protobuf::Reflection *refl() const { return msg->GetReflection(); }
+
+    void setBool(bool v) const {
+        if (append) {
+            refl()->AddBool(msg, fd, v);
+        } else {
+            refl()->SetBool(msg, fd, v);
+        }
+    }
+    void setString(const std::string &v) const {
+        if (append) {
+            refl()->AddString(msg, fd, v);
+        } else {
+            refl()->SetString(msg, fd, v);
+        }
+    }
+    void setInt32(int32_t v) const {
+        if (append) {
+            refl()->AddInt32(msg, fd, v);
+        } else {
+            refl()->SetInt32(msg, fd, v);
+        }
+    }
+    void setInt64(int64_t v) const {
+        if (append) {
+            refl()->AddInt64(msg, fd, v);
+        } else {
+            refl()->SetInt64(msg, fd, v);
+        }
+    }
+    void setUInt32(uint32_t v) const {
+        if (append) {
+            refl()->AddUInt32(msg, fd, v);
+        } else {
+            refl()->SetUInt32(msg, fd, v);
+        }
+    }
+    void setUInt64(uint64_t v) const {
+        if (append) {
+            refl()->AddUInt64(msg, fd, v);
+        } else {
+            refl()->SetUInt64(msg, fd, v);
+        }
+    }
+    void setDouble(double v) const {
+        if (append) {
+            refl()->AddDouble(msg, fd, v);
+        } else {
+            refl()->SetDouble(msg, fd, v);
+        }
+    }
+    void setFloat(float v) const {
+        if (append) {
+            refl()->AddFloat(msg, fd, v);
+        } else {
+            refl()->SetFloat(msg, fd, v);
+        }
+    }
+    void setEnumValue(int v) const {
+        if (append) {
+            refl()->AddEnumValue(msg, fd, v);
+        } else {
+            refl()->SetEnumValue(msg, fd, v);
+        }
+    }
+};
+
+[[noreturn]] void refuseScalar(const google::protobuf::FieldDescriptor *fd,
+                               const google::api::expr::runtime::CelValue &value,
+                               const char *kind) {
+    throw std::runtime_error("cannot write " + std::string(celTypeName(value)) + " to " +
+                             kind + " field " + std::string(fd->full_name()));
+}
+
+[[noreturn]] void refuseRange(const google::protobuf::FieldDescriptor *fd,
+                              const std::string &shown) {
+    throw std::runtime_error("value " + shown + " is out of range for field " +
+                             std::string(fd->full_name()));
+}
+
+/// A double as an integer, only when it is exactly integral and inside the int64 range. A
+/// fractional value is a rule-authoring mistake rather than something to truncate.
+///
+/// The upper bound is exclusive of 2^63: `int64 max` as a double rounds *up* to 2^63, so
+/// comparing against it would admit 2^63 itself, which the cast then makes undefined.
+/// `-(int64 min as double)` is exactly 2^63. NaN fails the integral test and an infinity fails
+/// the range test.
+int64_t exactlyIntegral(const google::protobuf::FieldDescriptor *fd, double d) {
+    const double truncated = std::trunc(d);
+    if (truncated != d) {
+        throw std::runtime_error("cannot write non-integral " + std::to_string(d) +
+                                 " to integer field " + std::string(fd->full_name()));
+    }
+    constexpr double kMin = static_cast<double>(std::numeric_limits<int64_t>::min());
+    if (!(truncated >= kMin && truncated < -kMin)) {
+        refuseRange(fd, std::to_string(d));
+    }
+    return static_cast<int64_t>(truncated);
+}
+
+/// A CEL value as a signed integer.
+int64_t celAsInt(const google::protobuf::FieldDescriptor *fd,
+                 const google::api::expr::runtime::CelValue &value) {
+    // A bool is checked first because protobuf JSON refuses `true` for an integer field, and
+    // it would otherwise be a perfectly good 1.
+    if (value.IsBool()) refuseScalar(fd, value, "integer");
+    if (value.IsInt64()) return value.Int64OrDie();
+    if (value.IsUint64()) {
+        const uint64_t u = value.Uint64OrDie();
+        if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            refuseRange(fd, std::to_string(u));
+        }
+        return static_cast<int64_t>(u);
+    }
+    if (value.IsDouble()) return exactlyIntegral(fd, value.DoubleOrDie());
+    refuseScalar(fd, value, "integer");
+}
+
+/// A CEL value as an unsigned integer. Kept separate from `celAsInt` because routing an
+/// unsigned value through int64 would reject everything above int64 max - half the protobuf
+/// uint64 domain, which an identity transform has to round-trip.
+uint64_t celAsUint(const google::protobuf::FieldDescriptor *fd,
+                   const google::api::expr::runtime::CelValue &value) {
+    if (value.IsUint64()) return value.Uint64OrDie();
+    const int64_t i = celAsInt(fd, value);
+    if (i < 0) {
+        refuseRange(fd, std::to_string(i));
+    }
+    return static_cast<uint64_t>(i);
+}
+
+/// A CEL value as a double. A bool is refused rather than written as 1, matching protobuf
+/// JSON ("Not a double value: true") and the integer path above.
+double celAsDouble(const google::protobuf::FieldDescriptor *fd,
+                   const google::api::expr::runtime::CelValue &value) {
+    if (value.IsBool()) refuseScalar(fd, value, "float");
+    if (value.IsDouble()) return value.DoubleOrDie();
+    // An integer for a floating field is a widening, not a coercion, and every other client
+    // takes it. Missing this, `{"price": 3}` for a double field silently wrote 0.0.
+    if (value.IsInt64()) return static_cast<double>(value.Int64OrDie());
+    if (value.IsUint64()) return static_cast<double>(value.Uint64OrDie());
+    refuseScalar(fd, value, "float");
+}
+
+/// Narrows a double the way `JsonFormat.parseFloat` does: a finite value outside the float
+/// range is an error rather than an infinity, with the same 1e-6 slack that method allows.
+/// NaN and the infinities pass through - it accepts those explicitly.
+float narrowToFloat(const google::protobuf::FieldDescriptor *fd, double d) {
+    constexpr double kEpsilon = 1e-6;
+    const double limit = static_cast<double>(std::numeric_limits<float>::max()) * (1 + kEpsilon);
+    if (std::isfinite(d) && (d > limit || d < -limit)) {
+        throw std::runtime_error("out of range float value for field " +
+                                 std::string(fd->full_name()) + ": " + std::to_string(d));
+    }
+    return static_cast<float>(d);
+}
+
+int64_t boundedInt(const google::protobuf::FieldDescriptor *fd, int64_t v, int64_t min,
+                   int64_t max) {
+    if (v < min || v > max) {
+        refuseRange(fd, std::to_string(v));
+    }
+    return v;
+}
+
+uint64_t boundedUint(const google::protobuf::FieldDescriptor *fd, uint64_t v, uint64_t max) {
+    if (v > max) {
+        refuseRange(fd, std::to_string(v));
+    }
+    return v;
+}
+
+/// Writes one scalar, narrowing the CEL value to what the field's type accepts. CEL has one
+/// integer type and one floating type, so a narrower field needs converting back - but only
+/// where the conversion is exact, and only from a value of the field's own kind.
+///
+/// Every arm used to be `if (it matches) write it;` with no else and no error path anywhere
+/// above, so a wrong-typed value was **silently dropped** and the field came back as its
+/// proto3 default. Under replace semantics that is a wrong answer, not a no-op, and two of the
+/// cases were ordinary rules rather than mistakes: `{"price": 3}` for a `double` field wrote
+/// 0.0 (an int is not `IsDouble()`), and `2.0` for an `int32` wrote 0. Where a value was
+/// written, `static_cast` did the narrowing, so 2147483648 became -2147483648.
+///
+/// The contract is protobuf's own JSON parser, which is what the JVM's write-back parses the
+/// result map with. Measured against protobuf-java 4.35.1:
+///
+///     int32 <- 1.9        REJECT "Not an int32 value: 1.9"
+///     int32 <- 2.0        2
+///     int32 <- 2147483648 REJECT "Not an int32 value"
+///     bool  <- 0          REJECT "Invalid bool value: 0"
+///     bytes <- 5          REJECT
+///     float <- 1.0e40     REJECT "Out of range float value"
+///     double <- 3         3.0
+///
+/// That parser is also lenient the other way - it stringifies a number into a string field,
+/// reads "true"/"false" as a bool and base64-decodes a string into a bytes field - and none of
+/// that is followed here. Those coercions exist only because its input crossed a JSON
+/// transport, which this writer does not cross, and each one turns a rule-authoring mistake
+/// into silently wrong data.
+void writeScalar(const ScalarSink &sink,
+                 const google::protobuf::FieldDescriptor *fd,
+                 const google::api::expr::runtime::CelValue &value) {
+    switch (fd->cpp_type()) {
+        case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
+            if (!value.IsBool()) refuseScalar(fd, value, "bool");
+            sink.setBool(value.BoolOrDie());
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_STRING: {
+            // protobuf gives `string` and `bytes` the same C++ type, so the two have to be
+            // told apart by `type()`. A CEL string is text and CEL bytes are bytes; neither
+            // substitutes for the other. Accepting bytes for a string field produced a string
+            // that need not be valid UTF-8, and a string for a bytes field stored the text of
+            // a base64 literal rather than the bytes it encodes.
+            if (fd->type() == google::protobuf::FieldDescriptor::TYPE_BYTES) {
+                if (!value.IsBytes()) refuseScalar(fd, value, "bytes");
+                const auto bytes = value.BytesOrDie().value();
+                sink.setString(std::string(bytes.begin(), bytes.end()));
+                return;
+            }
+            if (!value.IsString()) refuseScalar(fd, value, "string");
+            sink.setString(std::string(value.StringOrDie().value()));
+            return;
+        }
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
+            sink.setInt32(static_cast<int32_t>(
+                boundedInt(fd, celAsInt(fd, value), std::numeric_limits<int32_t>::min(),
+                           std::numeric_limits<int32_t>::max())));
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
+            sink.setInt64(celAsInt(fd, value));
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
+            sink.setUInt32(static_cast<uint32_t>(boundedUint(
+                fd, celAsUint(fd, value), std::numeric_limits<uint32_t>::max())));
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
+            sink.setUInt64(celAsUint(fd, value));
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
+            sink.setDouble(celAsDouble(fd, value));
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT:
+            sink.setFloat(narrowToFloat(fd, celAsDouble(fd, value)));
+            return;
+        case google::protobuf::FieldDescriptor::CPPTYPE_ENUM:
+            // This client presents a protobuf enum as its number, not its symbol, so that is
+            // what a rule hands back.
+            sink.setEnumValue(static_cast<int>(
+                boundedInt(fd, celAsInt(fd, value), std::numeric_limits<int32_t>::min(),
+                           std::numeric_limits<int32_t>::max())));
+            return;
+        default:
+            refuseScalar(fd, value, "this");
+    }
+}
+
+/// Writes one scalar field.
+void setScalarField(google::protobuf::Message *out,
+                    const google::protobuf::FieldDescriptor *fd,
+                    const google::api::expr::runtime::CelValue &value) {
+    writeScalar(ScalarSink{out, fd, /*append=*/false}, fd, value);
+}
+
+/// Writes a repeated field from a CEL list, one appended element per item.
+void setRepeatedField(google::protobuf::Message *out,
+                      const google::protobuf::FieldDescriptor *fd,
+                      const google::api::expr::runtime::CelValue &value) {
+    if (!value.IsList()) {
+        // Returning left the field empty, and under replace semantics that is a deletion
+        // reported as a success: `{"amounts": decimal('1')}` looked like it had been applied
+        // and came back with no elements at all. The JVM's write-back parse says
+        // "Expected an array for amounts but found 1".
+        refuseScalar(fd, value, "repeated");
+    }
+    const auto *list = value.ListOrDie();
+    for (int i = 0; i < list->size(); ++i) {
+        auto element = list->Get(nullptr, i);
+        if (element.IsNull()) {
+            // Skipping changed the list's length and reported success, so `[1, null, 2]`
+            // came back as a two-element field. protobuf has no null to store, and the JVM's
+            // write-back parse says "Repeated field elements cannot be null in field: X".
+            throw std::runtime_error("cannot write null to element " + std::to_string(i) +
+                                     " of repeated field " +
+                                     std::string(fd->full_name()));
+        }
+        if (element.IsError()) {
+            throw std::runtime_error("a CEL rule failed for element " + std::to_string(i) +
+                                     " of repeated field " +
+                                     std::string(fd->full_name()));
+        }
+        if (fd->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
+            fillMessageFromCel(out->GetReflection()->AddMessage(out, fd), element);
+        } else {
+            writeScalar(ScalarSink{out, fd, /*append=*/true}, fd, element);
+        }
+    }
+}
+
+/// Writes a map field from a CEL map.
+///
+/// protobuf models a map as a repeated message of a synthesised entry type, so each entry is an
+/// added message with its `key` and `value` fields written - which is also why `is_map()` has to
+/// be tested *before* `is_repeated()`: a map field answers true to both.
+void setMapField(google::protobuf::Message *out,
+                 const google::protobuf::FieldDescriptor *fd,
+                 const google::api::expr::runtime::CelValue &value) {
+    if (!value.IsMap()) {
+        // Same silent deletion as the repeated case above. The JVM says
+        // "Expect a map object but found: 1".
+        refuseScalar(fd, value, "map");
+    }
+    const auto *cel_map = value.MapOrDie();
+    auto map_keys = cel_map->ListKeys(nullptr);
+    if (!map_keys.ok()) {
+        throw std::runtime_error("cannot read the keys of the map returned for field " +
+                                 std::string(fd->full_name()));
+    }
+    const google::protobuf::Descriptor *entry = fd->message_type();
+    const auto *key_fd = entry->map_key();
+    const auto *value_fd = entry->map_value();
+    if (key_fd == nullptr || value_fd == nullptr) {
+        throw std::runtime_error("field " + std::string(fd->full_name()) +
+                                 " is not a well-formed protobuf map");
+    }
+    const auto *keys_list = map_keys.value();
+    for (int i = 0; i < keys_list->size(); ++i) {
+        auto key_val = keys_list->Get(nullptr, i);
+        if (key_val.IsError()) {
+            throw std::runtime_error("a CEL rule failed for a key of map field " +
+                                     std::string(fd->full_name()));
+        }
+        auto lookup = cel_map->Get(nullptr, key_val);
+        if (!lookup.has_value()) {
+            throw std::runtime_error("a key of map field " +
+                                     std::string(fd->full_name()) +
+                                     " has no value");
+        }
+        if (lookup.value().IsNull()) {
+            // Dropping the entry reported success while deleting it. A protobuf map value
+            // cannot be null, and the JVM's write-back parse says "Map value cannot be
+            // null." - measured against protobuf-java 4.35.1.
+            throw std::runtime_error("cannot write a null value to map field " +
+                                     std::string(fd->full_name()));
+        }
+        google::protobuf::Message *pair = out->GetReflection()->AddMessage(out, fd);
+        writeScalar(ScalarSink{pair, key_fd, /*append=*/false}, key_fd, key_val);
+        if (value_fd->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
+            fillMessageFromCel(pair->GetReflection()->MutableMessage(pair, value_fd),
+                               lookup.value());
+        } else {
+            writeScalar(ScalarSink{pair, value_fd, /*append=*/false}, value_fd, lookup.value());
+        }
+    }
+}
+
+// Split from messageFromCelMap so that a *constructed* nested message can come back through
+// it: fillMessageFromCel calls this when a rule returns a map for a message-valued field.
+void fillFromCelMap(google::protobuf::Message *out,
+                    const google::api::expr::runtime::CelValue &cel_value) {
+    const auto *cel_map = cel_value.MapOrDie();
+    const google::protobuf::Descriptor *desc = out->GetDescriptor();
+
+    auto map_keys = cel_map->ListKeys(nullptr);
+    if (!map_keys.ok()) {
+        return;
+    }
+    const auto *keys_list = map_keys.value();
+    // Two entries can name one slot, and applying both left the outcome to whatever order the
+    // runtime iterated in - which for cel-cpp is its own map ordering, not the order the rule
+    // was written in: `{'a': 1, 'b': 2}` and `{'b': 2, 'a': 1}` both kept `b`. JsonFormat
+    // refuses both shapes, and their null handling is *opposite*:
+    //
+    //   * the same field twice - findResultField accepts a field's declared name and its JSON
+    //     name, so total_amount and totalAmount are one field. mergeField refuses it with
+    //     "Field p.M.total_amount has already been set.";
+    //   * two members of one oneof - mergeOneofField refuses it ("Cannot set field p.M.b
+    //     because another field p.M.a belonging to the same oneof has already been set"), but
+    //     only after returning early for a null, so a null does *not* count - which agrees
+    //     with this writer's own rule that a null clears rather than sets.
+    //
+    // Measured against protobuf-java 4.35.1. A proto3 `optional` field sits in a synthetic
+    // oneof of exactly one member, which real_containing_oneof() reports as none, so it can
+    // never collide with a sibling.
+    //
+    // One deliberate strengthening. The JVM's duplicate test is `builder.hasField`, so *there*
+    // a null counts only when it follows a value: `{ta: 1, totalAmount: null}` is refused and
+    // `{ta: null, totalAmount: 1}` is accepted. That rule cannot be reproduced here, because
+    // cel-cpp's map iteration is not the order the rule was written in and is not even stable
+    // between runs - the same expression was measured rejecting twice and accepting once. So a
+    // field named twice is refused whichever entry carries the null, which costs two
+    // pathological cases the JVM would accept and buys a verdict that does not vary per run.
+    // The oneof check needs no such note: two non-null members collide in either order.
+    std::map<int, std::string> set_by;
+    std::map<std::string, std::string> oneof_by;
+    for (int i = 0; i < keys_list->size(); ++i) {
+        auto key_val = keys_list->Get(nullptr, i);
+        if (key_val.IsError()) {
+            throw std::runtime_error(
+                "a CEL rule failed while producing a field name for " +
+                std::string(desc->full_name()));
+        }
+        // A CEL map key may be an int, uint or bool as well as a string, and the JVM reaches
+        // the field the same way: ProtobufResultWriter.convert looks it up as
+        // String.valueOf(key), and Jackson renders that same text for the JSON parse. So a
+        // non-string key is not skipped - it has to name a field like any other, and normally
+        // does not, which the check below then reports. Skipping it dropped the entry
+        // silently, and under replace semantics that deletes the field.
+        const std::string key_name = celKeyName(key_val);
+        const auto *fd = findResultField(desc, key_name);
+        if (fd == nullptr) {
+            // The JVM parses the result with a bare JsonFormat.parser(), which refuses an
+            // unknown field - "Cannot find field: nope in message p.M" - because
+            // ignoringUnknownFields() is not used (ProtobufSchemaUtils.toObject). Dropping
+            // the key reported success while rebuilding the message without it, and under
+            // replace semantics a mistyped name takes the field it meant to set with it.
+            //
+            // The Avro writer does drop an unnamed key, and that is not an inconsistency:
+            // the JVM's AvroResultWriter.convertRecord iterates the *schema's* fields and
+            // looks each one up in the map, so an extra key there is simply never read.
+            throw std::runtime_error("cannot find field " + key_name + " in message " +
+                                     std::string(desc->full_name()));
+        }
+        // Before the value is read, and recorded below whether or not it turns out to be
+        // null - see the note above on why this is order-independent here.
+        const auto already = set_by.find(fd->number());
+        if (already != set_by.end()) {
+            const std::string &first = already->second;
+            const bool in_order = first <= key_name;
+            throw std::runtime_error(
+                "result names field " + std::string(fd->full_name()) + " twice, as " +
+                (in_order ? first : key_name) + " and " + (in_order ? key_name : first));
+        }
+        auto lookup = cel_map->Get(nullptr, key_val);
+        if (!lookup.has_value()) {
+            // A key the map listed but cannot resolve. Skipping it deleted the field it named
+            // and reported success, the same way an unknown key did.
+            throw std::runtime_error("the CEL result has no value for field " + key_name +
+                                     " of " + std::string(desc->full_name()));
+        }
+        set_by.emplace(fd->number(), key_name);
+        const auto &value = lookup.value();
+        if (value.IsNull()) {
+            // An explicit null clears the field, which is how a rule preserves an absent
+            // value across a transform that echoes it. It sets nothing, so it does not count
+            // towards a oneof collision - which is the JVM's rule and needs no strengthening,
+            // being order-independent already.
+            out->GetReflection()->ClearField(out, fd);
+            continue;
+        }
+        if (const auto *oneof = fd->real_containing_oneof()) {
+            const std::string oneof_name(oneof->full_name());
+            const auto sibling = oneof_by.find(oneof_name);
+            if (sibling != oneof_by.end() && sibling->second != fd->name()) {
+                const std::string mine(fd->name());
+                const bool in_order = sibling->second <= mine;
+                throw std::runtime_error(
+                    "result sets more than one member of oneof " + oneof_name + ": " +
+                    (in_order ? sibling->second : mine) + " and " +
+                    (in_order ? mine : sibling->second));
+            }
+            oneof_by.emplace(oneof_name, std::string(fd->name()));
+        }
+        // A map answers true to is_repeated() as well, so it has to be tested first.
+        if (fd->is_map()) {
+            setMapField(out, fd, value);
+        } else if (fd->is_repeated()) {
+            setRepeatedField(out, fd, value);
+        } else if (fd->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
+            setMessageField(out, fd, value);
+        } else {
+            setScalarField(out, fd, value);
+        }
+    }
+}
+
+// Contract and mechanism notes live on the declaration in ProtobufResultWriter.h.
+}  // namespace
+
+ProtobufVariant messageFromCelMap(
+    const google::protobuf::Message &original,
+    const google::api::expr::runtime::CelValue &cel_value) {
+    std::unique_ptr<google::protobuf::Message> out(original.New());
+    fillFromCelMap(out.get(), cel_value);
+    return ProtobufVariant(std::move(out));
+}
+
+}  // namespace schemaregistry::rules::cel::utils

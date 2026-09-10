@@ -32,6 +32,15 @@ using schemaregistry::serdes::protobuf::MapKey;
 using schemaregistry::serdes::protobuf::ProtobufVariant;
 
 /**
+ * Whether a message type is one a CEL rule works with as a single value rather than as a
+ * record - a decimal or a timestamp. Avro carries the same concepts as logical types on a
+ * primitive, so the field is a leaf there and a CEL_FIELD rule reaches it; without this the
+ * protobuf walk descends into their internals instead. Variant is deliberately not one: it is
+ * a record in Avro too, so skipping it is the behaviour that matches.
+ */
+bool isCelLeafMessage(const google::protobuf::Descriptor *desc);
+
+/**
  * Transform protobuf fields using field execution context (synchronous version)
  * Ported from Rust async implementation
  */
