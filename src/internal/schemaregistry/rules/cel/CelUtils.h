@@ -6,7 +6,11 @@
 #include <vector>
 
 #include "absl/status/statusor.h"
+#ifdef SCHEMAREGISTRY_USE_AVRO
+// Guarded like the Avro declarations below: rules and Avro are independent features (only
+// Protobuf is auto-enabled with rules), so a rules-without-Avro build has no avro headers.
 #include "avro/Generic.hh"
+#endif
 #include "eval/public/cel_value.h"
 #include "google/protobuf/arena.h"
 #include "google/protobuf/descriptor.h"
@@ -15,6 +19,10 @@
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 
 namespace schemaregistry::rules::cel::utils {
+
+/// The name of the CEL type a value carries, for a rule error message. Shared so the Avro and
+/// protobuf writers report a mismatch in the same words.
+const char *celTypeName(const google::api::expr::runtime::CelValue &value);
 
 google::api::expr::runtime::CelValue fromJsonValue(
     const nlohmann::json &json, google::protobuf::Arena *arena);
