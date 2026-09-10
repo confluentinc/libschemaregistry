@@ -46,6 +46,7 @@
 #include "google/protobuf/arena.h"
 #include "google/protobuf/message.h"
 #include "confluent/type/variant.pb.h"
+#include "schemaregistry/rules/cel/CelUtils.h"
 #include "schemaregistry/rules/cel/DecimalUtil.h"
 #include "schemaregistry/serdes/Variant.h"
 
@@ -56,10 +57,10 @@ using ::google::protobuf::Arena;
 
 namespace {
 
-// The CEL/protobuf timestamp range: 0001-01-01T00:00:00Z .. 9999-12-31T23:59:59.999999999Z.
-// Same values as Java's TimestampUtils.MIN_EPOCH_SECOND / MAX_EPOCH_SECOND.
-constexpr int64_t kMinEpochSecond = -62135596800LL;
-constexpr int64_t kMaxEpochSecond = 253402300799LL;
+// The CEL/protobuf timestamp range, from CelUtils.h so the Avro binding there and the
+// constructors here cannot disagree about it.
+using schemaregistry::rules::cel::utils::kMaxEpochSecond;
+using schemaregistry::rules::cel::utils::kMinEpochSecond;
 
 // ---------------------------------------------------------------------------
 // A CelFunction backed by a std::function, so functions can be declared with

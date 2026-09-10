@@ -648,6 +648,63 @@ TEST(CelDecimalTimestampTest, AvroLogicalTimestampNeedsNoConstructor) {
     EXPECT_TRUE(evalTs("this.ts == timestamp(\\\"2023-11-14T22:13:20.123Z\\\")", 1700000000123LL));
     EXPECT_TRUE(evalTs("this.ts.getFullYear() == 2023", 1700000000123LL));
 }
+
+// An Avro timestamp-* field is a raw int64 whose unit the schema supplies; nothing in Avro
+// bounds it to the CEL timestamp range. Out of range it used to reach CEL as a timestamp and be
+// evaluated as though valid - `getFullYear() > 0` answered true for INT64_MAX, and INT64_MIN
+// gave a different answer per unit. Only millis and micros can exceed the range - 2^63
+// nanoseconds is only ~292 years - so the nanos arm carries the check for uniformity and can
+// never fire. The reference rejects out-of-range (epochOf -> instantOfEpoch,
+// "Timestamp out of range"), and so does the `timestamp(x, precision)` constructor here, which
+// already shared this range. Rust is the only other client that reconstructs logical types at
+// the CEL boundary, and it degrades to an int rather than an invalid timestamp; Python, Go, C#
+// and JavaScript decode the logical type in the Avro library before a rule ever sees it.
+TEST(CelDecimalTimestampTest, AvroLogicalTimestampIsRangeChecked) {
+    auto evalTs = [](const std::string &expr, int64_t v, const char *logical_type) {
+        std::string schema = R"json({
+            "type": "record", "name": "TsRecord",
+            "confluent:rules": [
+                {"name": "r", "expr": ")json" + expr + R"json("}
+            ],
+            "fields": [
+                {"name": "ts", "type": {"type": "long", "logicalType": ")json" +
+                std::string(logical_type) + R"json("}}
+            ]
+        })json";
+        auto valid_schema = ::avro::compileJsonSchemaFromString(schema);
+        ::avro::GenericDatum datum(valid_schema);
+        datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() = v;
+        CelValidator validator;
+        return schemaregistry::serdes::avro::utils::validateMessage(
+            validator, nlohmann::json::parse(schema), {}, datum, false);
+    };
+
+    // Only millis and micros can leave the range: 2^63 nanoseconds is about 292 years, so
+    // every int64 timestamp-nanos value is inside 0001..9999 and the check can never fire for
+    // it. 2^63 micros is ~292,471 years and 2^63 millis ~292 million.
+    for (const char *unit : {"timestamp-millis", "timestamp-micros"}) {
+        for (int64_t v : {INT64_MAX, INT64_MIN}) {
+            bool raised = false;
+            try {
+                auto violations = evalTs("this.ts.getFullYear() > 0", v, unit);
+                // A violation is also an acceptable surfacing; silence is not.
+                raised = !violations.empty();
+            } catch (const std::exception &) {
+                raised = true;
+            }
+            EXPECT_TRUE(raised) << unit << " accepted " << v << " as a timestamp";
+        }
+    }
+
+    // INT64_MAX nanos is year 2262 - in range, and it must stay accepted.
+    EXPECT_TRUE(
+        evalTs("this.ts.getFullYear() == 2262", INT64_MAX, "timestamp-nanos").empty());
+
+    // ...and an in-range value still works, so the check is not simply refusing everything.
+    EXPECT_TRUE(evalTs("this.ts.getFullYear() == 2023", 1700000000123LL, "timestamp-millis")
+                    .empty());
+}
+
 #endif  // SCHEMAREGISTRY_TEST_WITH_AVRO
 
 // The coefficient goes out at whatever width it needs. `confluent.type.Decimal.value` is a

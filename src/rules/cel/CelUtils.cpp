@@ -159,6 +159,27 @@ nlohmann::json toJsonValue(
 
 namespace {
 
+// An Avro timestamp-* field is a raw int64 whose unit the schema supplies, and nothing bounds
+// it: `timestamp-micros` holding INT64_MAX is a legal Avro value that is not a legal CEL
+// timestamp. Without this the out-of-range absl::Time was handed to CEL as a timestamp and
+// evaluated as though valid - measured, `this.ts.getFullYear() > 0` answered true for
+// INT64_MAX millis, and INT64_MIN disagreed between the micros and nanos units.
+//
+// The reference rejects it: the Avro logical-timestamp conversion goes through
+// CelUtils.epochOf -> TimestampUtils.instantOfEpoch, which throws "Timestamp out of range".
+// Same range and the same point in the walk as the `timestamp(x, precision)` constructor in
+// ExtraFunc, which already carried this check.
+google::api::expr::runtime::CelValue timestampFromAvro(absl::Time time, int64_t raw,
+                                                       const char *unit) {
+    const int64_t seconds = absl::ToUnixSeconds(time);
+    if (seconds < kMinEpochSecond || seconds > kMaxEpochSecond) {
+        throw std::runtime_error(
+            std::string("timestamp: out of range: ") + std::to_string(raw) + " " + unit +
+            " since the epoch is outside "
+            "0001-01-01T00:00:00Z..9999-12-31T23:59:59.999999999Z");
+    }
+    return google::api::expr::runtime::CelValue::CreateTimestamp(time);
+}
 
 }  // namespace
 
@@ -186,14 +207,14 @@ google::api::expr::runtime::CelValue fromAvroValue(
                 msg, arena);
         }
         case ::avro::LogicalType::TIMESTAMP_MILLIS:
-            return google::api::expr::runtime::CelValue::CreateTimestamp(
-                absl::FromUnixMillis(avro.value<int64_t>()));
+            return timestampFromAvro(absl::FromUnixMillis(avro.value<int64_t>()),
+                                     avro.value<int64_t>(), "millis");
         case ::avro::LogicalType::TIMESTAMP_MICROS:
-            return google::api::expr::runtime::CelValue::CreateTimestamp(
-                absl::FromUnixMicros(avro.value<int64_t>()));
+            return timestampFromAvro(absl::FromUnixMicros(avro.value<int64_t>()),
+                                     avro.value<int64_t>(), "micros");
         case ::avro::LogicalType::TIMESTAMP_NANOS:
-            return google::api::expr::runtime::CelValue::CreateTimestamp(
-                absl::FromUnixNanos(avro.value<int64_t>()));
+            return timestampFromAvro(absl::FromUnixNanos(avro.value<int64_t>()),
+                                     avro.value<int64_t>(), "nanos");
         default:
             break;
     }

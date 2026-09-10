@@ -20,6 +20,12 @@
 
 namespace schemaregistry::rules::cel::utils {
 
+/// The CEL/protobuf timestamp range: 0001-01-01T00:00:00Z .. 9999-12-31T23:59:59.999999999Z.
+/// Same values as Java's TimestampUtils.MIN_EPOCH_SECOND / MAX_EPOCH_SECOND. Declared here
+/// rather than per-translation-unit so the constructor and the Avro binding cannot drift.
+constexpr int64_t kMinEpochSecond = -62135596800LL;
+constexpr int64_t kMaxEpochSecond = 253402300799LL;
+
 /// The name of the CEL type a value carries, for a rule error message. Shared so the Avro and
 /// protobuf writers report a mismatch in the same words.
 const char *celTypeName(const google::api::expr::runtime::CelValue &value);
