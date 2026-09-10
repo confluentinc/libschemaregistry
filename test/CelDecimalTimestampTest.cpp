@@ -120,6 +120,61 @@ TEST(CelDecimalTimestampTest, DecimalStringForms) {
     EXPECT_TRUE(evalBool(R"(string(decimal("1.50")) == "1.50")"));
 }
 
+// An exact div/sqrt result carries the reference's *preferred* scale rather than the
+// quotient's own natural scale: `dividend.scale - divisor.scale` for divide, `scale / 2`
+// truncated toward zero for square root. Trailing zeros are kept down to it and padded up to
+// it, never stripped below.
+//
+// Division needs no code of ours - libmpdec's ideal exponent for divide is already the same
+// quantity - so those cases are pinned rather than fixed. Square root is where libmpdec and
+// the reference part company: the spec floors `exponent / 2` where BigDecimal truncates
+// `scale / 2`, so they agree on an even scale and differ by one on an odd one. Natively
+// `sqrt(9.0)` was "3.0" and `sqrt(16.000)` was "4.00".
+TEST(CelDecimalTimestampTest, ExactDivAndSqrtCarryThePreferredScale) {
+    // divide
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("10.0"), decimal("2.0"))) == "5")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("10.0"), decimal("2"))) == "5.0")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("6.0"), decimal("3"))) == "2.0")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("10.00"), decimal("2"))) == "5.00")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("1.000"), decimal("0.1"))) == "10.00")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("-6.0"), decimal("3"))) == "-2.0")"));
+    // ...but never below the exact quotient's own scale: 10/4 is 2.5 at a preferred 0.
+    EXPECT_TRUE(evalBool(R"(string(decimals.div(decimal("10"), decimal("4"))) == "2.5")"));
+    // sqrt, even scale: already agreed natively.
+    EXPECT_TRUE(evalBool(R"(string(decimals.sqrt(decimal("4.00"))) == "2.0")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.sqrt(decimal("100.0000"))) == "10.00")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.sqrt(decimal("0.0001"))) == "0.01")"));
+    // sqrt, odd scale: the divergence.
+    EXPECT_TRUE(evalBool(R"(string(decimals.sqrt(decimal("9.0"))) == "3")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.sqrt(decimal("400.0"))) == "20")"));
+    EXPECT_TRUE(evalBool(R"(string(decimals.sqrt(decimal("16.000"))) == "4.0")"));
+    // An inexact root is left at full precision - a trailing zero there is significant.
+    EXPECT_TRUE(evalBool(
+        R"(string(decimals.sqrt(decimal("2"))) == "1.4142135623730950488016887242096980786")"));
+}
+
+// The scale itself, not its rendering. `string()` is plain form, which reads the same at
+// several scales - "0", "0" and "500" all hide the difference - but the scale is a field of
+// the confluent.type.Decimal encoding, so it has to be asserted directly. It can be: the
+// result is that message, so a rule can select `.scale` off it.
+TEST(CelDecimalTimestampTest, PreferredScaleIsTheScaleNotTheRendering) {
+    // A zero takes the preferred scale outright, in both directions - the reference returns
+    // zeroValueOf(preferredScale). A strip loop guarded on a non-zero coefficient cannot
+    // lower a zero's scale, which is why that case is handled separately.
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("0")).scale == 0)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("0.0")).scale == 0)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("0.00")).scale == 1)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("0.000")).scale == 1)"));
+    EXPECT_TRUE(evalBool(R"(decimals.div(decimal("0.00"), decimal("3")).scale == 2)"));
+    EXPECT_TRUE(evalBool(R"(decimals.div(decimal("0"), decimal("3.00")).scale == -2)"));
+    // Odd scale, and odd *negative* scale: -3/2 truncates toward zero to -1, not down to -2.
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("9.0")).scale == 0)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("16.000")).scale == 1)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("4E+2")).scale == -1)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("1E+4")).scale == -2)"));
+    EXPECT_TRUE(evalBool(R"(decimals.sqrt(decimal("250E+3")).scale == -1)"));
+}
+
 // ITEM A: add/sub/mul (and neg/abs) are exact/uncapped like Java's BigDecimal — the
 // result is NOT rounded to the 38-digit div/sqrt precision. Each result below has 39
 // significant digits, so a 38-digit cap would drop the trailing "1" (…001 -> …000).

@@ -14,6 +14,7 @@
 
 #include "schemaregistry/rules/cel/ExtraFunc.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -154,6 +155,34 @@ int decimalCompare(const decimal::Decimal& a, const decimal::Decimal& b) {
         return 0;
     }
     return t.sign ? -1 : 1;
+}
+
+// Rewrite an exact div/sqrt result to the reference's preferred scale: strip trailing zeros
+// down to - never below - `preferred_scale`, then pad back up to it when the natural scale is
+// smaller. Only ever called on an exact result; padding an inexact one would claim digits it
+// does not have.
+//
+// libmpdec and BigDecimal disagree here, and only on square root: the decimal arithmetic
+// spec's ideal exponent for sqrt is floor(exponent / 2), while BigDecimal.sqrt uses
+// scale / 2 truncated toward zero. Those are the same for an even scale and one apart for an
+// odd one, so `sqrt(9.0)` is "3.0" natively and "3" in the reference. Division needs no such
+// step: the spec's ideal exponent for divide is exponent(dividend) - exponent(divisor), which
+// *is* the preferred scale.
+//
+// A zero takes the preferred scale outright, in both directions, because BigDecimal returns
+// zeroValueOf(preferredScale) for it. reduce() leaves a zero at exponent 0, so it can never
+// reach a negative scale; the zero case has to be separate.
+decimal::Decimal applyPreferredScale(const decimal::Decimal& value, int64_t preferred_scale,
+                                     const std::string& fn) {
+    decimal::Context c = decimal::MaxContext();
+    if (value.iszero()) {
+        return value.rescale(-preferred_scale, c);
+    }
+    decimal::Decimal minimal = value.reduce(c);
+    const int64_t target = std::max(preferred_scale, -minimal.exponent());
+    DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(target, minimal), fn,
+                                  "a scale of " + std::to_string(target));
+    return minimal.rescale(-target, c);
 }
 
 // Convert an arbitrary CEL value to a Decimal for decimal(dyn).
@@ -398,7 +427,17 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                        *e = "decimals.sqrt: square root of negative number";
                        return absl::nullopt;
                    }
-                   return a.sqrt(DecimalUtil::context());
+                   decimal::Decimal root = a.sqrt(DecimalUtil::context());
+                   // An inexact root keeps all 38 digits: a trailing zero there is
+                   // significant (1/99 ends in one), so only an exact root is rewritten.
+                   if (decimalCompare(root.mul(root, DecimalUtil::exactContext()), a) != 0) {
+                       return root;
+                   }
+                   // C++ integer division truncates toward zero, which is what BigDecimal's
+                   // `scale / 2` does - including for the negative scale of a value like
+                   // 250E+3, whose root is scale -1 and not the floor's -2.
+                   const int64_t scale = -a.exponent();
+                   return applyPreferredScale(root, scale / 2, "decimals.sqrt");
                });
         !s.ok())
         return s;
