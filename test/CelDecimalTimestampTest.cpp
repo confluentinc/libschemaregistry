@@ -1250,3 +1250,31 @@ TEST(CelDecimalTimestampTest, ThePreferredScaleCannotExceedTheContextPrecision) 
     EXPECT_TRUE(evalBool(R"(decimals.div(decimal("0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("1")).scale == 100)"));
     EXPECT_TRUE(evalBool(R"(decimals.div(decimal("0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), decimal("3.0")).scale == 99)"));
 }
+
+// The coefficient bound belongs at fromUnscaledBytes, not only at the decimal(bytes, scale)
+// constructor: the protobuf and Avro decoders reach it with producer-controlled bytes, and the
+// base-256 to decimal conversion is quadratic in their length. Measured on the inner loop:
+// 16 KiB 545 ms, 64 KiB 8.2 s, 128 KiB 32.6 s. The reference needs no bound - BigInteger keeps
+// the coefficient binary and never materialises its digits.
+TEST(CelDecimalWidth, WireCoefficientIsBoundedBeforeTheDigitsAreBuilt) {
+    // Just past 4300 digits: 1800 bytes * 2.41 is about 4338.
+    EXPECT_THROW(DecimalUtil::fromUnscaledBytes(std::string(1800, '\x7f'), 0),
+                 std::out_of_range);
+    // And through the message decoder, which is the untrusted path.
+    confluent::type::Decimal wide;
+    wide.set_value(std::string(64 * 1024, '\x7f'));
+    wide.set_scale(2);
+    EXPECT_THROW(DecimalUtil::fromProto(wide), std::out_of_range);
+}
+
+// The must-fail twin: a coefficient the JVM routinely writes still reads. 38 nines multiplied
+// by itself is precision 76, 32 bytes - well inside the bound.
+TEST(CelDecimalWidth, AnOrdinaryWideCoefficientStillReads) {
+    EXPECT_NO_THROW(DecimalUtil::fromUnscaledBytes(std::string(32, '\x7f'), 2));
+    // The estimate is deliberately conservative - it rejects before building a digit - so the
+    // boundary is 1784 bytes (1784 * 2.41 + 1 = 4300), a little under the 4299 digits 1785
+    // bytes actually produce.
+    EXPECT_NO_THROW(DecimalUtil::fromUnscaledBytes(std::string(1784, '\x7f'), 0));
+    EXPECT_THROW(DecimalUtil::fromUnscaledBytes(std::string(1785, '\x7f'), 0),
+                 std::out_of_range);
+}

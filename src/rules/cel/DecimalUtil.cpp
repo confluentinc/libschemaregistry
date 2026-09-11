@@ -177,6 +177,14 @@ std::string coefficientDigits(const decimal::Decimal &d) {
 }  // namespace
 
 decimal::Decimal DecimalUtil::fromUnscaledBytes(const std::string &unscaled, int32_t scale) {
+    // Bounded here, not only at the decimal(bytes, scale) constructor: the protobuf and Avro
+    // decoders reach this with producer-controlled bytes, and the base-256 to decimal
+    // conversion below is quadratic in their length. Measured: 16 KiB takes 545 ms, 64 KiB
+    // 8.2 s and 128 KiB 32.6 s. Checked from the byte count, before any digit is built - one
+    // byte carries about 2.41 decimal digits. The reference needs no such bound: BigInteger
+    // keeps the coefficient binary and never materialises its digits (decimals.md 4b).
+    requireSaneWidth(static_cast<int64_t>(unscaled.size() * 241 / 100) + 1,
+                     "decimal", "the coefficient", kSaneCoefficient);
     // Through the digits as well, so both directions take the same widths: reading was capped
     // at 16 bytes, which would have refused what the JVM routinely writes.
     bool negative = false;
@@ -306,7 +314,10 @@ confluent::type::Decimal DecimalUtil::toProto(const decimal::Decimal &d) {
     DecimalUtil::requireSaneWidth(static_cast<int64_t>(digits.size()),
                                   "confluent.type.Decimal", "the coefficient",
                                   kSaneCoefficient);
-    out.set_value(digitsToTwosComplement(digits, !d.iszero() && d.issigned()));
+    // sign() rather than issigned(): mpdecimal implements both as `flags & MPD_NEG`, but the
+    // Windows DLL does not export mpd_issigned, so that spelling failed to link (LNK2019).
+    // sign() routes through mpd_isnegative, which ExtraFunc.cpp already links.
+    out.set_value(digitsToTwosComplement(digits, !d.iszero() && d.sign() < 0));
     // The unscaled value's digit count, which is what BigDecimal.precision() reports. This
     // client set it nowhere, so every decimal it produced carried 0 - a value the reference
     // cannot produce, since precision() is never less than 1 (zero's precision is 1) - and a
