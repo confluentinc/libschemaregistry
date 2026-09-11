@@ -260,8 +260,29 @@ confluent::type::Decimal DecimalUtil::toProto(const decimal::Decimal &d) {
     }
     // The scale is a signed int32 on the wire, and negating a wide exponent silently wrapped
     // it: decimal("1e-2147483648") needs scale 2147483648, which wrapped to -2147483648 and
-    // turned a vanishingly small number into an enormous one. The accepted band matches the
-    // JVM's, measured: BigDecimal refuses a literal at +/-2147483648 and takes +/-2147483647.
+    // turned a vanishingly small number into an enormous one.
+    //
+    // The band is on the *exponent* and is deliberately one short of the int32 scale range,
+    // since scale = -exponent: scale INT32_MIN needs exponent +2147483648 and is refused.
+    // Three things to know before widening it, because each is measured and the first two
+    // contradict each other:
+    //
+    //   - It is narrower than this client's own rule. context() above widens emax/emin to
+    //     MPD_MAX_EMAX precisely so the context is not "narrower than the exponent range the
+    //     constructor accepts (the int32 scale of confluent.type.Decimal)". This guard is.
+    //   - It is load-bearing for two other paths. The JVM accepts that scale from
+    //     (unscaled, scale) - new BigDecimal(BigInteger.ONE, Integer.MIN_VALUE) is scale
+    //     -2147483648 - but refuses it from parsing ("Exponent overflow" for
+    //     "1e2147483648") and from rescaling ("Underflow" for setScale(-2147483648)).
+    //     Parsing and decimals.round rely on *this* check for those refusals, so widening it
+    //     here alone trades one false rejection for two false acceptances. Measured: it breaks
+    //     WideExponentIsRefusedNotWrapped and CoarseningAScaleIsNeverRefused.
+    //   - The value is not portable anyway. Go cannot represent it at all (apd's exponent is
+    //     an int32, so scale INT32_MIN is unreachable there, unfixably), and JS refuses both
+    //     extremes on its plain-form width ceiling.
+    //
+    // So: not a native-library limit, and not decimals.md 4a. Doing it properly means moving
+    // the parse and rescale refusals to their own sites first.
     const int64_t exponent = d.exponent();
     if (exponent < -static_cast<int64_t>(INT32_MAX) ||
         exponent > static_cast<int64_t>(INT32_MAX)) {
