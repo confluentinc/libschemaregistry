@@ -45,6 +45,8 @@ namespace utils {
             auto &result = result_datum.value<::avro::GenericArray>();
             auto item_schema_node = schema.root()->leafAt(0);
             ::avro::ValidSchema item_schema(item_schema_node);
+            // An element's slot is its own schema, not the array's.
+            ctx.setCurrentFieldDescriptor(item_schema_node);
 
             for (size_t i = 0; i < array.value().size(); ++i) {
                 auto transformed =
@@ -59,8 +61,10 @@ namespace utils {
             auto map = datum.value<::avro::GenericMap>();
             ::avro::GenericDatum result_datum(schema);
             auto &result = result_datum.value<::avro::GenericMap>();
+            auto value_schema_node = schema.root()->leafAt(0);
+            // A value's slot is its own schema, not the map's.
+            ctx.setCurrentFieldDescriptor(value_schema_node);
             for (const auto &[key, value] : map.value()) {
-                auto value_schema_node = schema.root()->leafAt(0);
                 ::avro::ValidSchema value_schema(value_schema_node);
                 auto transformed = transformFields(ctx, value_schema, value);
                 result.value().emplace_back(key, transformed);
@@ -70,6 +74,7 @@ namespace utils {
 
         case ::avro::AVRO_UNION: {
             auto [branch_idx, branch_schema] = resolveUnion(schema, datum);
+            (void)branch_idx;
 
             // GenericDatum resolves a union on the way in: type() reports the
             // branch's type and value<T>() reaches the branch's value, so the
@@ -79,12 +84,24 @@ namespace utils {
             // dereference.
             auto transformed = transformFields(ctx, branch_schema, datum);
 
+            if (transformed.isUnion()) {
+                // The leaf resolved the branch itself, against the field's schema.
+                return transformed;
+            }
+
+            // Which branch the result belongs to follows from the value, not from the one it
+            // arrived on: a rule that fills or clears a null branch moves it. The reference
+            // resolves every branch from the datum the same way.
+            auto [result_branch, result_schema] =
+                resolveUnion(schema, transformed);
+            (void)result_schema;
+
             // The union has to be rebuilt through GenericUnion rather than
             // through the datum, for the same reason: a GenericDatum holding a
             // union will not hand its GenericUnion back. This constructor
             // assigns into the value directly, without that resolution step.
             ::avro::GenericUnion result(schema.root());
-            result.selectBranch(branch_idx);
+            result.selectBranch(result_branch);
             result.datum() = transformed;
             return ::avro::GenericDatum(schema.root(), result);
         }
@@ -180,7 +197,11 @@ namespace utils {
     auto message_value = makeAvroValue(field_datum);
 
     // Enter field context
-    ctx.enterField(*message_value, full_name, field_name, field_type, {});
+    // The field's declared schema, which the CEL_FIELD write-back resolves a union branch
+    // against. A null branch's datum carries no type, so the datum alone cannot say what the
+    // field can hold.
+    ctx.enterField(*message_value, full_name, field_name, field_type, {},
+                   field_schema.root());
 
     try {
         // Transform the field value (synchronous call)

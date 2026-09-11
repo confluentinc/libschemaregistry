@@ -45,4 +45,15 @@ namespace schemaregistry::rules::cel::utils {
     const std::string &what, const ::avro::NodePtr &schema,
     const google::api::expr::runtime::CelValue &cel_value);
 
+/**
+ * `avroValueFor` for a slot that already holds a value, which is what a `CEL_FIELD` rule writes
+ * to. `original` supplies the logical type, scale and nested values while it is already on the
+ * branch the result belongs to, and is replaced by a template built from that branch otherwise -
+ * so a rule can fill a union's null branch, where the datum itself says nothing about the field.
+ */
+::avro::GenericDatum avroValueForField(
+    const std::string &what, const ::avro::NodePtr &schema,
+    const ::avro::GenericDatum &original,
+    const google::api::expr::runtime::CelValue &cel_value);
+
 }  // namespace schemaregistry::rules::cel::utils

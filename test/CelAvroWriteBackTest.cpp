@@ -1617,3 +1617,112 @@ TEST(CelAvroWriteBack, ComputedDecimalUsesMinimalBytes) {
     }
 }
 
+
+/**
+ * A `CEL_FIELD` rule over a union field writes to the branch the *result* belongs to, not the
+ * branch the value arrived on. Before this the write-back only had the datum, whose type on a
+ * null branch is null, so every non-null result was refused outright.
+ */
+namespace {
+
+const char *kUnionSchema = R"({
+  "type": "record",
+  "name": "U",
+  "fields": [
+    {"name": "note", "type": ["null", "string"], "confluent:tags": ["NOTE"]},
+    {"name": "amount",
+     "type": ["null", {"type": "bytes", "logicalType": "decimal", "precision": 8, "scale": 2}],
+     "confluent:tags": ["AMOUNT"]},
+    {"name": "notes",
+     "type": {"type": "array", "items": ["null", "string"]},
+     "confluent:tags": ["NOTES"]}
+  ]
+})";
+
+/// Runs one tagged CEL_FIELD transform over a union-field record.
+::avro::GenericDatum runUnionTransform(const ::avro::ValidSchema &schema,
+                                       const ::avro::GenericDatum &datum,
+                                       const std::string &tag, const std::string &expr) {
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+    rule.setTags(std::vector<std::string>{tag});
+
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"U.note", {"NOTE"}}, {"U.amount", {"AMOUNT"}}, {"U.notes", {"NOTES"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+    return schemaregistry::serdes::avro::utils::transformFields(ctx, schema, datum);
+}
+
+}  // namespace
+
+/// A value written to a null branch moves to the branch that accepts it.
+TEST(CelAvroUnionWriteBack, FillsANullBranch) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kUnionSchema);
+    ::avro::GenericDatum datum(schema);  // every union starts on branch 0, which is null
+
+    ::avro::GenericDatum result = runUnionTransform(schema, datum, "NOTE", "'recovered'");
+
+    const auto &note = result.value<::avro::GenericRecord>().fieldAt(0);
+    ASSERT_TRUE(note.isUnion());
+    EXPECT_EQ(note.unionBranch(), 1u) << "the value must leave the null branch";
+    EXPECT_EQ(note.value<std::string>(), "recovered");
+}
+
+/// The decimal twin: the scale comes from the branch schema, which a null datum does not carry.
+TEST(CelAvroUnionWriteBack, FillsANullDecimalBranchAtTheSchemaScale) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kUnionSchema);
+    ::avro::GenericDatum datum(schema);
+
+    ::avro::GenericDatum result =
+        runUnionTransform(schema, datum, "AMOUNT", "decimal('12.34')");
+
+    const auto &amount = result.value<::avro::GenericRecord>().fieldAt(1);
+    ASSERT_TRUE(amount.isUnion());
+    EXPECT_EQ(amount.unionBranch(), 1u);
+    // 1234 unscaled at scale 2 = 0x04D2.
+    EXPECT_EQ(amount.value<std::vector<uint8_t>>(), (std::vector<uint8_t>{0x04, 0xD2}));
+}
+
+/// The must-pass twin: a present value stays on its own branch.
+TEST(CelAvroUnionWriteBack, KeepsAPresentValueOnItsBranch) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kUnionSchema);
+    ::avro::GenericDatum datum(schema);
+    auto &note = datum.value<::avro::GenericRecord>().fieldAt(0);
+    note.selectBranch(1);
+    note.value<std::string>() = "a";
+
+    ::avro::GenericDatum result = runUnionTransform(schema, datum, "NOTE", "value + '!'");
+
+    const auto &out = result.value<::avro::GenericRecord>().fieldAt(0);
+    ASSERT_TRUE(out.isUnion());
+    EXPECT_EQ(out.unionBranch(), 1u);
+    EXPECT_EQ(out.value<std::string>(), "a!");
+}
+
+/// An element's slot is its own schema, not the array's: without narrowing the descriptor the
+/// write-back is handed the array schema and refuses every element.
+TEST(CelAvroUnionWriteBack, FillsANullBranchInsideAnArray) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kUnionSchema);
+    ::avro::GenericDatum datum(schema);
+    auto &notes = datum.value<::avro::GenericRecord>().fieldAt(2);
+    auto &array = notes.value<::avro::GenericArray>();
+    array.value().push_back(::avro::GenericDatum(schema.root()->leafAt(2)->leafAt(0)));
+
+    ::avro::GenericDatum result = runUnionTransform(schema, datum, "NOTES", "'elem'");
+
+    const auto &out = result.value<::avro::GenericRecord>().fieldAt(2);
+    const auto &items = out.value<::avro::GenericArray>().value();
+    ASSERT_EQ(items.size(), 1u);
+    ASSERT_TRUE(items[0].isUnion());
+    EXPECT_EQ(items[0].unionBranch(), 1u);
+    EXPECT_EQ(items[0].value<std::string>(), "elem");
+}

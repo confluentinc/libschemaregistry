@@ -1,5 +1,6 @@
 #include "schemaregistry/rules/cel/CelExecutor.h"
 
+#include <any>
 #include <regex>
 
 #include "absl/strings/str_split.h"
@@ -27,6 +28,8 @@
 #include "schemaregistry/serdes/RuleRegistry.h"
 #include "schemaregistry/serdes/SerdeError.h"
 #ifdef SCHEMAREGISTRY_USE_AVRO
+// Pulls in avro/Generic.hh; rules-without-Avro is a supported build, so it follows the guard.
+#include "schemaregistry/rules/cel/AvroResultWriter.h"
 #include "schemaregistry/serdes/avro/AvroTypes.h"
 #endif
 #include "schemaregistry/serdes/json/JsonTypes.h"
@@ -192,7 +195,7 @@ std::unique_ptr<SerdeValue> CelExecutor::Impl::execute(
         if (ctx.getRule().getKind().value_or(Kind::Transform) == Kind::Condition) {
             return makeVerdict(msg, *result);
         }
-        return toSerdeValue(msg, *result);
+        return toSerdeValue(ctx, msg, *result);
     }
 
     return nullptr;
@@ -365,7 +368,7 @@ google::api::expr::runtime::CelValue CelExecutor::Impl::fromSerdeValue(
 }
 
 std::unique_ptr<SerdeValue> CelExecutor::Impl::toSerdeValue(
-    const SerdeValue &original,
+    schemaregistry::serdes::RuleContext &ctx, const SerdeValue &original,
     const google::api::expr::runtime::CelValue &cel_value) {
     switch (original.getFormat()) {
         case SerdeFormat::Json: {
@@ -376,6 +379,19 @@ std::unique_ptr<SerdeValue> CelExecutor::Impl::toSerdeValue(
 #ifdef SCHEMAREGISTRY_USE_AVRO
         case SerdeFormat::Avro: {
             auto original_avro = schemaregistry::serdes::avro::asAvro(original);
+            // With the field's schema, the result is converted against the slot rather than
+            // against the datum: a union resolves to the branch that accepts it, so a rule can
+            // fill a null branch - where the datum's own type is null and says nothing.
+            auto field_ctx = ctx.currentField();
+            if (field_ctx.has_value()) {
+                const auto *node = std::any_cast<::avro::NodePtr>(
+                    &field_ctx->getFieldDescriptor());
+                if (node != nullptr && *node != nullptr) {
+                    return schemaregistry::serdes::avro::makeAvroValue(
+                        utils::avroValueForField(field_ctx->getFullName(), *node,
+                                                 original_avro, cel_value));
+                }
+            }
             auto converted_avro = utils::toAvroValue(original_avro, cel_value);
             return schemaregistry::serdes::avro::makeAvroValue(converted_avro);
         }

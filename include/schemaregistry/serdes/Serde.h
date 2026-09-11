@@ -1,5 +1,6 @@
 #pragma once
 
+#include <any>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -162,12 +163,21 @@ class FieldContext {
     mutable std::mutex field_type_mutex_;
     FieldType field_type_;
     std::unordered_set<std::string> tags_;
+    /**
+     * The schema of the slot the value is written back into, for formats that carry detail
+     * the value does not: an Avro `::avro::NodePtr`. Narrowed as the walk descends into an
+     * array or a map, but a union stays a union - the union *is* the slot, and the write-back
+     * resolves the branch from it. Empty for protobuf and JSON, whose values are already
+     * self-describing.
+     */
+    std::any field_descriptor_;
 
   public:
     FieldContext(const SerdeValue &containing_message,
                  const std::string &full_name, const std::string &name,
                  FieldType field_type,
-                 const std::unordered_set<std::string> &tags);
+                 const std::unordered_set<std::string> &tags,
+                 const std::any &field_descriptor = {});
 
     // Accessors
     const SerdeValue &getContainingMessage() const {
@@ -178,6 +188,8 @@ class FieldContext {
     FieldType getFieldType() const;
     void setFieldType(FieldType field_type);
     const std::unordered_set<std::string> &getTags() const { return tags_; }
+    const std::any &getFieldDescriptor() const { return field_descriptor_; }
+    void setFieldDescriptor(const std::any &field_descriptor);
 
     // Utility methods
     bool isPrimitive() const;
@@ -254,7 +266,8 @@ class RuleContext {
     void enterField(const SerdeValue &containing_message,
                     const std::string &full_name, const std::string &name,
                     FieldType field_type,
-                    const std::unordered_set<std::string> &tags);
+                    const std::unordered_set<std::string> &tags,
+                    const std::any &field_descriptor = {});
     void exitField();
 
     /**
@@ -267,6 +280,12 @@ class RuleContext {
      * so setting the type on what it returns would be discarded.
      */
     void setCurrentFieldType(FieldType field_type);
+
+    /**
+     * Set the schema of the slot currently being walked. Goes through the context for the
+     * same reason as setCurrentFieldType: currentField() answers with a fresh FieldContext.
+     */
+    void setCurrentFieldDescriptor(const std::any &field_descriptor);
 
     // Tag handling
     std::unordered_set<std::string> getTags(const std::string &full_name) const;

@@ -327,6 +327,16 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
                              toAvroValue(::avro::GenericDatum(target), cel_value));
 }
 
+::avro::GenericDatum avroValueForField(
+    const std::string &what, const ::avro::NodePtr &schema,
+    const ::avro::GenericDatum &original,
+    const google::api::expr::runtime::CelValue &cel_value) {
+    return wrapForUnionField(
+        schema,
+        toAvroValue(conversionTemplate(what, schema, original, cel_value),
+                    cel_value));
+}
+
 ::avro::GenericDatum recordFromCelMap(
     const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelMap &cel_map_ref) {

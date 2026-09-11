@@ -61,7 +61,7 @@ class CelExecutor::Impl {
     google::api::expr::runtime::CelValue fromSerdeValue(
         const SerdeValue &value, google::protobuf::Arena *arena);
     std::unique_ptr<SerdeValue> toSerdeValue(
-        const SerdeValue &original,
+        schemaregistry::serdes::RuleContext &ctx, const SerdeValue &original,
         const google::api::expr::runtime::CelValue &cel_value);
     /// A CONDITION's verdict in `msg`'s own format, bypassing the result writers.
     std::unique_ptr<SerdeValue> makeVerdict(
