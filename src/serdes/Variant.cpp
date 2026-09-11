@@ -27,6 +27,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "absl/strings/charconv.h"
 #include "absl/strings/escaping.h"
 
 namespace schemaregistry::serdes {
@@ -1788,12 +1789,16 @@ bool matchOverflowingNumber(const std::string &json, std::size_t i, std::size_t 
         return false;
     }
 
-    // std::from_chars, not strtod: strtod reads its radix character from LC_NUMERIC, so under a
+    // from_chars, not strtod: strtod reads its radix character from LC_NUMERIC, so under a
     // comma-radix locale "1.5e400" was not consumed whole and the rewrite silently stopped
     // happening - parseJson became locale-dependent. from_chars ignores the locale.
+    //
+    // absl's, not std's: libc++ marks the floating-point std::from_chars overloads unavailable
+    // before macOS 26, so this did not compile on older deployment targets. absl::from_chars is
+    // a documented workalike for double/float with the same error codes.
     const char *first = json.data() + i;
     double parsed = 0.0;
-    const auto result = std::from_chars(first, first + n, parsed);
+    const auto result = absl::from_chars(first, first + n, parsed);
     if (result.ptr != first + n) {
         return false;
     }

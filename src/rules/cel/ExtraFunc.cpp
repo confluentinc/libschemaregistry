@@ -38,6 +38,7 @@
 #endif
 
 #include "absl/status/status.h"
+#include "absl/strings/charconv.h"
 #include "absl/time/time.h"
 #include "eval/public/cel_function.h"
 #include "eval/public/cel_value.h"
@@ -633,8 +634,10 @@ absl::Status registerDecimal(::cel::FunctionRegistry& registry) {
                                               "the plain form");
                 const std::string text = d.format("f");
                 double val = 0.0;
+                // absl's from_chars: libc++ marks the std floating-point overloads
+                // unavailable before macOS 26. Same workalike contract, same error codes.
                 const auto parsed =
-                    std::from_chars(text.data(), text.data() + text.size(), val);
+                    absl::from_chars(text.data(), text.data() + text.size(), val);
                 if (parsed.ec == std::errc::result_out_of_range) {
                     const bool negative = !text.empty() && text[0] == '-';
                     const std::size_t intStart = negative ? 1 : 0;
