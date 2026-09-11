@@ -1,5 +1,5 @@
 # CMake generated build files
-build
+build*/
 CMakeCache.txt
 CMakeUserPresets.json
 CTestTestfile.cmake
@@ -12,6 +12,7 @@ CMakeScripts
 Makefile
 Testing
 _deps
+.cache
 .cmake
 
 # vcpkg build artifacts
