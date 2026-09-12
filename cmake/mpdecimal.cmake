@@ -15,7 +15,10 @@ FetchContent_Declare(
   mpdecimal
   URL https://www.bytereef.org/software/mpdecimal/releases/mpdecimal-4.0.1.tar.gz
   URL_HASH SHA256=96d33abb4bb0070c7be0fed4246cd38416188325f820468214471938545b1ac8
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  # No DOWNLOAD_EXTRACT_TIMESTAMP: the keyword is CMake 3.24+ and this project declares 3.22
+  # (which is what Ubuntu 22.04 LTS ships). The top-level CMakeLists already sets CMP0135 NEW
+  # behind an `if(POLICY ...)` guard, which is version-safe and gives extraction-time stamps -
+  # the behaviour that keeps incremental builds from being confused by a stale archive date.
 )
 
 FetchContent_MakeAvailable(mpdecimal)
