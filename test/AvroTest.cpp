@@ -569,7 +569,14 @@ TEST(AvroTest, CelFieldTransformationOverUnion) {
                   .value<std::string>(),
               "there-suffix");
 
-    // The null branch of a nullable field is left alone rather than transformed.
+    // The null branch of a nullable field reaches the rule, and an expression that cannot
+    // handle a null fails loudly. `value + '-suffix'` is one: it has no overload for null.
+    //
+    // This assertion used to read the other way - "left alone rather than transformed" - which
+    // was not a design choice but a swallowed error: cel-cpp reports a runtime failure as an
+    // error *Value* with an OK status, and that value reached toAvroValue, which has no arm for
+    // it and hands its input back. The reference raises here, and a rule
+    // that wants to survive a null has to say so: `value == null ? value : value + '-suffix'`.
     ::avro::GenericDatum without_note(avro_schema);
     auto &bare = without_note.value<::avro::GenericRecord>();
     auto &bare_choice = bare.fieldAt(1);
@@ -577,8 +584,29 @@ TEST(AvroTest, CelFieldTransformationOverUnion) {
     bare_choice.value<::avro::GenericRecord>().setFieldAt(
         0, ::avro::GenericDatum(std::string("only")));
 
+    EXPECT_THROW(serializer.serialize(ser_ctx, without_note), std::exception);
+
+    // The must-pass twin: guarded, the same rule leaves the null alone and still transforms
+    // the branch it does name - so "it throws" is not "it stopped working".
+    Rule guarded_rule = cel_rule;
+    guarded_rule.setExpr(std::make_optional<std::string>(
+        "name == 'note' || name == 'y' ; value == null ? value : value + '-suffix'"));
+    RuleSet guarded_set;
+    guarded_set.setDomainRules(
+        std::make_optional<std::vector<Rule>>(std::vector<Rule>{guarded_rule}));
+    Schema guarded_schema;
+    guarded_schema.setSchemaType(std::make_optional<std::string>("AVRO"));
+    guarded_schema.setSchema(std::make_optional<std::string>(schema_str));
+    guarded_schema.setRuleSet(std::make_optional<RuleSet>(guarded_set));
+    client->registerSchema("guarded-value", guarded_schema, false);
+
+    SerializationContext guarded_ctx;
+    guarded_ctx.topic = "guarded";
+    guarded_ctx.serde_type = SerdeType::Value;
+    guarded_ctx.serde_format = SerdeFormat::Avro;
+
     auto bare_result = deserializer.deserialize(
-        ser_ctx, serializer.serialize(ser_ctx, without_note));
+        guarded_ctx, serializer.serialize(guarded_ctx, without_note));
     auto &bare_out = bare_result.value.value<::avro::GenericRecord>();
     EXPECT_EQ(bare_out.fieldAt(0).type(), ::avro::AVRO_NULL);
     EXPECT_EQ(bare_out.fieldAt(1).value<::avro::GenericRecord>()
