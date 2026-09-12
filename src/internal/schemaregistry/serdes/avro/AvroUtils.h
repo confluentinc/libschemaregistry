@@ -46,6 +46,7 @@ namespace utils {
  * Transform individual field with context handling
  * @param ctx Rule context
  * @param record_schema Schema of the parent record
+ * @param record_datum The containing record, which the rule sees as `message`
  * @param field_name Name of the field
  * @param field_datum Field datum to transform
  * @param field_schema Schema of the field
@@ -53,7 +54,8 @@ namespace utils {
  */
 ::avro::GenericDatum transformFieldWithContext(
     RuleContext &ctx, const ::avro::ValidSchema &record_schema,
-    const std::string &field_name, const ::avro::GenericDatum &field_datum,
+    const ::avro::GenericDatum &record_datum, const std::string &field_name,
+    const ::avro::GenericDatum &field_datum,
     const ::avro::ValidSchema &field_schema);
 
 /**

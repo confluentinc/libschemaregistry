@@ -1726,3 +1726,74 @@ TEST(CelAvroUnionWriteBack, FillsANullBranchInsideAnArray) {
     EXPECT_EQ(items[0].unionBranch(), 1u);
     EXPECT_EQ(items[0].value<std::string>(), "elem");
 }
+
+/**
+ * The `message` binding inside a `CEL_FIELD` rule is the *containing record*, and its logical
+ * types are presented the way `value` is. This client bound the field's own datum instead, so
+ * `message` was a second name for `value` and no other field could be reached from a rule.
+ */
+namespace {
+
+const char *kMessageSchema = R"({
+  "type": "record",
+  "name": "Money",
+  "fields": [
+    {"name": "amount",
+     "type": {"type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 4}},
+    {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "label", "type": "string", "confluent:tags": ["LABEL"]}
+  ]
+})";
+
+/// Runs a CEL_FIELD rule over `label` and returns what it wrote there.
+std::string labelFrom(const std::string &expr) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kMessageSchema);
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    // 0x01E208 = 123400 unscaled, i.e. 12.3400 at scale 4.
+    record.fieldAt(0).value<std::vector<uint8_t>>() = {0x01, 0xE2, 0x08};
+    record.fieldAt(1).value<int64_t>() = 1700000000123L;
+    record.fieldAt(2).value<std::string>() = "usd";
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+    rule.setTags(std::vector<std::string>{"LABEL"});
+
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"Money.label", {"LABEL"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+
+    auto out = schemaregistry::serdes::avro::utils::transformFields(ctx, schema, datum);
+    return out.value<::avro::GenericRecord>().fieldAt(2).value<std::string>();
+}
+
+}  // namespace
+
+/// A sibling field is reachable at all, which it was not while `message` was the field itself.
+TEST(CelFieldMessageBinding, ReachesASiblingField) {
+    EXPECT_EQ(labelFrom("string(message.amount)"), "12.3400")
+        << "a decimal sibling must arrive at its declared scale";
+    EXPECT_EQ(labelFrom("string(message.ts)"), "2023-11-14T22:13:20.123Z")
+        << "a timestamp sibling must arrive in the schema's unit";
+}
+
+/// And decimals.* reads it with no scale literal, the cross-language canonical form.
+TEST(CelFieldMessageBinding, SiblingDecimalNeedsNoScaleLiteral) {
+    EXPECT_EQ(labelFrom(
+                  "decimals.eq(decimal(message.amount), decimal('12.3400')) ? 'yes' : 'no'"),
+              "yes");
+}
+
+/// The must-pass twin: `value` is still the field the rule is applied to.
+TEST(CelFieldMessageBinding, ValueIsStillTheField) {
+    EXPECT_EQ(labelFrom("value + '!'"), "usd!");
+}

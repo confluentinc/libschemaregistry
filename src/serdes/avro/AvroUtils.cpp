@@ -28,7 +28,7 @@ namespace utils {
                 const std::string &field_name = schema.root()->nameAt(i);
 
                 auto transformed_field = transformFieldWithContext(
-                    ctx, schema, field_name, field_datum, field_schema);
+                    ctx, schema, datum, field_name, field_datum, field_schema);
                 result.setFieldAt(i, transformed_field);
             }
 
@@ -184,7 +184,8 @@ namespace utils {
 // Transform individual field with context handling
 ::avro::GenericDatum transformFieldWithContext(
     RuleContext &ctx, const ::avro::ValidSchema &record_schema,
-    const std::string &field_name, const ::avro::GenericDatum &field_datum,
+    const ::avro::GenericDatum &record_datum, const std::string &field_name,
+    const ::avro::GenericDatum &field_datum,
     const ::avro::ValidSchema &field_schema) {
     // Get field type from schema
     FieldType field_type = avroSchemaToFieldType(field_schema);
@@ -193,8 +194,10 @@ namespace utils {
     std::string schema_name = getSchemaName(record_schema).value_or("unknown");
     std::string full_name = schema_name + "." + field_name;
 
-    // Create message value from current field datum
-    auto message_value = makeAvroValue(field_datum);
+    // `message` is the *containing record*, as the reference binds it - the field itself is
+    // already bound as `value`. Passing the field datum here made `message` a second name for
+    // `value`, so `message.<other>` could not be reached at all.
+    auto message_value = makeAvroValue(record_datum);
 
     // Enter field context
     // The field's declared schema, which the CEL_FIELD write-back resolves a union branch
