@@ -61,7 +61,11 @@ namespace utils {
             auto map = datum.value<::avro::GenericMap>();
             ::avro::GenericDatum result_datum(schema);
             auto &result = result_datum.value<::avro::GenericMap>();
-            auto value_schema_node = schema.root()->leafAt(0);
+            // avro-cpp keeps a map's implicit string key at leaf 0 and the value type at
+            // leaf 1, unlike an array, whose single leaf is the element. Reading leaf 0 here
+            // handed every map value the *key's* string schema, so the walk stopped at a value
+            // that was a record, array or map and never reached what was tagged inside it.
+            auto value_schema_node = schema.root()->leafAt(1);
             // A value's slot is its own schema, not the map's.
             ctx.setCurrentFieldDescriptor(value_schema_node);
             for (const auto &[key, value] : map.value()) {
@@ -440,7 +444,8 @@ nlohmann::json avroToJson(const ::avro::GenericDatum &datum) {
             }
             ::avro::GenericDatum datum(schema);
             auto &map = datum.value<::avro::GenericMap>();
-            auto value_schema = schema.root()->leafAt(0);
+            // Leaf 1, not 0: leaf 0 is the map's implicit string key. See the walk above.
+            auto value_schema = schema.root()->leafAt(1);
             ::avro::ValidSchema value_valid_schema(value_schema);
 
             for (const auto &[key, value] : json_value.items()) {

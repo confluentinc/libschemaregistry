@@ -1123,6 +1123,94 @@ const char *kTaggedSchema = R"({
 
 }  // namespace
 
+namespace {
+const char *kZzMapSchema = R"({
+  "type": "record",
+  "name": "M",
+  "fields": [
+    {"name": "recs", "type": {"type": "map", "values": {"type": "record", "name": "Inner",
+       "fields": [{"name": "s", "type": "string", "confluent:tags": ["S"]}]}}},
+    {"name": "amounts", "type": {"type": "map", "values": {"type": "bytes",
+       "logicalType": "decimal", "precision": 8, "scale": 2}}, "confluent:tags": ["A"]},
+    {"name": "recList", "type": {"type": "array", "items": {"type": "record", "name": "Inner2",
+       "fields": [{"name": "s", "type": "string", "confluent:tags": ["S"]}]}}}
+  ]
+})";
+
+::avro::GenericDatum runZzMap(const std::string &tag, const std::string &expr, Kind kind) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kZzMapSchema);
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    ::avro::GenericDatum inner(schema.root()->leafAt(0)->leafAt(1));
+    inner.value<::avro::GenericRecord>().fieldAt(0).value<std::string>() = "hi";
+    record.fieldAt(0).value<::avro::GenericMap>().value().emplace_back("k", inner);
+    ::avro::GenericDatum amount(schema.root()->leafAt(1)->leafAt(1));
+    amount.value<std::vector<uint8_t>>() = {0x04, 0xD2};
+    record.fieldAt(1).value<::avro::GenericMap>().value().emplace_back("a", amount);
+    ::avro::GenericDatum listed(schema.root()->leafAt(2)->leafAt(0));
+    listed.value<::avro::GenericRecord>().fieldAt(0).value<std::string>() = "hi";
+    record.fieldAt(2).value<::avro::GenericArray>().value().push_back(listed);
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(kind);
+    rule.setMode(Mode::Write);
+    rule.setExpr(expr);
+    rule.setTags(std::vector<std::string>{tag});
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"Inner.s", {"S"}}, {"Inner2.s", {"S"}}, {"M.amounts", {"A"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+    return schemaregistry::serdes::avro::utils::transformFields(ctx, schema, datum);
+}
+}  // namespace
+
+/// The same leaf mix-up in the JSON bridge, which a migration rule's result comes back through.
+TEST(CelAvroFieldLevel, JsonToAvroBuildsMapValuesFromTheValueSchema) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(
+        R"({"type":"record","name":"J","fields":[{"name":"counts",
+            "type":{"type":"map","values":"int"}}]})");
+    nlohmann::json json = {{"counts", {{"a", 7}}}};
+
+    ::avro::GenericDatum datum = schemaregistry::serdes::avro::utils::jsonToAvro(json, schema);
+
+    const auto &map = datum.value<::avro::GenericRecord>().field("counts")
+                          .value<::avro::GenericMap>().value();
+    ASSERT_EQ(map.size(), 1u);
+    EXPECT_EQ(map[0].second.type(), ::avro::AVRO_INT);
+    EXPECT_EQ(map[0].second.value<int32_t>(), 7);
+}
+
+/// A field rule reaches what is tagged *inside* a map value.
+///
+/// avro-cpp keeps a map's implicit string key at leaf 0 and the value type at leaf 1, where an
+/// array's single leaf is the element. The walk read leaf 0 for both, so every map value was
+/// handed the key's `string` schema: the walk stopped there and never descended into a record,
+/// array or map inside a map. Every map in the fixtures was a `map<string>`, which is exactly
+/// the case the wrong node happens to fit.
+TEST(CelAvroFieldLevel, AFieldRuleReachesInsideAMapValue) {
+    ::avro::GenericDatum out = runZzMap("S", "value + '!'", Kind::Transform);
+    const auto &record = out.value<::avro::GenericRecord>();
+
+    const auto &mapped = record.field("recs").value<::avro::GenericMap>().value();
+    EXPECT_EQ(mapped[0].second.value<::avro::GenericRecord>().field("s").value<std::string>(),
+              "hi!");
+    // The control: the same record inside an *array*, which was reading its leaf correctly.
+    const auto &listed = record.field("recList").value<::avro::GenericArray>().value();
+    EXPECT_EQ(listed[0].value<::avro::GenericRecord>().field("s").value<std::string>(), "hi!");
+}
+
+/// The leaf case that hid it: a decimal map value still reaches the rule at its declared scale,
+/// which it did before too - a leaf reads its logical type off the datum, not off the slot.
+TEST(CelAvroFieldLevel, ADecimalMapValueKeepsItsScale) {
+    EXPECT_NO_THROW(runZzMap("A", "value == decimal('12.34')", Kind::Condition));
+}
+
 /// The must-fail twin: a well-typed field rule still applies, and to the field's own type.
 TEST(CelAvroFieldLevel, AWellTypedFieldRuleStillApplies) {
     ::avro::GenericDatum out = runTagged("I", "9");
