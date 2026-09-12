@@ -9,6 +9,8 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include <clocale>
 #include <cmath>
 #include <cstring>
@@ -352,6 +354,30 @@ TEST(VariantTest, DecimalBuilderRejectsNegativeScale) {
         VariantBuilder b;
         b.appendDecimal({100}, 2);
         EXPECT_EQ(b.build().toJson(), "1.00");
+    }
+}
+
+TEST(VariantTest, DecimalBuilderRejectsAnOversizedCoefficientWithoutRenderingIt) {
+    // Digit counting is a repeated division, quadratic in the byte count, and the bytes come
+    // from the caller. The guard is counted past the sign extension, so a padded small value
+    // is still accepted and nothing a 38-digit value needs is refused.
+    {
+        VariantBuilder b;
+        std::vector<uint8_t> huge(100000, 0xAB);
+        auto start = std::chrono::steady_clock::now();
+        EXPECT_THROW(b.appendDecimal(huge, 0), VariantException);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - start)
+                      .count();
+        EXPECT_LT(ms, 1000) << "took " << ms << " ms, so the coefficient was rendered";
+    }
+    {
+        // 10^38 - 1, the widest the encoding takes, padded with a leading sign byte.
+        VariantBuilder b;
+        std::vector<uint8_t> padded = {0x00, 0x4B, 0x3B, 0x4C, 0xA8, 0x5A, 0x86, 0xC4, 0x7A,
+                                       0x09, 0x8A, 0x22, 0x3F, 0xFF, 0xFF, 0xFF, 0xFF};
+        b.appendDecimal(padded, 0);
+        EXPECT_EQ(b.build().toJson(), "99999999999999999999999999999999999999");
     }
 }
 

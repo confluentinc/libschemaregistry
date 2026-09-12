@@ -1230,6 +1230,16 @@ struct VariantBuilder::Impl {
     void appendDecimalBytes(const std::vector<uint8_t> &be, int scale) {
         beforeValue();
         bool negative = !be.empty() && (be[0] & 0x80) != 0;
+        // leMagnitudeToDecimal is a repeated division, quadratic in the byte count, and the
+        // bytes come from the caller. A 38-digit coefficient fits in 128 bits, so a wider
+        // one is out of range without rendering it - counted past the sign extension so a
+        // padded small value is still accepted.
+        size_t significant = 0;
+        const uint8_t pad = negative ? 0xFF : 0x00;
+        while (significant + 1 < be.size() && be[significant] == pad) significant++;
+        if (be.size() - significant > 17) {
+            throw VariantException("decimal exceeds maximum precision (38)");
+        }
         std::vector<uint8_t> le(be.rbegin(), be.rend());
         if (negative) {
             int carry = 1;
