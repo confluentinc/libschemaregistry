@@ -137,7 +137,7 @@ nlohmann::json transformFields(
                                 auto transformed_value =
                                     transformFieldWithContext(
                                         ctx, properties[key], field_path,
-                                        field_value);
+                                        instance_node, field_value);
 
                                 std::string output =
                                     transformed_value.is_string()
@@ -178,6 +178,7 @@ nlohmann::json transformFields(
 jsoncons::ojson transformFieldWithContext(RuleContext &ctx,
                                           const jsoncons::ojson &schema,
                                           const std::string &path,
+                                          const jsoncons::ojson &containing,
                                           const jsoncons::ojson &value) {
     // Get field type from schema
     FieldType field_type = schema_navigation::getFieldType(schema);
@@ -185,8 +186,10 @@ jsoncons::ojson transformFieldWithContext(RuleContext &ctx,
     // Get field name from path
     std::string field_name = path_utils::getFieldName(path);
 
-    // Create message value from the JSON value
-    auto message_value = makeJsonValue(value);
+    // `message` is the *containing object*, as the reference binds it - the field itself is
+    // already bound as `value`. Passing the field's value here made `message` a second name
+    // for `value`, so `message.<other>` could not be reached at all.
+    auto message_value = makeJsonValue(containing);
 
     // Get inline tags from schema
     std::unordered_set<std::string> inline_tags =
