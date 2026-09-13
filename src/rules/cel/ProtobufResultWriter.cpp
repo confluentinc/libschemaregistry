@@ -15,6 +15,7 @@
 #include "absl/status/statusor.h"
 #include "google/protobuf/descriptor.h"
 #include "schemaregistry/rules/cel/CelUtils.h"
+#include "schemaregistry/serdes/protobuf/ProtobufUtils.h"
 
 namespace schemaregistry::rules::cel::utils {
 
@@ -80,13 +81,12 @@ void fillMessageFromCel(google::protobuf::Message *nested,
         // message (a Decimal, say) to a differently-typed message field, so the mismatch is a
         // rule-authoring error to report, which is what the JVM does: its message-level
         // write-back goes through a protobuf JSON parse that rejects the type.
-        if (source.GetDescriptor() != nested->GetDescriptor()) {
-            throw std::runtime_error(
-                "cannot write " + std::string(source.GetDescriptor()->full_name()) +
-                " to a field of type " +
-                std::string(nested->GetDescriptor()->full_name()));
-        }
-        nested->CopyFrom(source);
+        //
+        // By name, not by address: the output is built from the input message, so on the read
+        // path it comes from the registry schema's own DescriptorPool while a rule's decimal
+        // comes from the generated one. Guarding on the pointer reported "cannot write
+        // confluent.type.Decimal to a field of type confluent.type.Decimal".
+        ::schemaregistry::serdes::protobuf::utils::copyMessageAcrossPools(*nested, source);
         return;
     }
     if (value.IsTimestamp()) {

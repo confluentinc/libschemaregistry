@@ -379,6 +379,61 @@ parity::ParityPlain runFieldRule(const std::string &expr, Kind kind, const std::
 
 }  // namespace
 
+/// The message-level half of the same pool question.
+///
+/// `messageFromCelMap` builds its output from the *input* message, so on the read path the output
+/// is dynamic while a rule's `decimal(...)` is generated. The pointer guard there turned a valid
+/// write into "cannot write confluent.type.Decimal to a field of type confluent.type.Decimal" -
+/// a type rejected against itself, which is what a descriptor address comparison looks like once
+/// two pools are in play.
+TEST(CelProtobufMessageTransform, AValueTypeReachesAFieldFromAnotherDescriptorPool) {
+    static google::protobuf::DescriptorPool message_pool;
+    std::function<void(const google::protobuf::FileDescriptor *)> add =
+        [&](const google::protobuf::FileDescriptor *f) {
+            for (int i = 0; i < f->dependency_count(); i++) add(f->dependency(i));
+            if (message_pool.FindFileByName(f->name()) != nullptr) return;
+            google::protobuf::FileDescriptorProto fdp;
+            f->CopyTo(&fdp);
+            message_pool.BuildFile(fdp);
+        };
+    add(parity::ParityPlain::descriptor()->file());
+    const auto *dyn_desc = message_pool.FindMessageTypeByName("parity.ParityPlain");
+    ASSERT_NE(dyn_desc, nullptr);
+    ASSERT_NE(dyn_desc, parity::ParityPlain::descriptor()) << "the pools have to differ";
+
+    static google::protobuf::DynamicMessageFactory message_factory(&message_pool);
+    std::unique_ptr<google::protobuf::Message> dyn(
+        message_factory.GetPrototype(dyn_desc)->New());
+    ASSERT_TRUE(dyn->ParseFromString(parityMessage()->SerializeAsString()));
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr("{'amount': decimals.add(decimal(message.amount), decimal('1.00')), "
+                 "'ts': message.ts, 'data': message.data, 'plain': message.plain}");
+    SerializationContext serCtx{"t", SerdeType::Value, SerdeFormat::Protobuf, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelExecutor>());
+    RuleContext ctx(std::nullopt, serCtx, std::nullopt, std::nullopt, "t-value", Mode::Write,
+                    rule, 0, rules,
+                    std::unordered_map<std::string, std::unordered_set<std::string>>{},
+                    nullptr, registry);
+
+    CelExecutor exec;
+    auto input = makeProtobufValue(ProtobufVariant(std::move(dyn)));
+    auto result = exec.transform(ctx, *input);
+
+    auto &pv = asProtobuf(*result);
+    parity::ParityPlain out;
+    ASSERT_TRUE(out.ParseFromString(
+        std::get<std::unique_ptr<google::protobuf::Message>>(pv.value)->SerializeAsString()));
+    // 12.34 + 1.00 = 13.34, unscaled 1334.
+    EXPECT_EQ(out.amount().value(), std::string("\x05\x36", 2));
+}
+
 /// A rule's value-type result reaches a field whose descriptor came from a *different pool*.
 ///
 /// A registry schema is parsed into its own `DescriptorPool`, so `confluent.type.Decimal` there
