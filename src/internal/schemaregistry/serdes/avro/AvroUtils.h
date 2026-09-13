@@ -46,6 +46,7 @@ namespace utils {
  * Transform individual field with context handling
  * @param ctx Rule context
  * @param record_schema Schema of the parent record
+ * @param record_datum The containing record, which the rule sees as `message`
  * @param field_name Name of the field
  * @param field_datum Field datum to transform
  * @param field_schema Schema of the field
@@ -53,7 +54,8 @@ namespace utils {
  */
 ::avro::GenericDatum transformFieldWithContext(
     RuleContext &ctx, const ::avro::ValidSchema &record_schema,
-    const std::string &field_name, const ::avro::GenericDatum &field_datum,
+    const ::avro::GenericDatum &record_datum, const std::string &field_name,
+    const ::avro::GenericDatum &field_datum,
     const ::avro::ValidSchema &field_schema);
 
 /**
@@ -78,6 +80,14 @@ nlohmann::json avroToJson(const ::avro::GenericDatum &datum);
  */
 ::avro::GenericDatum jsonToAvro(const nlohmann::json &json_value,
                                 const ::avro::ValidSchema &schema);
+
+/**
+ * Follow a symbolic link to the node it stands for; any other node is returned as-is.
+ * avro-cpp represents a reused named type this way, and a ValidSchema cannot be built from one.
+ * @param node Schema node, possibly symbolic
+ * @return The node the link points at, or the node itself
+ */
+::avro::NodePtr resolveNode(const ::avro::NodePtr &node);
 
 /**
  * Resolve union schema branch for a given datum

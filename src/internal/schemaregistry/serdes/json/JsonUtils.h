@@ -59,12 +59,14 @@ nlohmann::json transformFields(
  * @param ctx Rule execution context
  * @param schema JSON schema for the field
  * @param path JSON path to the field
+ * @param containing The object holding the field, which the rule sees as `message`
  * @param value JSON value to transform
  * @return Transformed JSON value
  */
 jsoncons::ojson transformFieldWithContext(RuleContext &ctx,
                                           const jsoncons::ojson &schema,
                                           const std::string &path,
+                                          const jsoncons::ojson &containing,
                                           const jsoncons::ojson &value);
 /**
  * Transform a JSON object
