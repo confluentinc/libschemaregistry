@@ -534,7 +534,7 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
     }
 
     ::avro::GenericDatum result{
-        ::avro::ValidSchema(original.value<::avro::GenericRecord>().schema())};
+        original.value<::avro::GenericRecord>().schema()};
     auto &record = result.value<::avro::GenericRecord>();
     const std::string &metadata = variant_msg->metadata();
     const std::string &value = variant_msg->value();
@@ -654,7 +654,7 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
         // same way the array/record/map arms below use it.
         if (original.type() == ::avro::AVRO_ENUM) {
             ::avro::GenericDatum result{
-                ::avro::ValidSchema(original.value<::avro::GenericEnum>().schema())};
+                original.value<::avro::GenericEnum>().schema()};
             result.value<::avro::GenericEnum>().set(text);
             return result;
         }
@@ -681,7 +681,7 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
                     std::to_string(fixed_schema->fixedSize()) + " bytes, got " +
                     std::to_string(bytes.size()));
             }
-            ::avro::GenericDatum result{::avro::ValidSchema(fixed_schema)};
+            ::avro::GenericDatum result{fixed_schema};
             result.value<::avro::GenericFixed>().value() = bytes;
             return result;
         }
@@ -695,7 +695,7 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
             auto orig_array_schema =
                 original.value<::avro::GenericArray>().schema();
             ::avro::GenericDatum result_datum{
-                ::avro::ValidSchema(orig_array_schema)};
+                orig_array_schema};
             auto &result_array = result_datum.value<::avro::GenericArray>();
 
             // Each element is converted against the array's declared item type - NodeArray
@@ -732,7 +732,7 @@ double celAsAvroDouble(const ::avro::GenericDatum &original,
             auto orig_map_schema =
                 original.value<::avro::GenericMap>().schema();
             ::avro::GenericDatum result_datum{
-                ::avro::ValidSchema(orig_map_schema)};
+                orig_map_schema};
             auto &result_map = result_datum.value<::avro::GenericMap>();
 
             // From the schema and checked against it, for the reason given in the array arm

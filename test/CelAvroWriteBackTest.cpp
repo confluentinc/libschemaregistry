@@ -1170,6 +1170,90 @@ const char *kZzMapSchema = R"({
 }
 }  // namespace
 
+namespace {
+const char *kReusedNameSchema = R"({"type":"record","name":"Outer","fields":[
+    {"name":"inline","type":{"type":"record","name":"Inner","fields":[
+        {"name":"s","type":"string","confluent:tags":["S"]}]}},
+    {"name":"opt","type":["null","Inner"]},
+    {"name":"items","type":{"type":"array","items":"Inner"}},
+    {"name":"lookup","type":{"type":"map","values":"Inner"}}]})";
+
+/// `inline` is filled, everything else left at its default: opt null, both containers empty.
+::avro::GenericDatum reusedNameRecord(const ::avro::ValidSchema &schema) {
+    ::avro::GenericDatum datum(schema);
+    datum.value<::avro::GenericRecord>()
+        .fieldAt(0)
+        .value<::avro::GenericRecord>()
+        .fieldAt(0)
+        .value<std::string>() = "a";
+    return datum;
+}
+}  // namespace
+
+/// A named type reused inside a union, an array or a map.
+///
+/// avro-cpp represents the second use as a symbolic link, and every one of these failed before
+/// any rule ran: the walk built a `ValidSchema` per sub-node, whose constructor re-validates that
+/// subtree alone, and a link to a name declared in a *sibling* field is unknown there. Resolving
+/// the node does not help - the link is a descendant of the node being validated - so the walk
+/// carries nodes now and builds no sub-schema at all. The writer had the same wrappers around
+/// `GenericDatum`, where `ValidSchema` was never needed either.
+TEST(CelAvroFieldLevel, AReusedNameInsideAContainerIsWalked) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kReusedNameSchema);
+    ASSERT_EQ(schema.root()->leafAt(1)->leafAt(1)->type(), ::avro::AVRO_SYMBOLIC);
+    ASSERT_EQ(schema.root()->leafAt(2)->leafAt(0)->type(), ::avro::AVRO_SYMBOLIC);
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr("value + '!'");
+    rule.setTags(std::vector<std::string>{"S"});
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"Inner.s", {"S"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+
+    auto out = schemaregistry::serdes::avro::utils::transformFields(ctx, schema,
+                                                                   reusedNameRecord(schema));
+
+    // The inline use is the control: it was reached before and still is.
+    EXPECT_EQ(out.value<::avro::GenericRecord>()
+                  .field("inline")
+                  .value<::avro::GenericRecord>()
+                  .field("s")
+                  .value<std::string>(),
+              "a!");
+}
+
+/// The message-level half: the same schema through the result writer.
+TEST(CelAvroMessageTransform, AReusedNameInsideAUnionIsWritable) {
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(kReusedNameSchema);
+    const char *identity =
+        "{'inline': message.inline, 'opt': message.opt, 'items': message.items, "
+        "'lookup': message.lookup}";
+    EXPECT_NO_THROW(runMessageTransform(schema, reusedNameRecord(schema), identity));
+
+    // The discriminator: filling the symbolic branch, which branchAcceptsCel matched against
+    // AVRO_SYMBOLIC and refused with "cannot write a map to field 'opt'".
+    ::avro::GenericDatum out = runMessageTransform(
+        schema, reusedNameRecord(schema),
+        "{'inline': message.inline, 'opt': {'s': 'x'}, 'items': message.items, "
+        "'lookup': message.lookup}");
+
+    EXPECT_EQ(out.value<::avro::GenericRecord>()
+                  .field("opt")
+                  .value<::avro::GenericRecord>()
+                  .field("s")
+                  .value<std::string>(),
+              "x");
+}
+
 /// A field rule reaches inside a record that arrives through a *named reference*.
 ///
 /// A named type used a second time parses as a symbolic link, and building a `ValidSchema` from

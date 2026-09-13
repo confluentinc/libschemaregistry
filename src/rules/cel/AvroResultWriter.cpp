@@ -13,6 +13,7 @@
 
 #include "absl/status/statusor.h"
 #include "schemaregistry/rules/cel/CelUtils.h"
+#include "schemaregistry/serdes/avro/AvroUtils.h"
 
 namespace schemaregistry::rules::cel::utils {
 
@@ -99,8 +100,12 @@ std::string celMessageName(const google::api::expr::runtime::CelValue &value) {
 /// turns only DECIMAL and TIMESTAMP_* into semantic CEL types, so a date or time-millis branch
 /// is matched as the plain int or long it is read as - the JVM's branchAccepts has temporal
 /// arms there because its reader converts those too.
-bool branchAcceptsCel(const ::avro::NodePtr &branch,
+bool branchAcceptsCel(const ::avro::NodePtr &branch_node,
                       const google::api::expr::runtime::CelValue &value) {
+    // A branch that is a second use of a named type is a symbolic link, whose type() is
+    // AVRO_SYMBOLIC rather than the record it stands for - so `["null", "Inner"]` matched
+    // nothing here and even a computed record was refused with "cannot write a map to field".
+    const ::avro::NodePtr branch = schemaregistry::serdes::avro::utils::resolveNode(branch_node);
     const bool has_logical_type =
         branch->logicalType().type() != ::avro::LogicalType::NONE;
     switch (branch->type()) {
@@ -211,14 +216,17 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
     const ::avro::NodePtr &schema,
     const google::api::expr::runtime::CelValue &value, size_t *branch_index) {
     if (schema->type() != ::avro::AVRO_UNION) {
-        return branchAcceptsCel(schema, value) ? schema : nullptr;
+        return branchAcceptsCel(schema, value)
+                   ? schemaregistry::serdes::avro::utils::resolveNode(schema)
+                   : nullptr;
     }
     for (size_t branch = 0; branch < schema->leaves(); ++branch) {
         if (branchAcceptsCel(schema->leafAt(branch), value)) {
             if (branch_index != nullptr) {
                 *branch_index = branch;
             }
-            return schema->leafAt(branch);
+            // Resolved, so the caller can build a datum and a ValidSchema from it.
+            return schemaregistry::serdes::avro::utils::resolveNode(schema->leafAt(branch));
         }
     }
     return nullptr;
@@ -344,7 +352,7 @@ bool branchAcceptsCel(const ::avro::NodePtr &branch,
     auto orig_record_schema =
         original.value<::avro::GenericRecord>().schema();
     ::avro::GenericDatum result_datum{
-        ::avro::ValidSchema(orig_record_schema)};
+        orig_record_schema};
     auto &result_record = result_datum.value<::avro::GenericRecord>();
 
     // Replace, not merge: the map *is* the new record, so a field the rule does not

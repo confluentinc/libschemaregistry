@@ -82,6 +82,14 @@ nlohmann::json avroToJson(const ::avro::GenericDatum &datum);
                                 const ::avro::ValidSchema &schema);
 
 /**
+ * Follow a symbolic link to the node it stands for; any other node is returned as-is.
+ * avro-cpp represents a reused named type this way, and a ValidSchema cannot be built from one.
+ * @param node Schema node, possibly symbolic
+ * @return The node the link points at, or the node itself
+ */
+::avro::NodePtr resolveNode(const ::avro::NodePtr &node);
+
+/**
  * Resolve union schema branch for a given datum
  * @param union_schema Union schema
  * @param datum Datum to match against union branches
