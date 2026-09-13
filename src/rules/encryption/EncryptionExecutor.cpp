@@ -11,7 +11,6 @@
 #include "schemaregistry/rest/RestException.h"
 #include "schemaregistry/rules/encryption/EncryptionRegistry.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
-#include "schemaregistry/serdes/avro/AvroTypes.h"
 #include "schemaregistry/serdes/json/JsonTypes.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 #include "tink/aead.h"

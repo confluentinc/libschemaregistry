@@ -1,7 +1,37 @@
 #include "schemaregistry/rules/cel/CelUtils.h"
+#ifdef SCHEMAREGISTRY_USE_AVRO
+/// Sign-extends a minimal two's-complement coefficient to an Avro `fixed` decimal's declared
+/// width, in place.
+///
+/// DecimalUtil::toProto returns the minimal encoding, which is what a `bytes` decimal carries -
+/// but a `fixed` decimal must be exactly `fixedSize()` bytes. Writing the minimal bytes straight
+/// in produced an invalid datum for every value narrower than the field. Avro Java does this
+/// padding inside Conversions.DecimalConversion.toFixed, which the JVM writer delegates to:
+/// 12.34 at size 8 is 00000000000004d2 and -12.34 is fffffffffffffb2e.
+void result_bytes_for_fixed(std::vector<uint8_t> &bytes, size_t fixed_size) {
+    if (bytes.size() > fixed_size) {
+        throw std::out_of_range(
+            "decimal coefficient needs " + std::to_string(bytes.size()) +
+            " bytes and does not fit the Avro fixed size " + std::to_string(fixed_size));
+    }
+    const uint8_t pad = (!bytes.empty() && (bytes.front() & 0x80) != 0) ? 0xFF : 0x00;
+    bytes.insert(bytes.begin(), fixed_size - bytes.size(), pad);
+}
 
+// Pulls in avro/Generic.hh, which is absent from a rules-without-Avro build. Rules and Avro are
+// independent vcpkg features (only Protobuf is auto-enabled with rules), so that configuration
+// is supported and this include has to follow the same guard as the Avro code below.
+#include "schemaregistry/rules/cel/AvroResultWriter.h"
+#endif
+#include "schemaregistry/rules/cel/ProtobufResultWriter.h"
+
+#include <limits>
 #include <utility>
 
+#include "absl/time/time.h"
+#include "confluent/type/decimal.pb.h"
+#include "schemaregistry/rules/cel/DecimalUtil.h"
+#include "confluent/type/variant.pb.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
 #include "eval/public/structs/cel_proto_wrapper.h"
@@ -16,6 +46,22 @@
 #endif
 
 namespace schemaregistry::rules::cel::utils {
+
+const char *celTypeName(const google::api::expr::runtime::CelValue &value) {
+    if (value.IsBool()) return "a bool";
+    if (value.IsInt64()) return "an int";
+    if (value.IsUint64()) return "a uint";
+    if (value.IsDouble()) return "a double";
+    if (value.IsString()) return "a string";
+    if (value.IsBytes()) return "bytes";
+    if (value.IsList()) return "a list";
+    if (value.IsMap()) return "a map";
+    if (value.IsMessage()) return "a message";
+    if (value.IsTimestamp()) return "a timestamp";
+    if (value.IsDuration()) return "a duration";
+    if (value.IsNull()) return "null";
+    return "this value";
+}
 
 google::api::expr::runtime::CelValue fromJsonValue(
     const nlohmann::json &json, google::protobuf::Arena *arena) {
@@ -111,8 +157,67 @@ nlohmann::json toJsonValue(
 
 #ifdef SCHEMAREGISTRY_USE_AVRO
 
+namespace {
+
+// An Avro timestamp-* field is a raw int64 whose unit the schema supplies, and nothing bounds
+// it: `timestamp-micros` holding INT64_MAX is a legal Avro value that is not a legal CEL
+// timestamp. Without this the out-of-range absl::Time was handed to CEL as a timestamp and
+// evaluated as though valid - measured, `this.ts.getFullYear() > 0` answered true for
+// INT64_MAX millis, and INT64_MIN disagreed between the micros and nanos units.
+//
+// The reference rejects it: the Avro logical-timestamp conversion goes through
+// CelUtils.epochOf -> TimestampUtils.instantOfEpoch, which throws "Timestamp out of range".
+// Same range and the same point in the walk as the `timestamp(x, precision)` constructor in
+// ExtraFunc, which already carried this check.
+google::api::expr::runtime::CelValue timestampFromAvro(absl::Time time, int64_t raw,
+                                                       const char *unit) {
+    const int64_t seconds = absl::ToUnixSeconds(time);
+    if (seconds < kMinEpochSecond || seconds > kMaxEpochSecond) {
+        throw std::runtime_error(
+            std::string("timestamp: out of range: ") + std::to_string(raw) + " " + unit +
+            " since the epoch is outside "
+            "0001-01-01T00:00:00Z..9999-12-31T23:59:59.999999999Z");
+    }
+    return google::api::expr::runtime::CelValue::CreateTimestamp(time);
+}
+
+}  // namespace
+
 google::api::expr::runtime::CelValue fromAvroValue(
     const ::avro::GenericDatum &avro, google::protobuf::Arena *arena) {
+    // Logical types are converted to their CEL semantic type so that portable
+    // expressions (decimal(this.amount), timestamp(this.ts)) work the same as
+    // in the other clients. Decimal -> confluent.type.Decimal message; timestamp
+    // -> CEL timestamp. Everything else falls through to the base-type switch.
+    switch (avro.logicalType().type()) {
+        case ::avro::LogicalType::DECIMAL: {
+            std::vector<uint8_t> bytes =
+                avro.type() == ::avro::AVRO_FIXED
+                    ? avro.value<::avro::GenericFixed>().value()
+                    : avro.value<std::vector<uint8_t>>();
+            auto *msg =
+                google::protobuf::Arena::Create<confluent::type::Decimal>(arena);
+            // Through DecimalUtil so an Avro-sourced decimal is field-identical to the same
+            // number from `decimal("...")`: minimal coefficient bytes (a `fixed` decimal's
+            // sign padding stripped) and `precision` set to the digit count. Built by hand,
+            // it carried precision 0, and cel-cpp's builtin `in` compares fields.
+            *msg = DecimalUtil::toProto(DecimalUtil::fromUnscaledBytes(
+                std::string(bytes.begin(), bytes.end()), avro.logicalType().scale()));
+            return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                msg, arena);
+        }
+        case ::avro::LogicalType::TIMESTAMP_MILLIS:
+            return timestampFromAvro(absl::FromUnixMillis(avro.value<int64_t>()),
+                                     avro.value<int64_t>(), "millis");
+        case ::avro::LogicalType::TIMESTAMP_MICROS:
+            return timestampFromAvro(absl::FromUnixMicros(avro.value<int64_t>()),
+                                     avro.value<int64_t>(), "micros");
+        case ::avro::LogicalType::TIMESTAMP_NANOS:
+            return timestampFromAvro(absl::FromUnixNanos(avro.value<int64_t>()),
+                                     avro.value<int64_t>(), "nanos");
+        default:
+            break;
+    }
     switch (avro.type()) {
         case ::avro::AVRO_BOOL:
             return google::api::expr::runtime::CelValue::CreateBool(
@@ -143,6 +248,32 @@ google::api::expr::runtime::CelValue fromAvroValue(
             return google::api::expr::runtime::CelValue::CreateBytes(
                 arena_bytes);
         }
+        // A `fixed` is a fixed-width byte string, so it is presented as CEL bytes - exactly like
+        // AVRO_BYTES above, and what the Java reference does (GenericFixed -> CelByteString) and
+        // Rust does (Fixed -> Value::Bytes). Missing this arm, a bare fixed fell through to the
+        // default and compared *false* against a bytes literal rather than erroring, so a rule on
+        // a checksum or fixed-width id silently failed its record. Note a fixed carrying the
+        // `decimal` logical type was already handled by the logical-type switch above, which is
+        // why only the bare case was affected.
+        case ::avro::AVRO_FIXED: {
+            const auto &fixed_vec = avro.value<::avro::GenericFixed>().value();
+            auto *arena_fixed =
+                google::protobuf::Arena::Create<std::string>(arena);
+            arena_fixed->assign(fixed_vec.begin(), fixed_vec.end());
+            return google::api::expr::runtime::CelValue::CreateBytes(
+                arena_fixed);
+        }
+        // An `enum` is presented as its symbol name, matching the Java reference
+        // (GenericEnumSymbol -> String) and Rust (Enum -> Value::String). This deliberately
+        // differs from a *protobuf* enum, which every client presents as an int: an Avro enum
+        // symbol has no ordinal in the data model, only a name. Missing this arm, `this.status ==
+        // 'ACTIVE'` was silently false.
+        case ::avro::AVRO_ENUM: {
+            auto *arena_sym = google::protobuf::Arena::Create<std::string>(
+                arena, avro.value<::avro::GenericEnum>().symbol());
+            return google::api::expr::runtime::CelValue::CreateString(
+                arena_sym);
+        }
         case ::avro::AVRO_ARRAY: {
             const auto &arr = avro.value<::avro::GenericArray>().value();
             std::vector<google::api::expr::runtime::CelValue> vec;
@@ -171,9 +302,32 @@ google::api::expr::runtime::CelValue fromAvroValue(
             return google::api::expr::runtime::CelValue::CreateMap(map_impl);
         }
         case ::avro::AVRO_RECORD: {
+            const auto &record = avro.value<::avro::GenericRecord>();
+            // A confluent.type.Variant record (two bytes fields metadata/value) is
+            // surfaced as a confluent.type.Variant proto message, so the variants.*
+            // functions see it as a first-class Variant - the counterpart of the
+            // decimal logical-type branch above. Recognized by record name, since
+            // avro-cpp does not apply a logical type to a record.
+            if (record.schema()->name().fullname() == "confluent.type.Variant") {
+                std::vector<uint8_t> metadata;
+                std::vector<uint8_t> value;
+                for (size_t i = 0; i < record.schema()->names(); ++i) {
+                    const std::string &fieldName = record.schema()->nameAt(i);
+                    if (fieldName == "metadata") {
+                        metadata = record.fieldAt(i).value<std::vector<uint8_t>>();
+                    } else if (fieldName == "value") {
+                        value = record.fieldAt(i).value<std::vector<uint8_t>>();
+                    }
+                }
+                auto *msg = google::protobuf::Arena::Create<confluent::type::Variant>(
+                    arena);
+                msg->set_metadata(std::string(metadata.begin(), metadata.end()));
+                msg->set_value(std::string(value.begin(), value.end()));
+                return google::api::expr::runtime::CelProtoWrapper::CreateMessage(
+                    msg, arena);
+            }
             auto *map_impl = google::protobuf::Arena::Create<
                 google::api::expr::runtime::CelMapBuilder>(arena);
-            const auto &record = avro.value<::avro::GenericRecord>();
             for (size_t i = 0; i < record.schema()->names(); ++i) {
                 auto *arena_name = google::protobuf::Arena::Create<std::string>(
                     arena, record.schema()->nameAt(i));
@@ -193,22 +347,345 @@ google::api::expr::runtime::CelValue fromAvroValue(
     }
 }
 
+namespace {
+
+/// A numeric CEL value as an int64, for an integer-typed field.
+int64_t celAsAvroInt(const ::avro::GenericDatum &original,
+                     const google::api::expr::runtime::CelValue &value) {
+    if (value.IsInt64()) {
+        return value.Int64OrDie();
+    }
+    // A field-level CEL_FIELD rule reaches toAvroValue directly, with no branchAcceptsCel to
+    // gate it, so the "only an integer gets here" this arm used to assume held for a record
+    // field and an array element and not for a tagged field: a rule returning 2.0 for an
+    // `int` field fell through to Uint64OrDie(), whose absl CHECK aborts the process instead
+    // of reporting the type error.
+    if (!value.IsUint64()) {
+        throw std::runtime_error("cannot write " + std::string(celTypeName(value)) +
+                                 " to an Avro " +
+                                 ::avro::toString(original.type()) + " value");
+    }
+    const uint64_t u = value.Uint64OrDie();
+    if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::out_of_range("value " + std::to_string(u) +
+                                " is out of range for an Avro " +
+                                ::avro::toString(original.type()) + " field");
+    }
+    return static_cast<int64_t>(u);
+}
+
+/// A numeric CEL value as a double, for a floating-typed field.
+double celAsAvroDouble(const ::avro::GenericDatum &original,
+                       const google::api::expr::runtime::CelValue &value) {
+    if (value.IsDouble()) {
+        return value.DoubleOrDie();
+    }
+    if (value.IsInt64()) {
+        return static_cast<double>(value.Int64OrDie());
+    }
+    // Same unguarded Uint64OrDie() as celAsAvroInt above.
+    if (!value.IsUint64()) {
+        throw std::runtime_error("cannot write " + std::string(celTypeName(value)) +
+                                 " to an Avro " +
+                                 ::avro::toString(original.type()) + " value");
+    }
+    return static_cast<double>(value.Uint64OrDie());
+}
+
+/// A numeric CEL value as a datum of the *field's* type.
+///
+/// Each arm used to build a datum of the CEL value's own type, so an `int` field received an
+/// AVRO_LONG datum and a `float` field an AVRO_DOUBLE one - and from an *identity* transform,
+/// because fromAvroValue widens an int to CEL's only integer type and a float to its only
+/// floating one. The record then no longer matched its own schema, and the damage showed up
+/// on the wire rather than as an error: the encoder wrote eight bytes for the double where a
+/// reader expected four for the float, so that field and everything after it decoded from
+/// misaligned bytes (1.5f came back as 0 and the next double as 5.3e-315).
+///
+/// The JVM converts against the *schema* instead - AvroResultWriter's INT, LONG, FLOAT and
+/// DOUBLE cases call narrowToInt, narrowToLong, narrowToFloat and narrowToDouble - so the
+/// target type decides here too.
+::avro::GenericDatum numericToAvro(
+    const ::avro::GenericDatum &original,
+    const google::api::expr::runtime::CelValue &cel_value) {
+    switch (original.type()) {
+        case ::avro::AVRO_INT: {
+            // narrowToInt takes an in-range integer and nothing else: a double is a type
+            // mismatch there rather than a truncation, and branchAcceptsCel refuses one here
+            // for the same reason, so only an integer reaches this arm.
+            const int64_t v = celAsAvroInt(original, cel_value);
+            if (v < std::numeric_limits<int32_t>::min() ||
+                v > std::numeric_limits<int32_t>::max()) {
+                throw std::out_of_range("value " + std::to_string(v) +
+                                        " is out of range for an Avro int field");
+            }
+            return ::avro::GenericDatum(static_cast<int32_t>(v));
+        }
+        case ::avro::AVRO_LONG:
+            return ::avro::GenericDatum(celAsAvroInt(original, cel_value));
+        case ::avro::AVRO_FLOAT:
+            // narrowToFloat takes any number and calls floatValue(), accepting the precision
+            // loss a float field declares by being one.
+            return ::avro::GenericDatum(
+                static_cast<float>(celAsAvroDouble(original, cel_value)));
+        case ::avro::AVRO_DOUBLE:
+            return ::avro::GenericDatum(celAsAvroDouble(original, cel_value));
+        default:
+            // Not a numeric field. recordFromCelMap refuses this before converting, so this
+            // is reached only for an array element or a map value, where the element schema
+            // is the one that does not accept a number.
+            throw std::runtime_error("cannot write a number to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+    }
+}
+
+/// Writes a CEL decimal back into the shape the field's schema declares.
+///
+/// `fromAvroValue` reads a DECIMAL logical type into a confluent.type.Decimal message, so a
+/// rule that computes one hands back a message rather than any primitive CEL type. Without
+/// this the value fell through `toAvroValue`'s trailing `return original` and the computed
+/// result was silently discarded.
+///
+/// The computed decimal carries its own scale, which arithmetic may have changed; the Avro
+/// schema's scale is fixed. Rescaling to the schema's scale is what the JVM client gets from
+/// Avro's own DecimalConversion, which rejects a mismatch rather than truncating - so an
+/// inexact rescale is an error here too, not a silent narrowing.
+::avro::GenericDatum decimalToAvro(const ::avro::GenericDatum &original,
+                                   const google::protobuf::Message &message) {
+    const auto *decimal_msg =
+        google::protobuf::DynamicCastToGenerated<confluent::type::Decimal>(&message);
+    confluent::type::Decimal owned;
+    if (decimal_msg == nullptr) {
+        // A DynamicMessage of the same type: round-trip through the wire format.
+        if (!owned.ParseFromString(message.SerializeAsString())) {
+            throw std::runtime_error(
+                "cannot read confluent.type.Decimal returned by a CEL rule");
+        }
+        decimal_msg = &owned;
+    }
+    decimal::Decimal value = DecimalUtil::fromProto(*decimal_msg);
+    const int32_t target_scale = original.logicalType().scale();
+    decimal::Context ctx = DecimalUtil::exactContext();
+    // The field's scale is small, but the rule's value need not be: a rule is free to return
+    // a decimal with an extreme exponent (div holds its coefficient to 38 digits and lets the
+    // exponent run), and rescaling that into the field's scale materialises the whole
+    // coefficient under a MaxContext. Zero is exempt - rescaling it never expands anything.
+    if (!value.iszero()) {
+        DecimalUtil::requireSaneWidth(DecimalUtil::rescaledDigits(target_scale, value),
+                                      "decimal field", "the field's scale of " +
+                                                           std::to_string(target_scale));
+    }
+    decimal::Decimal rescaled = value.rescale(-target_scale, ctx);
+    if (ctx.status() & (MPD_Inexact | MPD_Invalid_operation)) {
+        throw std::runtime_error(
+            "decimal result does not fit the field's scale of " +
+            std::to_string(target_scale));
+    }
+    // Avro's own DecimalConversion validates the declared *precision* as well as the scale,
+    // and does so after the rescale - `mpd_t::digits` is the coefficient's digit count, which
+    // is what BigDecimal.precision() reports. Only the scale was checked here, so a
+    // five-digit coefficient went into a precision-4 field and produced a record no Avro
+    // reader accepts. Measured against avro 1.12.2 on decimal(4,2):
+    //   99.99   (precision 4) -> 2 bytes
+    //   999.99  (precision 5) -> "Cannot encode decimal with precision 5 as max precision 4"
+    //   99999   -> rescaled to 99999.00, precision 7, refused "after safely adjusting scale
+    //             from 0 to required 2"
+    const int32_t declared_precision = original.logicalType().precision();
+    const auto digits = static_cast<int32_t>(rescaled.getconst()->digits);
+    if (declared_precision > 0 && digits > declared_precision) {
+        throw std::out_of_range(
+            "cannot encode a decimal with precision " + std::to_string(digits) +
+            " as max precision " + std::to_string(declared_precision));
+    }
+
+    std::string unscaled = DecimalUtil::toProto(rescaled).value();
+    std::vector<uint8_t> bytes(unscaled.begin(), unscaled.end());
+    if (original.type() == ::avro::AVRO_FIXED) {
+        const auto &fixed_schema = original.value<::avro::GenericFixed>().schema();
+        result_bytes_for_fixed(bytes, fixed_schema->fixedSize());
+        // From the NodePtr, not a ValidSchema built around it: the ValidSchema constructor
+        // re-validates, and for a bare leaf node that threw - the exception was swallowed
+        // upstream and the field came back with its original value.
+        ::avro::GenericDatum result{fixed_schema};
+        result.value<::avro::GenericFixed>().value() = bytes;
+        return result;
+    }
+    return ::avro::GenericDatum(bytes);
+}
+
+/// Writes a CEL variant back into the confluent.type.Variant record it was read from.
+/// The record's own schema is the only place the field layout is available, so it is taken
+/// from the original datum - the same reason the enum, fixed and container arms thread it
+/// through.
+::avro::GenericDatum variantToAvro(const ::avro::GenericDatum &original,
+                                   const google::protobuf::Message &message) {
+    const auto *variant_msg =
+        google::protobuf::DynamicCastToGenerated<confluent::type::Variant>(&message);
+    confluent::type::Variant owned;
+    if (variant_msg == nullptr) {
+        if (!owned.ParseFromString(message.SerializeAsString())) {
+            throw std::runtime_error(
+                "cannot read confluent.type.Variant returned by a CEL rule");
+        }
+        variant_msg = &owned;
+    }
+    if (original.type() != ::avro::AVRO_RECORD) {
+        return original;
+    }
+
+    ::avro::GenericDatum result{
+        original.value<::avro::GenericRecord>().schema()};
+    auto &record = result.value<::avro::GenericRecord>();
+    const std::string &metadata = variant_msg->metadata();
+    const std::string &value = variant_msg->value();
+    for (size_t i = 0; i < record.schema()->names(); ++i) {
+        const std::string &field_name = record.schema()->nameAt(i);
+        if (field_name == "metadata") {
+            record.fieldAt(i).value<std::vector<uint8_t>>() =
+                std::vector<uint8_t>(metadata.begin(), metadata.end());
+        } else if (field_name == "value") {
+            record.fieldAt(i).value<std::vector<uint8_t>>() =
+                std::vector<uint8_t>(value.begin(), value.end());
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
 ::avro::GenericDatum toAvroValue(
     const ::avro::GenericDatum &original,
     const google::api::expr::runtime::CelValue &cel_value) {
+    // Logical types first, mirroring fromAvroValue: a decimal and a variant are carried as
+    // proto messages and a timestamp as a CEL timestamp, none of which any arm below matches.
+    // Before this they all reached the trailing `return original` and were discarded.
+    if (cel_value.IsMessage()) {
+        const google::protobuf::Message *message = cel_value.MessageOrDie();
+        const std::string name =
+            message == nullptr ? std::string()
+                               : std::string(message->GetDescriptor()->full_name());
+        // The target decides, not just the returned message. Dispatching on the message alone
+        // wrote decimal wire bytes into a plain `bytes` or `fixed` field, and a bytes datum
+        // into a *record* slot, which does not even match the schema. The JVM's branchAccepts
+        // requires `hasLogicalType && value instanceof BigDecimal` for BYTES and FIXED, and a
+        // Variant only for a record carrying the variant logical type, so every other target
+        // is an AvroTypeException there. Reachable from a tagged CEL_FIELD rule, which calls
+        // in without the schema check recordFromCelMap and the container arms apply.
+        if (name == "confluent.type.Decimal") {
+            if (original.logicalType().type() != ::avro::LogicalType::DECIMAL) {
+                throw std::runtime_error(
+                    "cannot write a decimal to an Avro " +
+                    ::avro::toString(original.type()) +
+                    " value, which does not declare the decimal logical type");
+            }
+            return decimalToAvro(original, *message);
+        }
+        if (name == "confluent.type.Variant") {
+            if (original.type() != ::avro::AVRO_RECORD ||
+                original.value<::avro::GenericRecord>().schema()->name().fullname() !=
+                    "confluent.type.Variant") {
+                throw std::runtime_error("cannot write a variant to an Avro " +
+                                         ::avro::toString(original.type()) + " value");
+            }
+            return variantToAvro(original, *message);
+        }
+        throw std::runtime_error("cannot write " +
+                                 (name.empty() ? std::string("a message") : name) +
+                                 " to an Avro " + ::avro::toString(original.type()) +
+                                 " value");
+    } else if (cel_value.IsTimestamp()) {
+        const absl::Time time = cel_value.TimestampOrDie();
+        switch (original.logicalType().type()) {
+            case ::avro::LogicalType::TIMESTAMP_MILLIS:
+                return ::avro::GenericDatum(absl::ToUnixMillis(time));
+            case ::avro::LogicalType::TIMESTAMP_MICROS:
+                return ::avro::GenericDatum(absl::ToUnixMicros(time));
+            case ::avro::LogicalType::TIMESTAMP_NANOS: {
+                // A CEL timestamp spans years 1 to 9999; an epoch-nanosecond int64 spans
+                // only 1677 to 2262, and absl saturates rather than reporting the loss, so
+                // an out-of-range instant was silently written as a different one. The JVM
+                // reaches the same rejection through Avro's TimestampNanosConversion, whose
+                // Math.multiplyExact raises "long overflow". Millis and micros need no such
+                // check: the whole CEL range fits an int64 in both units.
+                const int64_t nanos = absl::ToUnixNanos(time);
+                if (absl::FromUnixNanos(nanos) != time) {
+                    throw std::out_of_range(
+                        "timestamp is out of range for an Avro timestamp-nanos field");
+                }
+                return ::avro::GenericDatum(nanos);
+            }
+            default:
+                // A field that is not a timestamp logical type declares no unit to write the
+                // instant in, so there is nothing to convert against - and returning the
+                // original silently discarded the rule's result, reporting success while
+                // leaving the old value in place. The JVM's LONG case calls narrowToLong,
+                // which refuses an Instant outright.
+                throw std::runtime_error(
+                    "cannot write a timestamp to an Avro " +
+                    ::avro::toString(original.type()) +
+                    " value, which does not declare a timestamp logical type");
+        }
+    }
     if (cel_value.IsBool()) {
+        // Each arm below checks the target, not just the value. `recordFromCelMap` and the
+        // container arms resolve the schema before converting, but a field-level CEL_FIELD
+        // rule calls straight in, so a rule returning 'x' for an `int` field used to install
+        // a string datum in an int slot - a record that no longer matches its own schema,
+        // reported as a success. The JVM dispatches on the schema throughout, so every one of
+        // these is an AvroTypeException there.
+        if (original.type() != ::avro::AVRO_BOOL) {
+            throw std::runtime_error("cannot write a bool to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+        }
         return ::avro::GenericDatum(cel_value.BoolOrDie());
-    } else if (cel_value.IsInt64()) {
-        return ::avro::GenericDatum(
-            static_cast<int64_t>(cel_value.Int64OrDie()));
-    } else if (cel_value.IsUint64()) {
-        return ::avro::GenericDatum(
-            static_cast<int64_t>(cel_value.Uint64OrDie()));
-    } else if (cel_value.IsDouble()) {
-        return ::avro::GenericDatum(cel_value.DoubleOrDie());
+    } else if (cel_value.IsInt64() || cel_value.IsUint64() || cel_value.IsDouble()) {
+        return numericToAvro(original, cel_value);
     } else if (cel_value.IsString()) {
-        return ::avro::GenericDatum(
-            std::string(cel_value.StringOrDie().value()));
+        std::string text(cel_value.StringOrDie().value());
+        if (original.type() != ::avro::AVRO_STRING &&
+            original.type() != ::avro::AVRO_ENUM) {
+            throw std::runtime_error("cannot write a string to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+        }
+        // An enum field is read as its symbol name (see AVRO_ENUM in fromAvroValue), so a rule
+        // that returns a string for one has to be written back as a GenericEnum carrying that
+        // symbol - a plain string datum does not satisfy an enum schema. The original datum is the
+        // only place the enum's schema is available, which is why it is threaded through here, the
+        // same way the array/record/map arms below use it.
+        if (original.type() == ::avro::AVRO_ENUM) {
+            ::avro::GenericDatum result{
+                original.value<::avro::GenericEnum>().schema()};
+            result.value<::avro::GenericEnum>().set(text);
+            return result;
+        }
+        return ::avro::GenericDatum(text);
+    } else if (cel_value.IsBytes()) {
+        auto bytes_view = cel_value.BytesOrDie().value();
+        std::vector<uint8_t> bytes(bytes_view.begin(), bytes_view.end());
+        if (original.type() != ::avro::AVRO_BYTES &&
+            original.type() != ::avro::AVRO_FIXED) {
+            throw std::runtime_error("cannot write bytes to an Avro " +
+                                     ::avro::toString(original.type()) + " value");
+        }
+        // A fixed field needs a GenericFixed of its own schema; plain `bytes` takes the vector
+        // directly. There was no bytes arm here at all before, so a rule returning bytes for
+        // either shape fell through to the fallback and was silently discarded.
+        if (original.type() == ::avro::AVRO_FIXED) {
+            const auto &fixed_schema = original.value<::avro::GenericFixed>().schema();
+            // Raw bytes, unlike a decimal, are not padded: a `fixed` field is exactly
+            // fixedSize() bytes wide and Java's toFixed refuses a mismatch outright
+            // ("Fixed schema X expects N bytes, got M") rather than guessing an alignment.
+            if (bytes.size() != fixed_schema->fixedSize()) {
+                throw std::out_of_range(
+                    "fixed schema " + fixed_schema->name().fullname() + " expects " +
+                    std::to_string(fixed_schema->fixedSize()) + " bytes, got " +
+                    std::to_string(bytes.size()));
+            }
+            ::avro::GenericDatum result{fixed_schema};
+            result.value<::avro::GenericFixed>().value() = bytes;
+            return result;
+        }
+        return ::avro::GenericDatum(bytes);
     } else if (cel_value.IsNull()) {
         return ::avro::GenericDatum();
     } else if (cel_value.IsList()) {
@@ -218,21 +695,28 @@ google::api::expr::runtime::CelValue fromAvroValue(
             auto orig_array_schema =
                 original.value<::avro::GenericArray>().schema();
             ::avro::GenericDatum result_datum{
-                ::avro::ValidSchema(orig_array_schema)};
+                orig_array_schema};
             auto &result_array = result_datum.value<::avro::GenericArray>();
 
-            ::avro::GenericDatum element_template;
-            auto &orig_array = original.value<::avro::GenericArray>().value();
-            if (!orig_array.empty()) {
-                element_template = orig_array[0];
-            }
+            // Each element is converted against the array's declared item type - NodeArray
+            // carries it as its single leaf - and checked against it first. Dispatching on
+            // the CEL value alone put a boolean datum in an `array<int>` for `[true]`, and
+            // `[2.0]` reached the integer converter, which aborts the process on a value
+            // that is not an integer. A record field has had this check since unions were
+            // resolved by value; an element had none.
+            const ::avro::NodePtr element_schema = orig_array_schema->leafAt(0);
 
             for (int i = 0; i < cel_list->size(); ++i) {
                 auto item = cel_list->Get(nullptr, i);
-                if (!item.IsError()) {
-                    result_array.value().push_back(
-                        toAvroValue(element_template, item));
+                if (item.IsError()) {
+                    // Skipping shortened the array and reported success, so a failed element
+                    // expression looked like a shorter list than the rule wrote.
+                    throw std::runtime_error(
+                        "a CEL rule failed for element " + std::to_string(i) +
+                        " of an array field");
                 }
+                result_array.value().push_back(avroValueFor(
+                    "element " + std::to_string(i) + " of an array", element_schema, item));
             }
 
             return result_datum;
@@ -243,59 +727,17 @@ google::api::expr::runtime::CelValue fromAvroValue(
         const auto *cel_map = cel_value.MapOrDie();
 
         if (original.type() == ::avro::AVRO_RECORD) {
-            auto orig_record_schema =
-                original.value<::avro::GenericRecord>().schema();
-            ::avro::GenericDatum result_datum{
-                ::avro::ValidSchema(orig_record_schema)};
-            auto &result_record = result_datum.value<::avro::GenericRecord>();
-
-            auto &orig_record = original.value<::avro::GenericRecord>();
-            for (size_t i = 0; i < orig_record.fieldCount(); ++i) {
-                result_record.setFieldAt(i, orig_record.fieldAt(i));
-            }
-
-            auto map_keys = cel_map->ListKeys(nullptr);
-            if (map_keys.ok()) {
-                const auto *keys_list = map_keys.value();
-                for (int i = 0; i < keys_list->size(); ++i) {
-                    auto key_val = keys_list->Get(nullptr, i);
-                    if (!key_val.IsError() && key_val.IsString()) {
-                        std::string key =
-                            std::string(key_val.StringOrDie().value());
-                        auto value_lookup = cel_map->Get(nullptr, key_val);
-                        if (value_lookup.has_value()) {
-                            for (size_t field_idx = 0;
-                                 field_idx < orig_record_schema->leaves();
-                                 ++field_idx) {
-                                if (orig_record_schema->nameAt(field_idx) ==
-                                    key) {
-                                    auto field_template =
-                                        orig_record.fieldAt(field_idx);
-                                    result_record.setFieldAt(
-                                        field_idx,
-                                        toAvroValue(field_template,
-                                                    value_lookup.value()));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return result_datum;
+            return recordFromCelMap(original, *cel_map);
         } else if (original.type() == ::avro::AVRO_MAP) {
             auto orig_map_schema =
                 original.value<::avro::GenericMap>().schema();
             ::avro::GenericDatum result_datum{
-                ::avro::ValidSchema(orig_map_schema)};
+                orig_map_schema};
             auto &result_map = result_datum.value<::avro::GenericMap>();
 
-            ::avro::GenericDatum value_template;
-            auto &orig_map = original.value<::avro::GenericMap>().value();
-            if (!orig_map.empty()) {
-                value_template = orig_map.begin()->second;
-            }
+            // From the schema and checked against it, for the reason given in the array arm
+            // above. NodeMap holds the key type at leaf 0 and the value type at leaf 1.
+            const ::avro::NodePtr map_value_schema = orig_map_schema->leafAt(1);
 
             auto map_keys = cel_map->ListKeys(nullptr);
             if (map_keys.ok()) {
@@ -308,8 +750,9 @@ google::api::expr::runtime::CelValue fromAvroValue(
                         auto value_lookup = cel_map->Get(nullptr, key_val);
                         if (value_lookup.has_value()) {
                             result_map.value().emplace_back(
-                                key, toAvroValue(value_template,
-                                                 value_lookup.value()));
+                                key, avroValueFor("the map value for '" + key + "'",
+                                                  map_value_schema,
+                                                  value_lookup.value()));
                         }
                     }
                 }
@@ -326,10 +769,73 @@ google::api::expr::runtime::CelValue fromAvroValue(
 
 #endif
 
+namespace {
+
+using schemaregistry::serdes::protobuf::ProtobufVariant;
+
+constexpr const char *kProtoTimestampTypeName = "google.protobuf.Timestamp";
+
+}  // namespace
+
 schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
     const schemaregistry::serdes::protobuf::ProtobufVariant &original,
     const google::api::expr::runtime::CelValue &cel_value) {
     using namespace schemaregistry::serdes::protobuf;
+
+    // A CEL_FIELD rule over a decimal or timestamp field is handed the whole message and
+    // hands back a message or a CEL timestamp - neither of which any arm below matches, so
+    // both used to reach the fallback and be written as bytes, which aborts reflection with
+    // "Expected CPPTYPE_STRING, field type CPPTYPE_MESSAGE". The counterpart of the arms
+    // toAvroValue needs for the same reason.
+    // A message-typed field takes its own message, and a google.protobuf.Timestamp field also
+    // takes a CEL timestamp. Nothing else: the JVM's ProtobufSchema.rebuildValueType reports
+    // every other shape as "Rule returned <type> for field '<name>', which is a <message>".
+    // Both mismatches were silent here. A message of the wrong type fell to `return original`
+    // and kept the field's input value, and the timestamp arm accepted *any* message - a
+    // Decimal has no seconds or nanos field, so the field was replaced with an empty Decimal.
+    if (original.type == ProtobufVariant::ValueType::Message) {
+        const auto &orig =
+            std::get<std::unique_ptr<google::protobuf::Message>>(original.value);
+        if (orig != nullptr) {
+            const std::string target(orig->GetDescriptor()->full_name());
+            if (cel_value.IsMessage() && cel_value.MessageOrDie() != nullptr) {
+                const google::protobuf::Message *src = cel_value.MessageOrDie();
+                const std::string source(src->GetDescriptor()->full_name());
+                if (source != target) {
+                    throw std::runtime_error("cannot write " + source +
+                                             " to a field of type " + target);
+                }
+                auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
+                out->CopyFrom(*src);
+                return ProtobufVariant(std::move(out));
+            }
+            if (cel_value.IsTimestamp()) {
+                if (target != kProtoTimestampTypeName) {
+                    throw std::runtime_error(
+                        "cannot write a timestamp to a field of type " + target);
+                }
+                const absl::Time time = cel_value.TimestampOrDie();
+                auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
+                const google::protobuf::Descriptor *desc = out->GetDescriptor();
+                const google::protobuf::Reflection *refl = out->GetReflection();
+                const int64_t seconds = absl::ToUnixSeconds(time);
+                refl->SetInt64(out.get(), desc->FindFieldByName("seconds"), seconds);
+                refl->SetInt32(out.get(), desc->FindFieldByName("nanos"),
+                               static_cast<int32_t>(absl::ToInt64Nanoseconds(
+                                   time - absl::FromUnixSeconds(seconds))));
+                return ProtobufVariant(std::move(out));
+            }
+            // A map is a message-level transform's whole new message and a list is a
+            // repeated field; both are rebuilt by the arms below. Anything else is a scalar
+            // for a message-typed field, which those arms would hand back as a scalar
+            // variant - and protobuf's reflection setter CHECK-fails on that, aborting the
+            // process rather than reporting a rule error.
+            if (!cel_value.IsMap() && !cel_value.IsList()) {
+                throw std::runtime_error("cannot write this CEL value to a field of type " +
+                                         target);
+            }
+        }
+    }
 
     if (cel_value.IsBool()) {
         return ProtobufVariant(cel_value.BoolOrDie());
@@ -404,6 +910,15 @@ schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
 
         return ProtobufVariant(result_list);
     } else if (cel_value.IsMap()) {
+        // A message-level transform returns a map that is the whole new message, so rebuild
+        // it rather than producing a bare protobuf map - the serializer cannot write one.
+        if (original.type == ProtobufVariant::ValueType::Message) {
+            const auto &orig_msg =
+                original.get<std::unique_ptr<google::protobuf::Message>>();
+            if (orig_msg != nullptr) {
+                return messageFromCelMap(*orig_msg, cel_value);
+            }
+        }
         const auto *cel_map = cel_value.MapOrDie();
         std::map<MapKey, ProtobufVariant> result_map;
 
