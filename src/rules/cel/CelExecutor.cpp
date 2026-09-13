@@ -195,6 +195,9 @@ std::unique_ptr<SerdeValue> CelExecutor::Impl::execute(
         if (ctx.getRule().getKind().value_or(Kind::Transform) == Kind::Condition) {
             return makeVerdict(msg, *result);
         }
+        // A field rule's result goes to toProtobufValue / toAvroValue and a message-level one
+        // to a result writer, and the two narrow differently *because the reference does*: see
+        // the note on toProtobufValue.
         return toSerdeValue(ctx, msg, *result);
     }
 

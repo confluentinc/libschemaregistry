@@ -841,6 +841,11 @@ schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
         }
     }
 
+    // Narrowing below is unchecked on purpose, unlike the message-level writer's. The JVM's
+    // CelFieldExecutor ends in num.intValue() / longValue() / floatValue(), which truncate or
+    // saturate silently - measured: an int32 field takes 2147483648 as -2147483648 and 1.9 as 1,
+    // and a float field takes 1e40 as +Inf. Only the message-level path goes through protobuf
+    // JSON in the reference, which rejects all three, so the two differ there and here.
     if (cel_value.IsBool()) {
         return ProtobufVariant(cel_value.BoolOrDie());
     } else if (cel_value.IsInt64()) {
