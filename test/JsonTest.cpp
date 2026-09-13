@@ -1879,3 +1879,63 @@ TEST(JsonTest, JsonSerdeWithAssociatedNameStrategyCaching) {
         verifyJsonDemoDatum(deserializer.deserialize(ser_ctx, bytes));
     }
 }
+
+
+/**
+ * The `message` binding inside a `CEL_FIELD` rule is the *containing object*, not the field
+ * under the rule - which is already bound as `value`. This walk passed the field's own value,
+ * so `message` was a second name for `value` and no sibling was reachable from a rule.
+ *
+ * The reference binds the containing message here too, converting a `JsonNode` to a map first.
+ */
+TEST(JsonTest, CelFieldMessageBindingIsTheContainingObject) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = SchemaRegistryClient::newClient(client_config);
+    auto ser_conf = SerializerConfig(
+        false, std::make_optional(SchemaSelector::useLatestVersion()), false, true, {});
+    std::string schema_str = R"(
+    {
+        "type": "object",
+        "properties": {
+            "intField": {"type": "integer"},
+            "stringField": {"type": "string", "confluent:tags": ["PII"]}
+        }
+    })";
+
+    // Writes what the rule produced into stringField, so the expression's result is readable.
+    auto run = [&](const std::string &subject, const std::string &expr) {
+        Rule rule;
+        rule.setName(std::make_optional<std::string>("r"));
+        rule.setKind(std::make_optional<Kind>(Kind::Transform));
+        rule.setMode(std::make_optional<Mode>(Mode::Write));
+        rule.setType(std::make_optional<std::string>("CEL_FIELD"));
+        rule.setExpr(std::make_optional<std::string>(expr));
+        RuleSet rule_set;
+        std::vector<Rule> domain_rules = {rule};
+        rule_set.setDomainRules(std::make_optional<std::vector<Rule>>(domain_rules));
+        Schema schema;
+        schema.setSchemaType(std::make_optional<std::string>("JSON"));
+        schema.setSchema(std::make_optional<std::string>(schema_str));
+        schema.setRuleSet(std::make_optional<RuleSet>(rule_set));
+        client->registerSchema(subject + "-value", schema, false);
+
+        nlohmann::json obj = nlohmann::json::parse(R"({"intField":123,"stringField":"hi"})");
+        auto reg = std::make_shared<RuleRegistry>();
+        reg->registerExecutor(std::make_shared<CelFieldExecutor>());
+        JsonSerializer serializer(client, std::nullopt, reg, ser_conf);
+        SerializationContext sc;
+        sc.topic = subject;
+        sc.serde_type = SerdeType::Value;
+        sc.serde_format = SerdeFormat::Json;
+        auto bytes = serializer.serialize(sc, obj);
+        auto deser_conf = DeserializerConfig::createDefault();
+        JsonDeserializer deserializer(client, reg, deser_conf);
+        return deserializer.deserialize(sc, bytes)["stringField"].get<std::string>();
+    };
+
+    EXPECT_EQ(run("jsonmsg1", "name == 'stringField' ; string(message.intField)"), "123")
+        << "a sibling field must be reachable from a field rule";
+    // The must-pass twin: `value` is still the field the rule is applied to.
+    EXPECT_EQ(run("jsonmsg2", "name == 'stringField' ; value + '!'"), "hi!");
+}

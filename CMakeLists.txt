@@ -74,20 +74,29 @@ find_package(OpenSSL CONFIG REQUIRED)
 find_package(cpr CONFIG REQUIRED)
 
 if (SCHEMAREGISTRY_WITH_AVRO)
-    # Fetch Apache Avro C++
-    find_package(unofficial-avro-cpp CONFIG QUIET)
-    if(NOT unofficial-avro-cpp_FOUND)
-    FetchContent_Declare(
-        unofficial-avro-cpp
-        GIT_REPOSITORY https://github.com/apache/avro.git
-        GIT_TAG        release-1.12.0
-        EXCLUDE_FROM_ALL
-        SOURCE_SUBDIR  lang/c++
-    )
-    # Disable Avro subproject tests to avoid registering them with ctest here
-    set(AVROCPP_BUILD_TESTS OFF CACHE BOOL "Build Avro C++ tests" FORCE)
-    set(AVRO_BUILD_TESTS OFF CACHE BOOL "Build Avro tests" FORCE)
-    FetchContent_MakeAvailable(unofficial-avro-cpp)
+    # Apache Avro C++. Newer vcpkg ports export avro-cpp::avrocpp; older ones
+    # used unofficial::avro-cpp::avrocpp. Building from source gives avrocpp_s.
+    find_package(avro-cpp CONFIG QUIET)
+    if(avro-cpp_FOUND)
+        set(SCHEMAREGISTRY_AVRO_TARGET avro-cpp::avrocpp)
+    else()
+        find_package(unofficial-avro-cpp CONFIG QUIET)
+        if(unofficial-avro-cpp_FOUND)
+            set(SCHEMAREGISTRY_AVRO_TARGET unofficial::avro-cpp::avrocpp)
+        else()
+            FetchContent_Declare(
+                unofficial-avro-cpp
+                GIT_REPOSITORY https://github.com/apache/avro.git
+                GIT_TAG        release-1.12.2
+                EXCLUDE_FROM_ALL
+                SOURCE_SUBDIR  lang/c++
+            )
+            # Disable Avro subproject tests to avoid registering them with ctest here
+            set(AVROCPP_BUILD_TESTS OFF CACHE BOOL "Build Avro C++ tests" FORCE)
+            set(AVRO_BUILD_TESTS OFF CACHE BOOL "Build Avro tests" FORCE)
+            FetchContent_MakeAvailable(unofficial-avro-cpp)
+            set(SCHEMAREGISTRY_AVRO_TARGET avrocpp_s)
+        endif()
     endif()
 endif()
 
@@ -140,9 +149,12 @@ if (SCHEMAREGISTRY_WITH_RULES)
     FetchContent_Declare(
         protovalidate_cc
         GIT_REPOSITORY https://github.com/bufbuild/protovalidate-cc.git
-        GIT_TAG        v1.1.0
+        GIT_TAG        v1.2.0
     )
     FetchContent_MakeAvailable(protovalidate_cc)
+
+    # mpdecimal (libmpdec++) backs the CEL Decimal functions.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mpdecimal.cmake)
 endif()
 
 if (SCHEMAREGISTRY_WITH_RULES)
@@ -201,6 +213,7 @@ target_sources(schemaregistry PRIVATE ${BASE_HEADERS} ${BASE_SOURCES})
 # Core serdes sources (always needed - base serialization framework)
 # Also include JsonValue as it is used for schema migration rules
 file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
+                              "include/schemaregistry/serdes/Variant.h"
                               "include/schemaregistry/serdes/SerdeConfig.h"
                               "include/schemaregistry/serdes/SerdeError.h"
                               "include/schemaregistry/serdes/SerdeTypes.h"
@@ -209,6 +222,7 @@ file(GLOB CORE_SERDES_HEADERS "include/schemaregistry/serdes/Serde.h"
                               "include/schemaregistry/serdes/WildcardMatcher.h"
                               "src/internal/schemaregistry/serdes/json/JsonValue.h")
 file(GLOB CORE_SERDES_SOURCES "src/serdes/Serde.cpp"
+                              "src/serdes/Variant.cpp"
                               "src/serdes/SerdeConfig.cpp"
                               "src/serdes/SerdeError.cpp"
                               "src/serdes/SerdeTypes.cpp"
@@ -253,6 +267,11 @@ endif()
 if(SCHEMAREGISTRY_WITH_RULES)
     file(GLOB_RECURSE RULES_HEADERS "include/schemaregistry/rules/*.h")
     file(GLOB_RECURSE RULES_SOURCES "src/rules/*.cpp")
+    if(NOT SCHEMAREGISTRY_WITH_AVRO)
+        # The Avro result writer needs avro/Generic.hh. Rules and Avro are independent
+        # features, so a rules-without-Avro build must not compile it.
+        list(FILTER RULES_SOURCES EXCLUDE REGEX "rules/cel/AvroResultWriter\\.cpp$")
+    endif()
     file(GLOB_RECURSE RULES_INTERNAL_HEADERS "src/internal/schemaregistry/rules/*.h")
     target_sources(schemaregistry PRIVATE ${RULES_HEADERS} ${RULES_SOURCES} ${RULES_INTERNAL_HEADERS})
 endif()
@@ -283,6 +302,13 @@ target_compile_options(schemaregistry
     PRIVATE
         $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:
             -Wall -Wno-unused-variable -Wno-unused-lambda-capture>
+    PUBLIC
+        # fmt static_asserts that its Unicode support needs /utf-8, and avro's headers pull fmt
+        # in. The flag used to arrive transitively through the avro-cpp port's interface options;
+        # it stopped once the vcpkg baseline moved, so set it here rather than rely on a
+        # dependency to supply a flag this build requires. PUBLIC because the installed headers
+        # include avro's, so a consumer compiles the same static_assert.
+        $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
 # Include directories
@@ -315,8 +341,12 @@ target_link_libraries(schemaregistry
 if(SCHEMAREGISTRY_WITH_AVRO)
     target_link_libraries(schemaregistry
         PUBLIC
-            $<BUILD_INTERFACE:unofficial::avro-cpp::avrocpp>
+            $<BUILD_INTERFACE:${SCHEMAREGISTRY_AVRO_TARGET}>
     )
+    # avro/Exception.hh reaches fmt::format through <fmt/core.h>, which fmt 12
+    # no longer pulls in without this opt-in. Public because our installed
+    # headers include avro's.
+    target_compile_definitions(schemaregistry PUBLIC FMT_DEPRECATED_HEAVY_CORE)
 endif()
 
 # Conditionally link JSON libraries
@@ -344,6 +374,9 @@ if(SCHEMAREGISTRY_WITH_RULES)
             $<BUILD_INTERFACE:cel_cpp_parser>
             $<BUILD_INTERFACE:cel_cpp_minimal_descriptor_set>
 
+            # mpdecimal (libmpdec++) for CEL Decimal functions
+            $<BUILD_INTERFACE:mpdecxx::mpdecxx>
+
             # JSON processing for rules
             $<BUILD_INTERFACE:jsonata>
 
@@ -367,6 +400,11 @@ if(SCHEMAREGISTRY_WITH_RULES)
             # HashiCorp Vault SDK for Vault KMS driver
             libvault::vault
     )
+
+    # The CEL is* validators call inet_pton, which on Windows lives in Ws2_32.lib.
+    if(WIN32)
+        target_link_libraries(schemaregistry PRIVATE ws2_32)
+    endif()
 endif()
 
 # Add conditional compile definitions for C++ feature detection
