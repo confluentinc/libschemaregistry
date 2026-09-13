@@ -476,6 +476,32 @@ ProtobufVariant getMessageFieldValue(
 /// `string` and `bytes` share CPPTYPE_STRING and both go through SetString, so either variant
 /// is accepted for either: that is what the existing walk does, and narrowing it would break
 /// an encryption rule on a string field.
+/// Copies a message across descriptor pools.
+///
+/// A registry schema is parsed into its own `DescriptorPool`, so a field's message type and the
+/// generated one a CEL rule produces share a full name and differ in address - and `CopyFrom`
+/// CHECK-fails on that, **aborting the process**: "Tried to copy from a message with a different
+/// type. to: confluent.type.Decimal, from: confluent.type.Decimal". The wire format is the only
+/// thing the two agree on, which is the same round trip `decimalToAvro` already does.
+void copyMessageAcrossPools(google::protobuf::Message& dest,
+                            const google::protobuf::Message& src) {
+    const auto* dest_desc = dest.GetDescriptor();
+    const auto* src_desc = src.GetDescriptor();
+    if (dest_desc == src_desc) {
+        dest.CopyFrom(src);
+        return;
+    }
+    if (dest_desc->full_name() != src_desc->full_name()) {
+        throw std::runtime_error("cannot write " + std::string(src_desc->full_name()) +
+                                 " to a field of type " +
+                                 std::string(dest_desc->full_name()));
+    }
+    if (!dest.ParseFromString(src.SerializeAsString())) {
+        throw std::runtime_error("cannot read " + std::string(src_desc->full_name()) +
+                                 " returned by a CEL rule");
+    }
+}
+
 bool acceptsVariant(const google::protobuf::FieldDescriptor* fd,
                     const ProtobufVariant& value) {
     using VT = ProtobufVariant::ValueType;
@@ -525,8 +551,10 @@ bool acceptsVariant(const google::protobuf::FieldDescriptor* fd,
             }
             const auto& nested =
                 std::get<std::unique_ptr<google::protobuf::Message>>(value.value);
+            // By name, not by address: see copyMessageAcrossPools.
             return nested == nullptr ||
-                   nested->GetDescriptor() == fd->message_type();
+                   nested->GetDescriptor()->full_name() ==
+                       fd->message_type()->full_name();
         }
         default:
             return false;
@@ -606,7 +634,7 @@ void setMessageField(google::protobuf::Message* message,
             if (v) {
                 google::protobuf::Message* mutable_msg =
                     reflection->MutableMessage(message, fd);
-                mutable_msg->CopyFrom(*v);
+                copyMessageAcrossPools(*mutable_msg, *v);
             }
             break;
         }
@@ -698,7 +726,8 @@ void setMessageField(google::protobuf::Message* message,
                             if (msg_ptr) {
                                 // Per element, for the reason given in acceptsVariant: the
                                 // top-level guard sees the list, not its items.
-                                if (msg_ptr->GetDescriptor() != fd->message_type()) {
+                                if (msg_ptr->GetDescriptor()->full_name() !=
+                                    fd->message_type()->full_name()) {
                                     throw std::runtime_error(
                                         "a rule returned " +
                                         std::string(msg_ptr->GetDescriptor()->full_name()) +
@@ -708,7 +737,7 @@ void setMessageField(google::protobuf::Message* message,
                                 }
                                 google::protobuf::Message* added_msg =
                                     reflection->AddMessage(message, fd);
-                                added_msg->CopyFrom(*msg_ptr);
+                                copyMessageAcrossPools(*added_msg, *msg_ptr);
                             }
                         }
                         break;
@@ -833,8 +862,8 @@ void setMessageField(google::protobuf::Message* message,
                             map_value.value);
                         if (msg_ptr) {
                             // Per value, for the reason given in acceptsVariant.
-                            if (msg_ptr->GetDescriptor() !=
-                                value_field->message_type()) {
+                            if (msg_ptr->GetDescriptor()->full_name() !=
+                                value_field->message_type()->full_name()) {
                                 throw std::runtime_error(
                                     "a rule returned " +
                                     std::string(
@@ -848,7 +877,7 @@ void setMessageField(google::protobuf::Message* message,
                             google::protobuf::Message* mutable_value_msg =
                                 entry_reflection->MutableMessage(entry_msg,
                                                                  value_field);
-                            mutable_value_msg->CopyFrom(*msg_ptr);
+                            copyMessageAcrossPools(*mutable_value_msg, *msg_ptr);
                         }
                         break;
                     }

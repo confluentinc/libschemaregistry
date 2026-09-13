@@ -41,6 +41,17 @@ using schemaregistry::serdes::protobuf::ProtobufVariant;
 bool isCelLeafMessage(const google::protobuf::Descriptor *desc);
 
 /**
+ * Copy a message whose descriptor may come from a different DescriptorPool.
+ * A registry schema is parsed into its own pool, so a field's message type and the generated
+ * one a CEL rule produces share a full name and differ in address - and CopyFrom CHECK-fails on
+ * that, aborting the process. Falls back to the wire format, which the two do agree on.
+ * @param dest Destination message, allocated from the field's own pool
+ * @param src Message to copy from
+ */
+void copyMessageAcrossPools(google::protobuf::Message &dest,
+                            const google::protobuf::Message &src);
+
+/**
  * Transform protobuf fields using field execution context (synchronous version)
  * Ported from Rust async implementation
  */

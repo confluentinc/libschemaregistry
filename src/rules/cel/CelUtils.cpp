@@ -31,6 +31,7 @@ void result_bytes_for_fixed(std::vector<uint8_t> &bytes, size_t fixed_size) {
 #include "absl/time/time.h"
 #include "confluent/type/decimal.pb.h"
 #include "schemaregistry/rules/cel/DecimalUtil.h"
+#include "schemaregistry/serdes/protobuf/ProtobufUtils.h"
 #include "confluent/type/variant.pb.h"
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "eval/public/containers/container_backed_map_impl.h"
@@ -805,8 +806,11 @@ schemaregistry::serdes::protobuf::ProtobufVariant toProtobufValue(
                     throw std::runtime_error("cannot write " + source +
                                              " to a field of type " + target);
                 }
+                // Across pools: the field's message type comes from the registry schema's
+                // own DescriptorPool and the rule's from the generated one, so CopyFrom would
+                // CHECK-fail on two descriptors with the same name.
                 auto out = std::unique_ptr<google::protobuf::Message>(orig->New());
-                out->CopyFrom(*src);
+                ::schemaregistry::serdes::protobuf::utils::copyMessageAcrossPools(*out, *src);
                 return ProtobufVariant(std::move(out));
             }
             if (cel_value.IsTimestamp()) {

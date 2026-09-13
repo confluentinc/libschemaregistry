@@ -379,6 +379,60 @@ parity::ParityPlain runFieldRule(const std::string &expr, Kind kind, const std::
 
 }  // namespace
 
+/// A rule's value-type result reaches a field whose descriptor came from a *different pool*.
+///
+/// A registry schema is parsed into its own `DescriptorPool`, so `confluent.type.Decimal` there
+/// and the generated one a CEL rule produces share a full name and differ in address. `CopyFrom`
+/// CHECK-fails on that and **aborts the process**: "Tried to copy from a message with a different
+/// type. to: confluent.type.Decimal, from: confluent.type.Decimal". Every fixture built its
+/// descriptor from the generated pool, where the two are the same pointer.
+TEST(CelProtobufFieldValueTypes, AValueTypeReachesAFieldFromAnotherDescriptorPool) {
+    static google::protobuf::DescriptorPool pool;
+    std::function<void(const google::protobuf::FileDescriptor *)> add =
+        [&](const google::protobuf::FileDescriptor *f) {
+            for (int i = 0; i < f->dependency_count(); i++) add(f->dependency(i));
+            if (pool.FindFileByName(f->name()) != nullptr) return;
+            google::protobuf::FileDescriptorProto fdp;
+            f->CopyTo(&fdp);
+            pool.BuildFile(fdp);
+        };
+    add(parity::ParityPlain::descriptor()->file());
+    const auto *dyn_desc = pool.FindMessageTypeByName("parity.ParityPlain");
+    ASSERT_NE(dyn_desc, nullptr);
+    ASSERT_NE(dyn_desc, parity::ParityPlain::descriptor()) << "the pools have to differ";
+
+    static google::protobuf::DynamicMessageFactory factory(&pool);
+    std::unique_ptr<google::protobuf::Message> dyn(factory.GetPrototype(dyn_desc)->New());
+    ASSERT_TRUE(dyn->ParseFromString(parityMessage()->SerializeAsString()));
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr("decimals.add(decimal(value), decimal('1.00'))");
+    rule.setTags(std::vector<std::string>{"AMOUNT"});
+    SerializationContext serCtx{"t", SerdeType::Value, SerdeFormat::Protobuf, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    RuleContext ctx(std::nullopt, serCtx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules,
+                    std::unordered_map<std::string, std::unordered_set<std::string>>{},
+                    nullptr, registry);
+
+    auto input = makeProtobufValue(ProtobufVariant(std::move(dyn)));
+    auto result =
+        ::schemaregistry::serdes::protobuf::utils::transformFields(ctx, dyn_desc, *input);
+
+    auto &pv = asProtobuf(*result);
+    const auto &out = std::get<std::unique_ptr<google::protobuf::Message>>(pv.value);
+    parity::ParityPlain copy;
+    ASSERT_TRUE(copy.ParseFromString(out->SerializeAsString()));
+    // 12.34 + 1.00 = 13.34, unscaled 1334.
+    EXPECT_EQ(copy.amount().value(), std::string("\x05\x36", 2));
+}
+
 /// The declared type is what makes CEL_FIELD apply at all: a Record is skipped outright.
 TEST(CelProtobufFieldValueTypes, FieldTypesMatchAvro) {
     const auto *desc = parity::ParityPlain::descriptor();
