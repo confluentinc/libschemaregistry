@@ -1170,6 +1170,54 @@ const char *kZzMapSchema = R"({
 }
 }  // namespace
 
+/// A field rule reaches inside a record that arrives through a *named reference*.
+///
+/// A named type used a second time parses as a symbolic link, and building a `ValidSchema` from
+/// one throws "Symbolic name Inner is unknown" - so a schema that reuses a record did not merely
+/// skip the second use, it failed every rule over the whole record. `GenericDatum` follows the
+/// link when it is constructed, so the datum already carries the node the walk needs.
+TEST(CelAvroFieldLevel, AFieldRuleReachesInsideAReferencedRecord) {
+    const char *schema_json = R"({"type":"record","name":"Outer","fields":[
+        {"name":"inline","type":{"type":"record","name":"Inner","fields":[
+            {"name":"s","type":"string","confluent:tags":["S"]}]}},
+        {"name":"referenced","type":"Inner"},
+        {"name":"plain","type":"string"}]})";
+    ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(schema_json);
+    ASSERT_EQ(schema.root()->leafAt(1)->type(), ::avro::AVRO_SYMBOLIC);
+
+    ::avro::GenericDatum datum(schema);
+    auto &record = datum.value<::avro::GenericRecord>();
+    record.fieldAt(0).value<::avro::GenericRecord>().fieldAt(0).value<std::string>() = "a";
+    record.fieldAt(1).value<::avro::GenericRecord>().fieldAt(0).value<std::string>() = "b";
+    record.fieldAt(2).value<std::string>() = "c";
+
+    Rule rule;
+    rule.setName("r");
+    rule.setType("CEL_FIELD");
+    rule.setKind(Kind::Transform);
+    rule.setMode(Mode::Write);
+    rule.setExpr("value + '!'");
+    rule.setTags(std::vector<std::string>{"S"});
+    SerializationContext ser_ctx{"t", SerdeType::Value, SerdeFormat::Avro, std::nullopt};
+    std::vector<Rule> rules{rule};
+    auto registry = std::make_shared<RuleRegistry>();
+    registry->registerExecutor(std::make_shared<CelFieldExecutor>());
+    std::unordered_map<std::string, std::unordered_set<std::string>> inline_tags{
+        {"Inner.s", {"S"}}};
+    RuleContext ctx(std::nullopt, ser_ctx, std::nullopt, std::nullopt, "t-value",
+                    Mode::Write, rule, 0, rules, inline_tags, nullptr, registry);
+
+    auto out = schemaregistry::serdes::avro::utils::transformFields(ctx, schema, datum);
+
+    const auto &result = out.value<::avro::GenericRecord>();
+    // The inline use is the control: it was already working before the fix.
+    EXPECT_EQ(result.field("inline").value<::avro::GenericRecord>().field("s").value<std::string>(),
+              "a!");
+    EXPECT_EQ(
+        result.field("referenced").value<::avro::GenericRecord>().field("s").value<std::string>(),
+        "b!");
+}
+
 /// The same leaf mix-up in the JSON bridge, which a migration rule's result comes back through.
 TEST(CelAvroFieldLevel, JsonToAvroBuildsMapValuesFromTheValueSchema) {
     ::avro::ValidSchema schema = AvroSerializer::compileJsonSchema(

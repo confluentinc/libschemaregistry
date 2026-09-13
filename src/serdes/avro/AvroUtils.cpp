@@ -13,6 +13,32 @@ namespace schemaregistry::serdes::avro {
 
 namespace utils {
 
+namespace {
+
+/// A named type used a second time parses as a symbolic link rather than the node itself, and a
+/// `ValidSchema` cannot be built from one - it throws "Symbolic name X is unknown", so every
+/// rule over a schema that reuses a named type failed. `GenericDatum` follows the link when it
+/// is constructed, so the datum in hand already carries the real node; only a named type can be
+/// symbolic, and all three named kinds are containers that keep their schema.
+::avro::NodePtr resolveNode(const ::avro::NodePtr &node,
+                            const ::avro::GenericDatum &datum) {
+    if (node->type() != ::avro::AVRO_SYMBOLIC) {
+        return node;
+    }
+    switch (datum.type()) {
+        case ::avro::AVRO_RECORD:
+            return datum.value<::avro::GenericRecord>().schema();
+        case ::avro::AVRO_ENUM:
+            return datum.value<::avro::GenericEnum>().schema();
+        case ::avro::AVRO_FIXED:
+            return datum.value<::avro::GenericFixed>().schema();
+        default:
+            return node;
+    }
+}
+
+}  // namespace
+
 ::avro::GenericDatum transformFields(RuleContext &ctx,
                                      const ::avro::ValidSchema &schema,
                                      const ::avro::GenericDatum &datum) {
@@ -23,7 +49,8 @@ namespace utils {
 
             for (size_t i = 0; i < record.fieldCount(); ++i) {
                 auto field_datum = record.fieldAt(i);
-                auto field_schema_node = schema.root()->leafAt(i);
+                auto field_schema_node =
+                    resolveNode(schema.root()->leafAt(i), field_datum);
                 ::avro::ValidSchema field_schema(field_schema_node);
                 const std::string &field_name = schema.root()->nameAt(i);
 
@@ -43,7 +70,9 @@ namespace utils {
             auto array = datum.value<::avro::GenericArray>();
             ::avro::GenericDatum result_datum(schema);
             auto &result = result_datum.value<::avro::GenericArray>();
-            auto item_schema_node = schema.root()->leafAt(0);
+            auto item_schema_node = array.value().empty()
+                                        ? schema.root()->leafAt(0)
+                                        : resolveNode(schema.root()->leafAt(0), array.value()[0]);
             ::avro::ValidSchema item_schema(item_schema_node);
             // An element's slot is its own schema, not the array's.
             ctx.setCurrentFieldDescriptor(item_schema_node);
@@ -65,7 +94,10 @@ namespace utils {
             // leaf 1, unlike an array, whose single leaf is the element. Reading leaf 0 here
             // handed every map value the *key's* string schema, so the walk stopped at a value
             // that was a record, array or map and never reached what was tagged inside it.
-            auto value_schema_node = schema.root()->leafAt(1);
+            auto value_schema_node =
+                map.value().empty()
+                    ? schema.root()->leafAt(1)
+                    : resolveNode(schema.root()->leafAt(1), map.value()[0].second);
             // A value's slot is its own schema, not the map's.
             ctx.setCurrentFieldDescriptor(value_schema_node);
             for (const auto &[key, value] : map.value()) {
