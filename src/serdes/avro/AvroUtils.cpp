@@ -13,42 +13,94 @@ namespace schemaregistry::serdes::avro {
 
 namespace utils {
 
+/// A named type used a second time parses as a symbolic link rather than the node itself, and a
+/// `ValidSchema` cannot be built from one - it throws "Symbolic name X is unknown", so every rule
+/// over a schema that reuses a named type failed. `GenericDatum` follows the link when it is
+/// constructed, which is the only route to the node it points at that does not pull in
+/// `NodeImpl.hh` (whose `Exception` template leaves the build with an undefined `fmt::vformat`).
+/// Only a named type can be symbolic, and all three named kinds keep their schema.
+::avro::NodePtr resolveNode(const ::avro::NodePtr &node) {
+    if (node->type() != ::avro::AVRO_SYMBOLIC) {
+        return node;
+    }
+    ::avro::GenericDatum probe(node);
+    switch (probe.type()) {
+        case ::avro::AVRO_RECORD:
+            return probe.value<::avro::GenericRecord>().schema();
+        case ::avro::AVRO_ENUM:
+            return probe.value<::avro::GenericEnum>().schema();
+        case ::avro::AVRO_FIXED:
+            return probe.value<::avro::GenericFixed>().schema();
+        default:
+            return node;
+    }
+}
+
+/// The walk carries nodes, not `ValidSchema`s.
+///
+/// Building one for a sub-node validates that subtree on its own, and a symbolic link to a name
+/// declared *elsewhere* in the schema is unknown there - so `["null", "Inner"]`, an array or a
+/// map of a reused named type threw "Symbolic name Inner is unknown" before any rule ran, and an
+/// identity transform failed with it. Resolving the node does not help: the link is a descendant
+/// of the node being validated, not the node itself. Nothing in the walk needs a `ValidSchema`.
+::avro::GenericDatum transformNode(RuleContext &ctx, const ::avro::NodePtr &node,
+                                   const ::avro::GenericDatum &datum);
+
+::avro::GenericDatum transformFieldWithNode(RuleContext &ctx,
+                                            const ::avro::NodePtr &record_node,
+                                            const ::avro::GenericDatum &record_datum,
+                                            const std::string &field_name,
+                                            const ::avro::GenericDatum &field_datum,
+                                            const ::avro::NodePtr &field_node);
+
+/// resolveUnion against a node, so the branch comes back as one too.
+std::pair<size_t, ::avro::NodePtr> resolveUnionNode(const ::avro::NodePtr &root,
+                                                    const ::avro::GenericDatum &datum);
+
+FieldType nodeToFieldType(const ::avro::NodePtr &node);
+
 ::avro::GenericDatum transformFields(RuleContext &ctx,
                                      const ::avro::ValidSchema &schema,
                                      const ::avro::GenericDatum &datum) {
-    switch (schema.root()->type()) {
+    return transformNode(ctx, schema.root(), datum);
+}
+
+::avro::GenericDatum transformNode(RuleContext &ctx, const ::avro::NodePtr &node,
+                                   const ::avro::GenericDatum &datum) {
+    const ::avro::NodePtr schema_root = resolveNode(node);
+    switch (schema_root->type()) {
         case ::avro::AVRO_RECORD: {
             auto record = datum.value<::avro::GenericRecord>();
-            ::avro::GenericRecord result(schema.root());
+            ::avro::GenericRecord result(schema_root);
 
             for (size_t i = 0; i < record.fieldCount(); ++i) {
                 auto field_datum = record.fieldAt(i);
-                auto field_schema_node = schema.root()->leafAt(i);
-                ::avro::ValidSchema field_schema(field_schema_node);
-                const std::string &field_name = schema.root()->nameAt(i);
+                auto field_schema_node = resolveNode(schema_root->leafAt(i));
+                const std::string &field_name = schema_root->nameAt(i);
 
-                auto transformed_field = transformFieldWithContext(
-                    ctx, schema, field_name, field_datum, field_schema);
+                auto transformed_field = transformFieldWithNode(
+                    ctx, schema_root, datum, field_name, field_datum, field_schema_node);
                 result.setFieldAt(i, transformed_field);
             }
 
             // Create a new GenericDatum with the schema and set the record
             // value
-            ::avro::GenericDatum result_datum(schema);
+            ::avro::GenericDatum result_datum(schema_root);
             result_datum.value<::avro::GenericRecord>() = result;
             return result_datum;
         }
 
         case ::avro::AVRO_ARRAY: {
             auto array = datum.value<::avro::GenericArray>();
-            ::avro::GenericDatum result_datum(schema);
+            ::avro::GenericDatum result_datum(schema_root);
             auto &result = result_datum.value<::avro::GenericArray>();
-            auto item_schema_node = schema.root()->leafAt(0);
-            ::avro::ValidSchema item_schema(item_schema_node);
+            auto item_schema_node = resolveNode(schema_root->leafAt(0));
+            // An element's slot is its own schema, not the array's.
+            ctx.setCurrentFieldDescriptor(item_schema_node);
 
             for (size_t i = 0; i < array.value().size(); ++i) {
                 auto transformed =
-                    transformFields(ctx, item_schema, array.value()[i]);
+                    transformNode(ctx, item_schema_node, array.value()[i]);
                 result.value().push_back(transformed);
             }
 
@@ -57,19 +109,25 @@ namespace utils {
 
         case ::avro::AVRO_MAP: {
             auto map = datum.value<::avro::GenericMap>();
-            ::avro::GenericDatum result_datum(schema);
+            ::avro::GenericDatum result_datum(schema_root);
             auto &result = result_datum.value<::avro::GenericMap>();
+            // avro-cpp keeps a map's implicit string key at leaf 0 and the value type at
+            // leaf 1, unlike an array, whose single leaf is the element. Reading leaf 0 here
+            // handed every map value the *key's* string schema, so the walk stopped at a value
+            // that was a record, array or map and never reached what was tagged inside it.
+            auto value_schema_node = resolveNode(schema_root->leafAt(1));
+            // A value's slot is its own schema, not the map's.
+            ctx.setCurrentFieldDescriptor(value_schema_node);
             for (const auto &[key, value] : map.value()) {
-                auto value_schema_node = schema.root()->leafAt(0);
-                ::avro::ValidSchema value_schema(value_schema_node);
-                auto transformed = transformFields(ctx, value_schema, value);
+                auto transformed = transformNode(ctx, value_schema_node, value);
                 result.value().emplace_back(key, transformed);
             }
             return result_datum;
         }
 
         case ::avro::AVRO_UNION: {
-            auto [branch_idx, branch_schema] = resolveUnion(schema, datum);
+            auto [branch_idx, branch_node] = resolveUnionNode(schema_root, datum);
+            (void)branch_idx;
 
             // GenericDatum resolves a union on the way in: type() reports the
             // branch's type and value<T>() reaches the branch's value, so the
@@ -77,16 +135,27 @@ namespace utils {
             // its GenericUnion instead casts the *branch's* value to
             // GenericUnion, which any_cast rejects, leaving a null to
             // dereference.
-            auto transformed = transformFields(ctx, branch_schema, datum);
+            auto transformed = transformNode(ctx, branch_node, datum);
+
+            if (transformed.isUnion()) {
+                // The leaf resolved the branch itself, against the field's schema.
+                return transformed;
+            }
+
+            // Which branch the result belongs to follows from the value, not from the one it
+            // arrived on: a rule that fills or clears a null branch moves it. The reference
+            // resolves every branch from the datum the same way.
+            auto [result_branch, result_node] = resolveUnionNode(schema_root, transformed);
+            (void)result_node;
 
             // The union has to be rebuilt through GenericUnion rather than
             // through the datum, for the same reason: a GenericDatum holding a
             // union will not hand its GenericUnion back. This constructor
             // assigns into the value directly, without that resolution step.
-            ::avro::GenericUnion result(schema.root());
-            result.selectBranch(branch_idx);
+            ::avro::GenericUnion result(schema_root);
+            result.selectBranch(result_branch);
             result.datum() = transformed;
-            return ::avro::GenericDatum(schema.root(), result);
+            return ::avro::GenericDatum(schema_root, result);
         }
 
         default: {
@@ -97,7 +166,7 @@ namespace utils {
                 // which for a union field is only Combined. Narrow it to the
                 // type of the branch the value holds, so that a rule on, say, a
                 // ["null","string"] field sees a string.
-                ctx.setCurrentFieldType(avroSchemaToFieldType(schema));
+                ctx.setCurrentFieldType(nodeToFieldType(schema_root));
 
                 auto rule_tags = ctx.getRule().getTags();
                 std::unordered_set<std::string> rule_tags_set;
@@ -167,25 +236,42 @@ namespace utils {
 // Transform individual field with context handling
 ::avro::GenericDatum transformFieldWithContext(
     RuleContext &ctx, const ::avro::ValidSchema &record_schema,
-    const std::string &field_name, const ::avro::GenericDatum &field_datum,
+    const ::avro::GenericDatum &record_datum, const std::string &field_name,
+    const ::avro::GenericDatum &field_datum,
     const ::avro::ValidSchema &field_schema) {
+    return transformFieldWithNode(ctx, record_schema.root(), record_datum, field_name,
+                                  field_datum, field_schema.root());
+}
+
+::avro::GenericDatum transformFieldWithNode(RuleContext &ctx,
+                                            const ::avro::NodePtr &record_node,
+                                            const ::avro::GenericDatum &record_datum,
+                                            const std::string &field_name,
+                                            const ::avro::GenericDatum &field_datum,
+                                            const ::avro::NodePtr &field_node) {
     // Get field type from schema
-    FieldType field_type = avroSchemaToFieldType(field_schema);
+    FieldType field_type = nodeToFieldType(field_node);
 
     // Create full field name
-    std::string schema_name = getSchemaName(record_schema).value_or("unknown");
+    std::string schema_name = record_node->type() == ::avro::AVRO_RECORD
+                                  ? record_node->name().fullname()
+                                  : "unknown";
     std::string full_name = schema_name + "." + field_name;
 
-    // Create message value from current field datum
-    auto message_value = makeAvroValue(field_datum);
+    // `message` is the *containing record*, as the reference binds it - the field itself is
+    // already bound as `value`. Passing the field datum here made `message` a second name for
+    // `value`, so `message.<other>` could not be reached at all.
+    auto message_value = makeAvroValue(record_datum);
 
     // Enter field context
-    ctx.enterField(*message_value, full_name, field_name, field_type, {});
+    // The field's declared schema, which the CEL_FIELD write-back resolves a union branch
+    // against. A null branch's datum carries no type, so the datum alone cannot say what the
+    // field can hold.
+    ctx.enterField(*message_value, full_name, field_name, field_type, {}, field_node);
 
     try {
         // Transform the field value (synchronous call)
-        ::avro::GenericDatum new_value =
-            transformFields(ctx, field_schema, field_datum);
+        ::avro::GenericDatum new_value = transformNode(ctx, field_node, field_datum);
 
         // Check for condition rules
         auto rule_kind = ctx.getRule().getKind();
@@ -209,7 +295,11 @@ namespace utils {
 }
 
 FieldType avroSchemaToFieldType(const ::avro::ValidSchema &schema) {
-    switch (schema.root()->type()) {
+    return nodeToFieldType(schema.root());
+}
+
+FieldType nodeToFieldType(const ::avro::NodePtr &node) {
+    switch (resolveNode(node)->type()) {
         case ::avro::AVRO_NULL:
             return FieldType::Null;
         case ::avro::AVRO_BOOL:
@@ -416,7 +506,8 @@ nlohmann::json avroToJson(const ::avro::GenericDatum &datum) {
             }
             ::avro::GenericDatum datum(schema);
             auto &map = datum.value<::avro::GenericMap>();
-            auto value_schema = schema.root()->leafAt(0);
+            // Leaf 1, not 0: leaf 0 is the map's implicit string key. See the walk above.
+            auto value_schema = schema.root()->leafAt(1);
             ::avro::ValidSchema value_valid_schema(value_schema);
 
             for (const auto &[key, value] : json_value.items()) {
@@ -484,7 +575,12 @@ std::optional<std::string> datumTypeName(const ::avro::GenericDatum &datum) {
 std::pair<size_t, ::avro::ValidSchema> resolveUnion(
     const ::avro::ValidSchema &union_schema,
     const ::avro::GenericDatum &datum) {
-    const auto &root = union_schema.root();
+    auto [branch, node] = resolveUnionNode(union_schema.root(), datum);
+    return {branch, ::avro::ValidSchema(node)};
+}
+
+std::pair<size_t, ::avro::NodePtr> resolveUnionNode(
+    const ::avro::NodePtr &root, const ::avro::GenericDatum &datum) {
     if (root->type() != ::avro::AVRO_UNION) {
         throw AvroError("Schema is not a union type");
     }
@@ -496,14 +592,14 @@ std::pair<size_t, ::avro::ValidSchema> resolveUnion(
     // the first record in the union whichever one the datum holds.
     if (datum.isUnion() && datum.unionBranch() < root->leaves()) {
         size_t branch = datum.unionBranch();
-        return {branch, ::avro::ValidSchema(root->leafAt(branch))};
+        return {branch, resolveNode(root->leafAt(branch))};
     }
 
     // A datum handed in without its union wrapper has to be matched on what it
     // does carry: its type, and its name where it has one.
     auto datum_name = datumTypeName(datum);
     for (size_t i = 0; i < root->leaves(); ++i) {
-        const auto &branch_schema = root->leafAt(i);
+        const ::avro::NodePtr branch_schema = resolveNode(root->leafAt(i));
         if (branch_schema->type() != datum.type()) {
             continue;
         }
@@ -511,7 +607,7 @@ std::pair<size_t, ::avro::ValidSchema> resolveUnion(
             branch_schema->name().fullname() != *datum_name) {
             continue;
         }
-        return {i, ::avro::ValidSchema(branch_schema)};
+        return {i, branch_schema};
     }
 
     throw AvroError("No matching union branch found for datum type");

@@ -1,7 +1,9 @@
 #include <nlohmann/json.hpp>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "schemaregistry/serdes/ValidationRule.h"
@@ -22,6 +24,13 @@ struct Walker {
         std::string,
         std::shared_ptr<jsoncons::jsonschema::json_schema<jsoncons::ojson>>>
         matcher_cache;
+    /// (schema, value) locations currently on the walk stack, used to break
+    /// reference cycles. A "$ref" chain that resolves back to a location already
+    /// being walked (directly, or through allOf/oneOf/anyOf) makes no progress and
+    /// would recurse until the stack overflows. A genuinely recursive schema — a
+    /// tree node whose schema references itself for its children — is unaffected,
+    /// since each level walks a different value node, so the pair differs.
+    std::set<std::pair<const nlohmann::json *, const nlohmann::json *>> active;
 
     bool done() const { return fail_fast && !violations.empty(); }
 
@@ -236,6 +245,19 @@ void Walker::walk(const nlohmann::json &schema, const nlohmann::json &value,
     if (!schema.is_object()) {
         return;
     }
+
+    // Break reference cycles: if this (schema, value) location is already being
+    // walked higher on the stack, following it again cannot consume any value and
+    // would recurse until the stack overflows.
+    auto location = std::make_pair(&schema, &value);
+    if (!active.insert(location).second) {
+        return;
+    }
+    struct ActiveGuard {
+        std::set<std::pair<const nlohmann::json *, const nlohmann::json *>> &set;
+        std::pair<const nlohmann::json *, const nlohmann::json *> key;
+        ~ActiveGuard() { set.erase(key); }
+    } active_guard{active, location};
 
     // Rules declared at this level: `this` is the value at this location. This runs before
     // the reference is followed, because a node carrying both "$ref" and "confluent:rules"

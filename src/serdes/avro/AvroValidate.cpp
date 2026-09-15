@@ -67,15 +67,20 @@ struct Walker {
             return &schema;
         }
         std::string name = schema.get<std::string>();
+        // Avro resolves an unqualified name against the enclosing namespace first,
+        // and only a dotted name is already fully qualified. Try the namespace-
+        // qualified name before the bare/global one so that, with both a global
+        // Address and a foo.Address defined, a reference to "Address" inside
+        // namespace foo picks foo.Address.
+        if (!ns.empty() && name.find('.') == std::string::npos) {
+            auto qualified = named.find(ns + "." + name);
+            if (qualified != named.end()) {
+                return qualified->second;
+            }
+        }
         auto it = named.find(name);
         if (it != named.end()) {
             return it->second;
-        }
-        if (!ns.empty()) {
-            it = named.find(ns + "." + name);
-            if (it != named.end()) {
-                return it->second;
-            }
         }
         return nullptr;
     }
