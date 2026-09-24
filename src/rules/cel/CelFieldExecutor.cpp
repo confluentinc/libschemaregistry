@@ -3,7 +3,6 @@
 #include "eval/public/containers/container_backed_list_impl.h"
 #include "schemaregistry/rules/cel/CelExecutorImpl.h"
 #include "schemaregistry/serdes/RuleRegistry.h"
-#include "schemaregistry/serdes/avro/AvroTypes.h"
 #include "schemaregistry/serdes/json/JsonTypes.h"
 #include "schemaregistry/serdes/protobuf/ProtobufTypes.h"
 

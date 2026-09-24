@@ -94,7 +94,7 @@ inline std::string ProtobufDeserializer<T>::getRecordName(
     auto [file_desc, pool] =
         serde_->getParsedSchema(*schema, base_->getSerde().getClient());
     if (file_desc && file_desc->message_type_count() > 0) {
-        return file_desc->message_type(0)->full_name();
+        return std::string(file_desc->message_type(0)->full_name());
     }
     throw ProtobufError("Could not determine record name from schema");
 }
@@ -122,7 +122,7 @@ ProtobufDeserializer<T>::createMessageFromDescriptor(
     const auto *prototype = factory.GetPrototype(descriptor);
     if (!prototype) {
         throw ProtobufError("Failed to get message prototype for descriptor: " +
-                            descriptor->full_name());
+                            std::string(descriptor->full_name()));
     }
     return std::unique_ptr<google::protobuf::Message>(prototype->New());
 }

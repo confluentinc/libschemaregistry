@@ -324,7 +324,8 @@ void Walker::walkMessage(const google::protobuf::Descriptor *schema_descriptor,
         }
         // The path names the field as the registered schema does, which is what a
         // rule refers to; the value is still read through the caller's field.
-        std::string field_path = appendValidationPath(path, schema_field->name());
+        std::string field_path =
+            appendValidationPath(path, std::string(schema_field->name()));
         // Where a schema view exists, values come from it, read through the
         // schema's own field.
         const google::protobuf::Message *value_owner =
@@ -587,7 +588,7 @@ std::vector<ValidationRuleError> validateMessage(
         // reporting no violations and writing the record anyway, and name the
         // type so it is searchable.
         throw ProtobufError("Could not read message " +
-                            schema_descriptor->full_name() +
+                            std::string(schema_descriptor->full_name()) +
                             " through the registered schema");
     }
     walker.walkMessage(schema_descriptor, message, schema_message.get(), "");

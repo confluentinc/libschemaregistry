@@ -274,12 +274,18 @@ void SerdeHeaders::remove(const std::string &key) {
 FieldContext::FieldContext(const SerdeValue &containing_message,
                            const std::string &full_name,
                            const std::string &name, FieldType field_type,
-                           const std::unordered_set<std::string> &tags)
+                           const std::unordered_set<std::string> &tags,
+                           const std::any &field_descriptor)
     : containing_message_(containing_message),
       full_name_(full_name),
       name_(name),
       field_type_(field_type),
-      tags_(tags) {}
+      tags_(tags),
+      field_descriptor_(field_descriptor) {}
+
+void FieldContext::setFieldDescriptor(const std::any &field_descriptor) {
+    field_descriptor_ = field_descriptor;
+}
 
 FieldType FieldContext::getFieldType() const {
     std::lock_guard<std::mutex> lock(field_type_mutex_);
@@ -407,7 +413,7 @@ std::optional<FieldContext> RuleContext::currentField() const {
     const auto &back = *field_contexts_.back();
     return std::make_optional<FieldContext>(
         back.getContainingMessage(), back.getFullName(), back.getName(),
-        back.getFieldType(), back.getTags());
+        back.getFieldType(), back.getTags(), back.getFieldDescriptor());
 }
 
 void RuleContext::setCurrentFieldType(FieldType field_type) {
@@ -417,10 +423,18 @@ void RuleContext::setCurrentFieldType(FieldType field_type) {
     field_contexts_.back()->setFieldType(field_type);
 }
 
+void RuleContext::setCurrentFieldDescriptor(const std::any &field_descriptor) {
+    if (field_contexts_.empty()) {
+        return;
+    }
+    field_contexts_.back()->setFieldDescriptor(field_descriptor);
+}
+
 void RuleContext::enterField(const SerdeValue &containing_message,
                              const std::string &full_name,
                              const std::string &name, FieldType field_type,
-                             const std::unordered_set<std::string> &tags) {
+                             const std::unordered_set<std::string> &tags,
+                             const std::any &field_descriptor) {
     std::unordered_set<std::string> all_tags = tags;
     if (all_tags.empty()) {
         auto inline_tags = getInlineTags(full_name);
@@ -433,7 +447,8 @@ void RuleContext::enterField(const SerdeValue &containing_message,
 
     // Use unique_ptr to avoid copy/move issues with FieldContext
     field_contexts_.push_back(std::make_unique<FieldContext>(
-        containing_message, full_name, name, field_type, all_tags));
+        containing_message, full_name, name, field_type, all_tags,
+        field_descriptor));
 }
 
 void RuleContext::exitField() {
