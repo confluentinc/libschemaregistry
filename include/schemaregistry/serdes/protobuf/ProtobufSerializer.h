@@ -478,15 +478,7 @@ ProtobufSerializer<T>::resolveDependencies(
 template <typename T>
 inline std::vector<int32_t> ProtobufSerializer<T>::toIndexArray(
     const google::protobuf::Descriptor *descriptor) {
-    std::vector<int32_t> indices;
-    const auto *file = descriptor->file();
-    for (int i = 0; i < file->message_type_count(); ++i) {
-        if (file->message_type(i) == descriptor) {
-            indices.push_back(i);
-            break;
-        }
-    }
-    return indices;
+    return utils::createMessageIndexArray(descriptor);
 }
 
 template <typename T>

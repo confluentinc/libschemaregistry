@@ -5,6 +5,7 @@
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/util/json_util.h>
 
+#include <algorithm>
 #include <memory>  // For std::dynamic_pointer_cast
 
 #include "absl/strings/escaping.h"
@@ -1084,7 +1085,8 @@ const google::protobuf::Descriptor* getMessageDescriptorByIndex(
     const google::protobuf::DescriptorPool* pool,
     const google::protobuf::FileDescriptor* file_desc,
     const std::vector<int32_t>& msg_index) {
-    if (msg_index.empty() || msg_index[0] >= file_desc->message_type_count()) {
+    if (msg_index.empty() || msg_index[0] < 0 ||
+        msg_index[0] >= file_desc->message_type_count()) {
         return nullptr;
     }
 
@@ -1093,7 +1095,7 @@ const google::protobuf::Descriptor* getMessageDescriptorByIndex(
 
     // Navigate nested types if there are more indexes
     for (size_t i = 1; i < msg_index.size() && descriptor; ++i) {
-        if (msg_index[i] < descriptor->nested_type_count()) {
+        if (msg_index[i] >= 0 && msg_index[i] < descriptor->nested_type_count()) {
             descriptor = descriptor->nested_type(msg_index[i]);
         } else {
             return nullptr;
@@ -1105,19 +1107,13 @@ const google::protobuf::Descriptor* getMessageDescriptorByIndex(
 
 std::vector<int32_t> createMessageIndexArray(
     const google::protobuf::Descriptor* descriptor) {
+    // The message's position among its siblings, then each containing message's, reversed:
+    // the path from the file's top-level messages down to it.
     std::vector<int32_t> indexes;
-
-    // Build index path from file descriptor to this message type
-    const google::protobuf::FileDescriptor* file = descriptor->file();
-
-    // Find the message type index within the file
-    for (int i = 0; i < file->message_type_count(); ++i) {
-        if (file->message_type(i) == descriptor) {
-            indexes.push_back(i);
-            return indexes;
-        }
+    for (const auto *d = descriptor; d != nullptr; d = d->containing_type()) {
+        indexes.push_back(d->index());
     }
-
+    std::reverse(indexes.begin(), indexes.end());
     return indexes;
 }
 
