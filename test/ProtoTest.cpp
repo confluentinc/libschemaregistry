@@ -132,6 +132,24 @@ TEST(ProtobufTest, MessageIndexesAreZigzagVarints) {
               (std::vector<int32_t>{1, 0}));
 }
 
+TEST(ProtobufTest, NegativeMessageIndexesAreRejected) {
+    // Zigzag makes odd bytes negative: 02 01 is [-1], 04 02 01 is [1, -1], 01 a count of -1.
+    for (const auto &indexes : std::vector<std::vector<uint8_t>>{
+             {0x02, 0x01}, {0x04, 0x02, 0x01}, {0x01}}) {
+        std::vector<uint8_t> bytes{0x00, 0x00, 0x00, 0x00, 0x01};
+        bytes.insert(bytes.end(), indexes.begin(), indexes.end());
+        SchemaId read(SerdeFormat::Protobuf);
+        EXPECT_THROW(read.readFromBytes(bytes), SerdeError);
+    }
+
+    const auto *file = test::Outer::descriptor()->file();
+    const auto *pool = google::protobuf::DescriptorPool::generated_pool();
+    EXPECT_EQ(utils::getMessageDescriptorByIndex(pool, file, {-1}), nullptr);
+    EXPECT_EQ(utils::getMessageDescriptorByIndex(pool, file, {1, -1}), nullptr);
+    EXPECT_EQ(utils::getMessageDescriptorByIndex(pool, file, {1, 0}),
+              test::Outer::Inner::descriptor());
+}
+
 struct IndexedRoundTrip {
     std::vector<uint8_t> indexes;
     std::string full_name;

@@ -1085,7 +1085,8 @@ const google::protobuf::Descriptor* getMessageDescriptorByIndex(
     const google::protobuf::DescriptorPool* pool,
     const google::protobuf::FileDescriptor* file_desc,
     const std::vector<int32_t>& msg_index) {
-    if (msg_index.empty() || msg_index[0] >= file_desc->message_type_count()) {
+    if (msg_index.empty() || msg_index[0] < 0 ||
+        msg_index[0] >= file_desc->message_type_count()) {
         return nullptr;
     }
 
@@ -1094,7 +1095,7 @@ const google::protobuf::Descriptor* getMessageDescriptorByIndex(
 
     // Navigate nested types if there are more indexes
     for (size_t i = 1; i < msg_index.size() && descriptor; ++i) {
-        if (msg_index[i] < descriptor->nested_type_count()) {
+        if (msg_index[i] >= 0 && msg_index[i] < descriptor->nested_type_count()) {
             descriptor = descriptor->nested_type(msg_index[i]);
         } else {
             return nullptr;

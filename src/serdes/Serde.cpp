@@ -117,8 +117,15 @@ std::pair<std::vector<int32_t>, size_t> SchemaId::readIndexArrayAndData(
     std::vector<int32_t> msg_idx;
     size_t pos = 0;
     int32_t len = readZigzagVarint(buf, pos);
+    if (len < 0) {
+        throw SerdeError("Negative protobuf message index count");
+    }
     for (int32_t i = 0; i < len && pos < buf.size(); ++i) {
-        msg_idx.push_back(readZigzagVarint(buf, pos));
+        int32_t index = readZigzagVarint(buf, pos);
+        if (index < 0) {
+            throw SerdeError("Negative protobuf message index");
+        }
+        msg_idx.push_back(index);
     }
 
     return {msg_idx, pos};
