@@ -150,6 +150,27 @@ TEST(ProtobufTest, NegativeMessageIndexesAreRejected) {
               test::Outer::Inner::descriptor());
 }
 
+TEST(ProtobufTest, MalformedMessageIndexesAreRejected) {
+    // An unterminated five-byte varint, a truncated one, a fifth byte beyond 32 bits, and a
+    // count of two with one index.
+    for (const auto &indexes : std::vector<std::vector<uint8_t>>{
+             {0x02, 0x80, 0x80, 0x80, 0x80, 0x80, 0x08, 0x01},
+             {0x02, 0x80},
+             {0x02, 0x80, 0x80, 0x80, 0x80, 0x10},
+             {0x04, 0x02}}) {
+        std::vector<uint8_t> bytes{0x00, 0x00, 0x00, 0x00, 0x01};
+        bytes.insert(bytes.end(), indexes.begin(), indexes.end());
+        SchemaId read(SerdeFormat::Protobuf);
+        EXPECT_THROW(read.readFromBytes(bytes), SerdeError);
+    }
+
+    // The largest index still reads: zigzag 0xFFFFFFFE in five bytes.
+    SchemaId read(SerdeFormat::Protobuf);
+    read.readFromBytes({0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0xFE, 0xFF, 0xFF, 0xFF, 0x0F});
+    EXPECT_EQ(read.getMessageIndexes().value_or(std::vector<int32_t>{}),
+              (std::vector<int32_t>{2147483647}));
+}
+
 struct IndexedRoundTrip {
     std::vector<uint8_t> indexes;
     std::string full_name;

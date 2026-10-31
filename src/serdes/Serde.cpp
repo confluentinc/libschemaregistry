@@ -27,18 +27,24 @@ void writeZigzagVarint(std::vector<uint8_t> &out, int32_t value) {
     out.push_back(static_cast<uint8_t>(v));
 }
 
+// Throws on a varint that runs past the buffer, or whose fifth byte continues or sets bits
+// beyond 32, rather than returning part of a value.
 int32_t readZigzagVarint(const std::vector<uint8_t> &buf, size_t &pos) {
     uint32_t v = 0;
-    int shift = 0;
-    while (pos < buf.size() && shift < 35) {
+    for (int shift = 0; shift < 35; shift += 7) {
+        if (pos >= buf.size()) {
+            throw SerdeError("Truncated varint in protobuf message indexes");
+        }
         uint8_t byte = buf[pos++];
-        v |= static_cast<uint32_t>(byte & 0x7F) << shift;
-        if ((byte & 0x80) == 0) {
+        if (shift == 28 && (byte & 0xF0) != 0) {
             break;
         }
-        shift += 7;
+        v |= static_cast<uint32_t>(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) {
+            return static_cast<int32_t>((v >> 1) ^ (~(v & 1) + 1));
+        }
     }
-    return static_cast<int32_t>((v >> 1) ^ (~(v & 1) + 1));
+    throw SerdeError("Varint in protobuf message indexes is too long");
 }
 
 }  // namespace
@@ -120,7 +126,7 @@ std::pair<std::vector<int32_t>, size_t> SchemaId::readIndexArrayAndData(
     if (len < 0) {
         throw SerdeError("Negative protobuf message index count");
     }
-    for (int32_t i = 0; i < len && pos < buf.size(); ++i) {
+    for (int32_t i = 0; i < len; ++i) {
         int32_t index = readZigzagVarint(buf, pos);
         if (index < 0) {
             throw SerdeError("Negative protobuf message index");
