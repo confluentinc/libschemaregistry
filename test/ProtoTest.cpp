@@ -37,6 +37,7 @@
 
 #include "test/dep.pb.h"
 #include "test/example.pb.h"
+#include "test/nested.pb.h"
 #include "test/test.pb.h"
 
 using namespace schemaregistry::serdes;
@@ -113,6 +114,74 @@ TEST(ProtobufTest, BasicSerialization) {
         EXPECT_EQ(obj2->works(i), obj.works(i));
     }
     EXPECT_EQ(obj2->oneof_string(), obj.oneof_string());
+}
+
+TEST(ProtobufTest, MessageIndexesAreZigzagVarints) {
+    // The bytes every other client writes and reads: [1] is 02 02, [1, 0] is 04 02 00.
+    auto encoded = [](const std::vector<int32_t> &indexes) {
+        auto bytes = SchemaId(SerdeFormat::Protobuf, 1, std::nullopt, indexes).idToBytes();
+        return std::vector<uint8_t>(bytes.begin() + 5, bytes.end());
+    };
+    EXPECT_EQ(encoded({0}), (std::vector<uint8_t>{0x00}));
+    EXPECT_EQ(encoded({1}), (std::vector<uint8_t>{0x02, 0x02}));
+    EXPECT_EQ(encoded({1, 0}), (std::vector<uint8_t>{0x04, 0x02, 0x00}));
+
+    SchemaId read(SerdeFormat::Protobuf);
+    read.readFromBytes({0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x02, 0x00});
+    EXPECT_EQ(read.getMessageIndexes().value_or(std::vector<int32_t>{}),
+              (std::vector<int32_t>{1, 0}));
+}
+
+struct IndexedRoundTrip {
+    std::vector<uint8_t> indexes;
+    std::string full_name;
+    std::string data;
+};
+
+// Serializes the message and reads it back with a dynamic deserializer, which finds its type by
+// the record's message indexes. The message read lives in the deserializer's pool, so only its
+// type's name and bytes are returned.
+template <typename T>
+static IndexedRoundTrip roundTripByIndexes(const T &obj) {
+    std::vector<std::string> urls = {"mock://"};
+    auto client_config = std::make_shared<const ClientConfiguration>(urls);
+    auto client = std::make_shared<MockSchemaRegistryClient>(client_config);
+    auto rule_registry = std::make_shared<RuleRegistry>();
+    ProtobufSerializer<T> ser(client, std::nullopt, rule_registry,
+                              SerializerConfig::createDefault(),
+                              defaultReferenceSubjectNameStrategy);
+    SerializationContext ser_ctx;
+    ser_ctx.topic = "test";
+    ser_ctx.serde_type = SerdeType::Value;
+    ser_ctx.serde_format = SerdeFormat::Protobuf;
+    ser_ctx.headers = std::nullopt;
+    auto bytes = ser.serialize(ser_ctx, obj);
+    ProtobufDeserializer<> deser(client, rule_registry, DeserializerConfig::createDefault());
+    auto read = deser.deserialize(ser_ctx, bytes);
+    std::vector<uint8_t> indexes(bytes.begin() + 5,
+                                 bytes.end() - static_cast<long>(obj.ByteSizeLong()));
+    if (!read) {
+        return {indexes, "", ""};
+    }
+    return {indexes, std::string(read->GetDescriptor()->full_name()), read->SerializeAsString()};
+}
+
+TEST(ProtobufTest, SecondAndNestedMessagesKeepTheirIndexes) {
+    // The file's second message, [1]
+    test::Pizza pizza;
+    pizza.set_size("large");
+    auto pizza_read = roundTripByIndexes(pizza);
+    EXPECT_EQ(pizza_read.indexes, (std::vector<uint8_t>{0x02, 0x02}));
+    EXPECT_EQ(pizza_read.full_name, "test.Pizza");
+    EXPECT_EQ(pizza_read.data, pizza.SerializeAsString());
+
+    // A message nested in the file's second message, [1, 0]
+    test::Outer::Inner inner;
+    inner.set_name("nested");
+    auto inner_read = roundTripByIndexes(inner);
+    EXPECT_EQ(inner_read.indexes, (std::vector<uint8_t>{0x04, 0x02, 0x00}));
+    EXPECT_EQ(inner_read.full_name, "test.Outer.Inner");
+    EXPECT_EQ(inner_read.data, inner.SerializeAsString());
 }
 
 TEST(ProtobufTest, DynamicDeserialization) {
