@@ -15,6 +15,40 @@
 
 namespace schemaregistry::serdes {
 
+namespace {
+
+void writeZigzagVarint(std::vector<uint8_t> &out, int32_t value) {
+    uint32_t v = (static_cast<uint32_t>(value) << 1) ^
+                 static_cast<uint32_t>(value >> 31);
+    while (v >= 0x80) {
+        out.push_back(static_cast<uint8_t>((v & 0x7F) | 0x80));
+        v >>= 7;
+    }
+    out.push_back(static_cast<uint8_t>(v));
+}
+
+// Throws on a varint that runs past the buffer, or whose fifth byte continues or sets bits
+// beyond 32, rather than returning part of a value.
+int32_t readZigzagVarint(const std::vector<uint8_t> &buf, size_t &pos) {
+    uint32_t v = 0;
+    for (int shift = 0; shift < 35; shift += 7) {
+        if (pos >= buf.size()) {
+            throw SerdeError("Truncated varint in protobuf message indexes");
+        }
+        uint8_t byte = buf[pos++];
+        if (shift == 28 && (byte & 0xF0) != 0) {
+            break;
+        }
+        v |= static_cast<uint32_t>(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) {
+            return static_cast<int32_t>((v >> 1) ^ (~(v & 1) + 1));
+        }
+    }
+    throw SerdeError("Varint in protobuf message indexes is too long");
+}
+
+}  // namespace
+
 // SchemaId implementation
 
 SchemaId::SchemaId(SerdeFormat serde_format, std::optional<int32_t> id,
@@ -85,30 +119,19 @@ std::pair<std::vector<int32_t>, size_t> SchemaId::readIndexArrayAndData(
         return {std::vector<int32_t>{0}, 1};
     }
 
+    // The array length, then each index, as zigzag varints like every other client's
     std::vector<int32_t> msg_idx;
     size_t pos = 0;
-
-    // Read variable-length encoded array length
-    int32_t len = 0;
-    int shift = 0;
-    while (pos < buf.size()) {
-        uint8_t byte = buf[pos++];
-        len |= (byte & 0x7F) << shift;
-        if ((byte & 0x80) == 0) break;
-        shift += 7;
+    int32_t len = readZigzagVarint(buf, pos);
+    if (len < 0) {
+        throw SerdeError("Negative protobuf message index count");
     }
-
-    // Read variable-length encoded values
-    for (int i = 0; i < len && pos < buf.size(); ++i) {
-        int32_t value = 0;
-        shift = 0;
-        while (pos < buf.size()) {
-            uint8_t byte = buf[pos++];
-            value |= (byte & 0x7F) << shift;
-            if ((byte & 0x80) == 0) break;
-            shift += 7;
+    for (int32_t i = 0; i < len; ++i) {
+        int32_t index = readZigzagVarint(buf, pos);
+        if (index < 0) {
+            throw SerdeError("Negative protobuf message index");
         }
-        msg_idx.push_back(value);
+        msg_idx.push_back(index);
     }
 
     return {msg_idx, pos};
@@ -181,23 +204,11 @@ std::optional<std::vector<uint8_t>> SchemaId::toEncodedIndexArray() const {
         return std::vector<uint8_t>{0};
     }
 
+    // The array length, then each index, as zigzag varints like every other client's
     std::vector<uint8_t> result;
-
-    // Encode array length using variable-length encoding
-    int32_t len = static_cast<int32_t>(msg_idx.size());
-    while (len >= 0x80) {
-        result.push_back((len & 0x7F) | 0x80);
-        len >>= 7;
-    }
-    result.push_back(len & 0x7F);
-
-    // Encode each value using variable-length encoding
+    writeZigzagVarint(result, static_cast<int32_t>(msg_idx.size()));
     for (int32_t value : msg_idx) {
-        while (value >= 0x80) {
-            result.push_back((value & 0x7F) | 0x80);
-            value >>= 7;
-        }
-        result.push_back(value & 0x7F);
+        writeZigzagVarint(result, value);
     }
 
     return result;
