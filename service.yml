@@ -24,5 +24,6 @@ codeowners:
   enable: true
 renovatebot:
   enable: true
-  automerge:
+automerge:
+  renovate:
     enable: false
